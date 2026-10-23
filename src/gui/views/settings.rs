@@ -100,12 +100,12 @@ pub fn encryption_info_card(app: &mut AeternaApp, ui: &mut Ui) {
                 ui.horizontal_wrapped(|ui| {
                     ui.hyperlink_to(
                         "docs/ENCRYPTION.md",
-                        "https://github.com/baba537/AeternaVault/blob/main/docs/ENCRYPTION.md",
+                        "https://github.com/Benett53/AeternaVault/blob/main/docs/ENCRYPTION.md",
                     );
                     widgets::secondary_text(ui, "·");
                     ui.hyperlink_to(
                         "tools/aeterna-decrypt.py",
-                        "https://github.com/baba537/AeternaVault/blob/main/tools/aeterna-decrypt.py",
+                        "https://github.com/Benett53/AeternaVault/blob/main/tools/aeterna-decrypt.py",
                     );
                 });
             });

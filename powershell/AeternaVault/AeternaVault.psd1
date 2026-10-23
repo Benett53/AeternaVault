@@ -26,8 +26,8 @@
     PrivateData          = @{
         PSData = @{
             Tags       = @('backup', 'restore', 'encryption', 'Windows', 'Linux')
-            LicenseUri = 'https://github.com/baba537/AeternaVault/blob/main/LICENSE-MIT'
-            ProjectUri = 'https://github.com/baba537/AeternaVault'
+            LicenseUri = 'https://github.com/Benett53/AeternaVault/blob/main/LICENSE-MIT'
+            ProjectUri = 'https://github.com/Benett53/AeternaVault'
         }
     }
 }

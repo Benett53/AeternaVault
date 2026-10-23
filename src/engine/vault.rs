@@ -305,7 +305,7 @@ const OPEN_FILE_CONTENT: &str = "\
 AeternaVault encrypted backup
 Double-click this file to open the encrypted backups in this destination with
 AeternaVault, or run: aeternavault-cli list --destination \"<this folder's parent>\"
-https://github.com/baba537/AeternaVault
+https://github.com/Benett53/AeternaVault
 ";
 
 #[cfg(test)]

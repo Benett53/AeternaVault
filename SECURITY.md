@@ -19,7 +19,7 @@ Reviews of the encryption format ([docs/ENCRYPTION.md](docs/ENCRYPTION.md)) are 
 ## Verifying a download
 
 - Compare the SHA-256 checksum with `SHA256SUMS.txt` of the release.
-- Check the build provenance: `gh attestation verify <file> --repo baba537/AeternaVault`.
+- Check the build provenance: `gh attestation verify <file> --repo Benett53/AeternaVault`.
 - `sbom.cdx.json` lists every dependency (CycloneDX).
 
 ## Limitations

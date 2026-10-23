@@ -51,4 +51,4 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 - Encrypted backups could be browsed and opened without entering the passphrase when the key was remembered. Reading encrypted names or contents now always requires the passphrase or recovery key.
 - The passphrase criteria were shown only when pointing at the strength bar; the (?) button now shows them too and keeps them open when clicked.
 
-[0.5.0]: https://github.com/baba537/AeternaVault/releases/tag/v0.5.0
+[0.5.0]: https://github.com/Benett53/AeternaVault/releases/tag/v0.5.0
