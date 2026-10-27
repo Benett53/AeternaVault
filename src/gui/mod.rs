@@ -426,6 +426,7 @@ pub struct AeternaApp {
     /// the backups at this folder; the configuration is not changed.
     pub viewer: Option<PathBuf>,
     pub nav: input::Navigation,
+    pub updater: crate::update::Updater,
     config_dirty: bool,
 }
 
@@ -438,7 +439,16 @@ impl AeternaApp {
             .map(PathBuf::from)
             .unwrap_or_default();
         let state = State::load(&paths.config_file);
+        let updater = {
+            let ctx = ctx.clone();
+            crate::update::Updater::new(
+                loaded.config.updates.check_automatically,
+                config_dir.join("last-update-check"),
+                move || ctx.request_repaint(),
+            )
+        };
         let mut app = Self {
+            updater,
             settings: SettingsUi {
                 exclude_text: loaded.config.exclude.join("\n"),
                 invalid_patterns: Vec::new(),
@@ -636,10 +646,23 @@ impl AeternaApp {
                     for (number, view) in self.visible_views().into_iter().enumerate() {
                         let selected = self.view == view && matches!(self.screen, Screen::Main);
                         let label = view_label(t, view);
-                        if widgets::nav_tab(ui, label, selected, true)
-                            .on_hover_text(format!("Ctrl+{}", number + 1))
-                            .clicked()
-                        {
+                        let update_ready =
+                            view == View::Settings && self.updater.available().is_some();
+                        let tab = widgets::nav_tab(ui, label, selected, true);
+                        // A small dot instead of a pop-up when a new version is out.
+                        if update_ready {
+                            ui.painter().circle_filled(
+                                egui::pos2(tab.rect.right() + 6.0, tab.rect.top() + 7.0),
+                                3.5,
+                                p.accent,
+                            );
+                        }
+                        let hint = if update_ready {
+                            format!("Ctrl+{} · {}", number + 1, t.update_tab_hint)
+                        } else {
+                            format!("Ctrl+{}", number + 1)
+                        };
+                        if tab.on_hover_text(hint).clicked() {
                             self.navigate(&ctx, view);
                         }
                     }
@@ -894,6 +917,11 @@ fn theme_toggle(ui: &mut Ui, dark: bool) -> egui::Response {
 impl eframe::App for AeternaApp {
     /// Runs before every frame, and also while the window is hidden.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // The new version is being installed and takes over from here.
+        if self.updater.wants_exit() {
+            self.quit(ctx);
+            return;
+        }
         self.poll_jobs(ctx);
         self.poll_manage_job(ctx);
         self.background_tick(ctx);

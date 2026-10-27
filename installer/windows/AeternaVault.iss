@@ -88,6 +88,8 @@ Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environmen
 [Run]
 Filename: "{app}\aeternavault.exe"; Description: "{cm:LaunchProgram,AeternaVault}"; \
     Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\aeternavault.exe"; Parameters: "--updated"; \
+    Flags: nowait runasoriginaluser; Check: RestartAfterUpdate
 
 [UninstallRun]
 ; Autostart, Explorer menu, double-click association (all per user, HKCU).
@@ -128,6 +130,13 @@ begin
   Delete(Path, P, Length(Dir) + 1);
   Path := Copy(Path, 2, Length(Path) - 2);
   RegWriteExpandStringValue(HKLM, EnvKey, 'Path', Path);
+end;
+
+{ AeternaVault passes /restartapp=1 when it installs an update of itself, so it
+  comes back after the silent install instead of staying closed. }
+function RestartAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent() and (ExpandConstant('{param:restartapp|0}') = '1');
 end;
 
 { Asks running windows to quit. Returns False if one is still running. }

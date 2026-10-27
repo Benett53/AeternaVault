@@ -165,6 +165,12 @@ pub enum Command {
     /// Integration with the operating system.
     #[command(subcommand)]
     System(SystemCommand),
+    /// Install the latest release if it is newer.
+    Update {
+        /// Only report whether a newer version is available.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -539,6 +545,10 @@ fn run(command: Command, ctx: &mut Ctx) -> anyhow::Result<Outcome> {
         Command::History { last } => history_command(ctx, last),
         Command::Paths => paths_command(ctx),
         Command::System(command) => system(ctx, command),
+        Command::Update { check } => match crate::update::run_cli(check) {
+            0 => Ok(Outcome::Ok),
+            _ => anyhow::bail!("the update did not complete"),
+        },
     }
 }
 

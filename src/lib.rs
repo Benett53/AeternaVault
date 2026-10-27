@@ -20,3 +20,4 @@ pub mod logging;
 pub mod paths;
 pub mod platform;
 pub mod state;
+pub mod update;

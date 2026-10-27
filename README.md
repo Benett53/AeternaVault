@@ -32,6 +32,7 @@ Backups of folders as plain, browsable folders, optionally encrypted. Windows an
 | Check and restore | Checksums for every file; restore to the original places or into a folder, all or single folders. |
 | Command line | `aeternavault-cli` does everything the window does, with `--json`. PowerShell module on Windows. |
 | Interface | English and German; light, dark and black (OLED); keyboard shortcuts, mouse back/forward, middle-click scrolling. |
+| Updates | Button in the settings and `aeternavault-cli update`; optional check once a day, the only network connection. Installs only signed releases. |
 
 ## Download
 
@@ -45,6 +46,8 @@ Backups of folders as plain, browsable folders, optionally encrypted. Windows an
 | | `aeternavault-cli-<version>-linux-x64.tar.gz` | command line only |
 
 All files are on the [releases page](https://github.com/Benett53/AeternaVault/releases/latest), with `SHA256SUMS.txt` and build attestations.
+
+Later versions are installed from Settings → Updates or with `aeternavault-cli update`, in the same form as the first one (setup, zip, `.deb` or tarball). The checksum list is signed with minisign; nothing is installed unless the signature and the checksum match.
 
 ## Usage
 

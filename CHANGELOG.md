@@ -2,10 +2,14 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] - 2026-10-27
 
 ### Added
 
+- Updates from the settings: the current version, "Check for updates" and "Download and install". A small dot on the Settings tab shows when a new version is out; there are no pop-ups. Installing waits until a running backup or restore has finished.
+- Automatic check at most once a day, switchable in the settings. This is the only network connection.
+- `aeternavault-cli update` installs the latest release; `--check` only reports it.
+- Releases carry a minisign signature of `SHA256SUMS.txt`. An update is installed only if the signature and the checksum match.
 - A note when the destination is on the same drive as folders that are backed up (window and `aeternavault-cli status`).
 
 ### Fixed
@@ -51,4 +55,5 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 - Encrypted backups could be browsed and opened without entering the passphrase when the key was remembered. Reading encrypted names or contents now always requires the passphrase or recovery key.
 - The passphrase criteria were shown only when pointing at the strength bar; the (?) button now shows them too and keeps them open when clicked.
 
+[0.6.0]: https://github.com/Benett53/AeternaVault/releases/tag/v0.6.0
 [0.5.0]: https://github.com/Benett53/AeternaVault/releases/tag/v0.5.0

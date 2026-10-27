@@ -33,6 +33,9 @@ struct Args {
     /// Close every running AeternaVault window of this user, then exit.
     #[arg(long, conflicts_with = "background")]
     quit: bool,
+    /// Started by an update; waits for the previous copy to finish.
+    #[arg(long, hide = true)]
+    updated: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -82,9 +85,9 @@ fn main() -> ExitCode {
                 tracing::error!("folder could not be handed to the window: {err}");
                 return ExitCode::FAILURE;
             }
-            run_window(paths, loaded, log, false)
+            run_window(paths, loaded, log, false, false)
         }
-        None => run_window(paths, loaded, log, args.background),
+        None => run_window(paths, loaded, log, args.background, args.updated),
     }
 }
 
@@ -93,9 +96,19 @@ fn run_window(
     loaded: config::Loaded,
     log: logging::Logging,
     background: bool,
+    updated: bool,
 ) -> ExitCode {
     let key = platform::instance::key_for(&paths.config_file);
-    let Some(_instance) = platform::instance::claim(&key) else {
+    // After an update the previous copy may still hold its place for a moment.
+    let mut instance = platform::instance::claim(&key);
+    for _ in 0..50 {
+        if instance.is_some() || !updated {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        instance = platform::instance::claim(&key);
+    }
+    let Some(_instance) = instance else {
         if !background && !platform::instance::activate_existing(&key) {
             tracing::warn!("another AeternaVault window is running but did not respond");
         }

@@ -434,6 +434,21 @@ pub struct Fonts {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct Updates {
+    /// Ask GitHub for a newer release at most once a day.
+    pub check_automatically: bool,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check_automatically: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub language: LanguageSetting,
     pub appearance: Appearance,
@@ -448,6 +463,7 @@ pub struct Config {
     pub retention: Retention,
     pub background: Background,
     pub advanced: Advanced,
+    pub updates: Updates,
     pub fonts: Fonts,
     #[serde(
         rename = "schedule",
@@ -475,6 +491,7 @@ impl Default for Config {
             retention: Retention::default(),
             background: Background::default(),
             advanced: Advanced::default(),
+            updates: Updates::default(),
             fonts: Fonts::default(),
             schedules: Vec::new(),
             sources: Vec::new(),

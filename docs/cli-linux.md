@@ -79,6 +79,15 @@ aeternavault-cli status --json | jq .
 
 PowerShell 7 users can load the module from the package: `Import-Module /usr/share/aeternavault/powershell/AeternaVault` (see [cli-windows.md](cli-windows.md#powershell-module)).
 
+## Update
+
+```sh
+aeternavault-cli update --check           # is a newer version out?
+aeternavault-cli update                   # download, verify and install it
+```
+
+A `.deb` installation is updated through apt and asks for the password; a tarball installation runs its `install.sh` again.
+
 ## Uninstall
 
 ```sh

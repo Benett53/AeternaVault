@@ -208,6 +208,8 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
 
     background_card(app, ui);
     ui.add_space(14.0);
+    updates_card(app, ui);
+    ui.add_space(14.0);
 
     widgets::card(ui, |ui| {
         widgets::section_title(ui, t.exclusions_title);
@@ -546,6 +548,82 @@ fn background_card(app: &mut AeternaApp, ui: &mut Ui) {
             {
                 app.set_explorer_menu(on);
             }
+        }
+    });
+}
+
+/// Version, update state and the button that acts on it.
+fn updates_card(app: &mut AeternaApp, ui: &mut Ui) {
+    use crate::update::{CURRENT_VERSION, Status};
+
+    let t = app.lang.t();
+    let status = app.updater.status();
+    let busy_task = app.is_busy();
+    widgets::card(ui, |ui| {
+        widgets::section_title(ui, t.updates_title);
+        let p = *theme::palette(ui);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("AeternaVault {CURRENT_VERSION}"));
+            let line = match &status {
+                Status::Idle => None,
+                Status::Checking => Some((t.update_checking.to_string(), p.text_secondary)),
+                Status::UpToDate => Some((t.update_up_to_date.to_string(), p.text_secondary)),
+                Status::Available(release) => Some((
+                    format!("{} {}", t.update_available, release.version),
+                    p.accent,
+                )),
+                Status::Downloading(received, Some(total)) if *total > 0 => Some((
+                    format!("{} {} %", t.update_downloading, received * 100 / total),
+                    p.text_secondary,
+                )),
+                Status::Downloading(..) => {
+                    Some((t.update_downloading.to_string(), p.text_secondary))
+                }
+                Status::Installing => Some((t.update_installing.to_string(), p.text_secondary)),
+                Status::Failed(error) => Some((error.clone(), p.warning)),
+            };
+            if let Some((text, color)) = line {
+                ui.label(egui::RichText::new(text).color(color));
+            }
+        });
+        ui.add_space(6.0);
+        let working = matches!(
+            status,
+            Status::Checking | Status::Downloading(..) | Status::Installing
+        );
+        let ctx = ui.ctx().clone();
+        let wake = move || ctx.request_repaint();
+        ui.horizontal(|ui| match &status {
+            Status::Available(release) => {
+                let enabled = !working && !busy_task;
+                let label = format!("{} {}", t.update_install, release.version);
+                if widgets::button(ui, ButtonKind::Secondary, &label, enabled).clicked() {
+                    app.updater.install(release.clone(), wake);
+                }
+                if busy_task {
+                    widgets::secondary_text(ui, t.update_wait_for_task);
+                }
+            }
+            _ => {
+                if widgets::button(ui, ButtonKind::Secondary, t.update_check, !working).clicked() {
+                    app.updater.check(wake);
+                }
+            }
+        });
+        if working {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        ui.add_space(4.0);
+        let before = app.config.updates.check_automatically;
+        ui.checkbox(
+            &mut app.config.updates.check_automatically,
+            t.update_automatic,
+        );
+        if before != app.config.updates.check_automatically {
+            app.updater
+                .set_automatic(app.config.updates.check_automatically);
+            app.mark_dirty();
         }
     });
 }

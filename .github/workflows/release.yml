@@ -40,11 +40,18 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Checksums
+      # The checksum list and its signature are what the in-app updater trusts.
+      - name: Checksums and signature
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           cd dist
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          echo "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          minisign -S -s "$RUNNER_TEMP/minisign.key" -m SHA256SUMS.txt -x SHA256SUMS.txt.minisig -t "AeternaVault ${GITHUB_REF_NAME}"
+          rm "$RUNNER_TEMP/minisign.key"
 
       - name: Build provenance attestation
         uses: actions/attest-build-provenance@v4
