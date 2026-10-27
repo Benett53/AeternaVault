@@ -598,13 +598,26 @@ fn install(plan: &Plan, file: &Path, dir: &Path, restart: bool) -> Result<()> {
     Ok(())
 }
 
+/// The system `tar`. On Windows the one in System32 (bsdtar, reads zip files),
+/// not whichever `tar` comes first on the PATH.
+fn tar() -> PathBuf {
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        let tar = PathBuf::from(root).join("System32").join("tar.exe");
+        if tar.is_file() {
+            return tar;
+        }
+    }
+    PathBuf::from("tar")
+}
+
 /// Unpack a release archive with the system `tar` (which reads zip files on
 /// Windows too) and return the folder that holds the programs.
 fn unpack(archive: &Path, dir: &Path) -> Result<PathBuf> {
     let target = dir.join("unpacked");
     let _ = std::fs::remove_dir_all(&target);
     std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    let status = std::process::Command::new("tar")
+    let status = std::process::Command::new(tar())
         .arg("-xf")
         .arg(archive)
         .arg("-C")
