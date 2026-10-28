@@ -10,6 +10,24 @@ fn c_path(path: &Path) -> io::Result<CString> {
 }
 
 /// Free space for unprivileged users on the file system that holds `path`.
+/// (free for this user, total) bytes of the file system holding `path`.
+pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+    let mut probe = path;
+    while !probe.exists() {
+        probe = probe.parent()?;
+    }
+    let path = c_path(probe).ok()?;
+    // SAFETY: valid NUL-terminated string; `stat` is plain data filled by the call.
+    unsafe {
+        let mut stat: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(path.as_ptr(), &mut stat) != 0 {
+            return None;
+        }
+        let unit = stat.f_frsize as u64;
+        Some((stat.f_bavail as u64 * unit, stat.f_blocks as u64 * unit))
+    }
+}
+
 pub fn free_space(path: &Path) -> Option<u64> {
     let mut probe = path;
     while !probe.exists() {

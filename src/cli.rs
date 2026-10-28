@@ -162,6 +162,10 @@ pub enum Command {
     },
     /// Where configuration, history and logs are stored.
     Paths,
+    /// Notifications after backups (e-mail, Teams, Telegram, ntfy, Slack,
+    /// Discord, Gotify, webhook). Thresholds and texts: `config set notifications.…`.
+    #[command(subcommand, alias = "notifications")]
+    Notify(NotifyCommand),
     /// Integration with the operating system.
     #[command(subcommand)]
     System(SystemCommand),
@@ -414,6 +418,62 @@ pub enum ConfigCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum NotifyCommand {
+    /// The channels and rules.
+    List,
+    /// Send a test message to all enabled channels, or to one.
+    Test {
+        channel: Option<String>,
+    },
+    /// Add a channel.
+    Add(Box<ChannelArgs>),
+    /// Remove a channel.
+    Remove {
+        channel: String,
+    },
+    Enable {
+        channel: String,
+    },
+    Disable {
+        channel: String,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct ChannelArgs {
+    #[arg(long, value_enum)]
+    kind: crate::notify::ChannelKind,
+    /// A name to tell channels apart, e.g. `Ops team`.
+    #[arg(long)]
+    name: Option<String>,
+    /// Webhook or server URL (ntfy topic URL, Teams Workflows URL, …).
+    #[arg(long)]
+    url: Option<String>,
+    /// Telegram bot token, ntfy/Gotify token, or bearer token for webhooks.
+    #[arg(long)]
+    token: Option<String>,
+    /// Telegram chat id.
+    #[arg(long)]
+    chat_id: Option<String>,
+    #[arg(long)]
+    smtp_host: Option<String>,
+    #[arg(long)]
+    smtp_port: Option<u16>,
+    #[arg(long, value_enum)]
+    smtp_security: Option<crate::notify::SmtpSecurity>,
+    #[arg(long)]
+    smtp_user: Option<String>,
+    /// SMTP password; with `--passphrase-stdin` it is read from standard input instead.
+    #[arg(long)]
+    smtp_password: Option<String>,
+    #[arg(long)]
+    from: Option<String>,
+    /// Recipients, separated by commas.
+    #[arg(long)]
+    to: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum SystemCommand {
     /// Run backup jobs in the background: on Windows by starting AeternaVault
     /// with Windows, on Linux with a systemd user timer.
@@ -544,6 +604,7 @@ fn run(command: Command, ctx: &mut Ctx) -> anyhow::Result<Outcome> {
         Command::Config(command) => config_command(ctx, command),
         Command::History { last } => history_command(ctx, last),
         Command::Paths => paths_command(ctx),
+        Command::Notify(command) => notify_command(ctx, command),
         Command::System(command) => system(ctx, command),
         Command::Update { check } => match crate::update::run_cli(check) {
             0 => Ok(Outcome::Ok),
@@ -2473,4 +2534,206 @@ fn system(ctx: &mut Ctx, command: SystemCommand) -> anyhow::Result<Outcome> {
         format!("{name}: {}", if on { "on" } else { "off" })
     });
     Ok(Outcome::Ok)
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+fn find_channel(config: &Config, wanted: &str) -> anyhow::Result<usize> {
+    let wanted = wanted.trim();
+    config
+        .notifications
+        .channels
+        .iter()
+        .position(|c| c.label().eq_ignore_ascii_case(wanted))
+        .or_else(|| {
+            wanted
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=config.notifications.channels.len()).contains(n))
+                .map(|n| n - 1)
+        })
+        .ok_or_else(|| anyhow!("no channel named {wanted:?}; see `aeternavault-cli notify list`"))
+}
+
+#[derive(Serialize)]
+struct ChannelView {
+    number: usize,
+    name: String,
+    kind: crate::notify::ChannelKind,
+    enabled: bool,
+    target: String,
+}
+
+fn notify_command(ctx: &mut Ctx, command: NotifyCommand) -> anyhow::Result<Outcome> {
+    use crate::notify::{self, Channel, ChannelKind};
+    let command_kind = match &command {
+        NotifyCommand::Enable { .. } => "enable",
+        _ => "",
+    };
+    match command {
+        NotifyCommand::List => {
+            let n = &ctx.config.notifications;
+            let views: Vec<ChannelView> = n
+                .channels
+                .iter()
+                .enumerate()
+                .map(|(i, c)| ChannelView {
+                    number: i + 1,
+                    name: c.label(),
+                    kind: c.kind,
+                    enabled: c.enabled,
+                    target: match c.kind {
+                        ChannelKind::Email => c.to.clone(),
+                        ChannelKind::Telegram => format!("chat {}", c.chat_id),
+                        _ => c.url.clone(),
+                    },
+                })
+                .collect();
+            let rules = serde_json::json!({
+                "on_success": n.on_success,
+                "on_problem": n.on_problem,
+                "on_skipped": n.on_skipped,
+                "low_space_percent": n.low_space_percent,
+                "low_space_gb": n.low_space_gb,
+                "channels": views,
+            });
+            ctx.print(&rules, || {
+                let mut out = format!(
+                    "On success: {}  On problems: {}  When skipped: {}  Low space below: {} % / {} GB\n",
+                    n.on_success, n.on_problem, n.on_skipped, n.low_space_percent, n.low_space_gb
+                );
+                if views.is_empty() {
+                    out += "No channels. Add one with `aeternavault-cli notify add --kind …`.";
+                }
+                for v in &views {
+                    out += &format!(
+                        "{:>2}  {:<20} {:<16} {:<4} {}\n",
+                        v.number,
+                        v.name,
+                        v.kind.name(),
+                        if v.enabled { "on" } else { "off" },
+                        v.target
+                    );
+                }
+                out.trim_end().to_string()
+            });
+            Ok(Outcome::Ok)
+        }
+        NotifyCommand::Test { channel } => {
+            let lang = Lang::resolve(ctx.config.language);
+            let message = notify::test_message(lang);
+            let targets: Vec<Channel> = match channel {
+                Some(wanted) => {
+                    vec![
+                        ctx.config.notifications.channels[find_channel(&ctx.config, &wanted)?]
+                            .clone(),
+                    ]
+                }
+                None => ctx
+                    .config
+                    .notifications
+                    .channels
+                    .iter()
+                    .filter(|c| c.enabled)
+                    .cloned()
+                    .collect(),
+            };
+            if targets.is_empty() {
+                bail!("no enabled channel; add one with `aeternavault-cli notify add`");
+            }
+            let mut results = Vec::new();
+            for c in &targets {
+                let result = notify::send(c, &message);
+                results.push(serde_json::json!({
+                    "channel": c.label(),
+                    "ok": result.is_ok(),
+                    "error": result.as_ref().err().map(|e| format!("{e:#}")),
+                }));
+            }
+            let failed = results.iter().filter(|r| r["ok"] == false).count();
+            ctx.print(&results, || {
+                results
+                    .iter()
+                    .map(|r| match r["error"].as_str() {
+                        None => format!("sent:   {}", r["channel"].as_str().unwrap_or_default()),
+                        Some(e) => {
+                            format!("failed: {}: {e}", r["channel"].as_str().unwrap_or_default())
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+            Ok(if failed == 0 {
+                Outcome::Ok
+            } else {
+                Outcome::Partly
+            })
+        }
+        NotifyCommand::Add(args) => {
+            let args = *args;
+            let mut channel = Channel {
+                name: args.name.unwrap_or_default(),
+                kind: args.kind,
+                url: args.url.unwrap_or_default(),
+                token: args.token.unwrap_or_default(),
+                chat_id: args.chat_id.unwrap_or_default(),
+                smtp_host: args.smtp_host.unwrap_or_default(),
+                smtp_security: args.smtp_security.unwrap_or_default(),
+                smtp_user: args.smtp_user.unwrap_or_default(),
+                smtp_password: args.smtp_password.unwrap_or_default(),
+                from: args.from.unwrap_or_default(),
+                to: args.to.unwrap_or_default(),
+                ..Channel::default()
+            };
+            if let Some(port) = args.smtp_port {
+                channel.smtp_port = port;
+            } else if channel.smtp_security == notify::SmtpSecurity::Tls {
+                channel.smtp_port = 465;
+            }
+            if channel.kind == ChannelKind::Email
+                && channel.smtp_password.is_empty()
+                && ctx.secret_stdin
+            {
+                channel.smtp_password = ctx.secret("SMTP password: ").unwrap_or_default();
+            }
+            let label = channel.label();
+            ctx.config.notifications.channels.push(channel);
+            ctx.save()?;
+            ctx.print(&serde_json::json!({ "added": label }), || {
+                format!(
+                    "Channel {label} added. Try it with `aeternavault-cli notify test \"{label}\"`."
+                )
+            });
+            Ok(Outcome::Ok)
+        }
+        NotifyCommand::Remove { channel } => {
+            let i = find_channel(&ctx.config, &channel)?;
+            let removed = ctx.config.notifications.channels.remove(i);
+            ctx.save()?;
+            let label = removed.label();
+            ctx.print(&serde_json::json!({ "removed": label }), || {
+                format!("Channel {label} removed.")
+            });
+            Ok(Outcome::Ok)
+        }
+        NotifyCommand::Enable { channel } | NotifyCommand::Disable { channel } => {
+            let on = matches!(command_kind, "enable");
+            let i = find_channel(&ctx.config, &channel)?;
+            ctx.config.notifications.channels[i].enabled = on;
+            ctx.save()?;
+            let label = ctx.config.notifications.channels[i].label();
+            ctx.print(
+                &serde_json::json!({ "channel": label, "enabled": on }),
+                || {
+                    format!(
+                        "Channel {label} {}.",
+                        if on { "enabled" } else { "disabled" }
+                    )
+                },
+            );
+            Ok(Outcome::Ok)
+        }
+    }
 }

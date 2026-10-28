@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "aeterna-vault"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Backups of folders as plain, browsable folders, optionally encrypted. Windows and Linux, window and command line."
@@ -80,8 +80,10 @@ zeroize = "1.9.0"
 zxcvbn = { version = "3.1", default-features = false }
 
 # Update check: HTTPS with rustls, and the signature of the checksum list.
-ureq = "3"
+ureq = { version = "3", features = ["json"] }
 minisign-verify = "0.3.0"
+# Notifications by e-mail (SMTP with TLS).
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "rustls", "ring", "webpki-roots"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

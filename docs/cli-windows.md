@@ -73,6 +73,15 @@ Restore-AVBackup latest -To D:\Restored -Passphrase $pass
 
 Destructive commands (`Restore-AVBackup`, `Remove-AVBackup`, `Invoke-AVPrune`) ask for confirmation; add `-Confirm:$false` in scripts. `-WhatIf` shows what would happen.
 
+## Notifications
+
+```sh
+aeternavault-cli notify add --kind ntfy --url https://ntfy.sh/your-topic
+aeternavault-cli notify test
+```
+
+E-mail, Teams, Telegram, Slack, Discord, Gotify and webhooks: see [notifications.md](notifications.md).
+
 ## Settings
 
 ```powershell

@@ -2,6 +2,13 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-10-28
+
+### Added
+
+- Notifications after backups: a summary on success, alerts when a backup failed, was incomplete or interrupted, and when the destination runs low on space. Channels: e-mail (SMTP), Microsoft Teams, Telegram, ntfy, Slack, Discord, Gotify and webhook. Thresholds (percent or GB) and all texts with placeholders are configurable. Settings → Notifications, `aeternavault-cli notify`, see `docs/notifications.md`.
+- A "Send test" button per channel and `aeternavault-cli notify test`.
+
 ## [0.6.0] - 2026-10-27
 
 ### Added

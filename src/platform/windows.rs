@@ -117,6 +117,26 @@ pub fn free_space(path: &Path) -> Option<u64> {
     (ok != 0).then_some(available)
 }
 
+/// (free for this user, total) bytes of the drive holding `path`.
+pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+    let mut probe = path;
+    while !probe.exists() {
+        probe = probe.parent()?;
+    }
+    let wide_path = wide(probe);
+    let (mut available, mut total) = (0u64, 0u64);
+    // SAFETY: valid NUL-terminated path; the out-parameters outlive the call.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide_path.as_ptr(),
+            &mut available,
+            &mut total,
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some((available, total))
+}
+
 /// Marks a file or folder as hidden (used for AeternaVault's metadata folder).
 pub fn set_hidden(path: &Path) -> io::Result<()> {
     let wide_path = wide(path);

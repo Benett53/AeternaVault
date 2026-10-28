@@ -586,6 +586,11 @@ impl AeternaApp {
             }
             TaskOutput::Backup(result) => {
                 self.record(crate::history::backup_event(&result, false));
+                crate::notify::after_manual_backup(
+                    &self.config,
+                    &result,
+                    self.lang.t().back_up_now,
+                );
                 let result = result.map_err(|e| {
                     tracing::error!("backup failed: {e}");
                     self.lang.error_message(&e)

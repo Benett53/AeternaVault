@@ -30,6 +30,7 @@ Backups of folders as plain, browsable folders, optionally encrypted. Windows an
 | Backup jobs | Daily, weekly, every few hours or at start; missed backups are made up. Windows: notification area; Linux: systemd user timer. |
 | Retention | Keep the newest, daily, weekly and monthly backups; the list shows when each backup will be removed. |
 | Check and restore | Checksums for every file; restore to the original places or into a folder, all or single folders. |
+| Notifications | Summary after backups, alerts on problems and low disk space by e-mail, Teams, Telegram, ntfy, Slack, Discord, Gotify or webhook. Thresholds and texts are configurable ([details](docs/notifications.md)). |
 | Command line | `aeternavault-cli` does everything the window does, with `--json`. PowerShell module on Windows. |
 | Interface | English and German; light, dark and black (OLED); keyboard shortcuts, mouse back/forward, middle-click scrolling. |
 | Updates | Button in the settings and `aeternavault-cli update`; optional check once a day, the only network connection. Installs only signed releases. |

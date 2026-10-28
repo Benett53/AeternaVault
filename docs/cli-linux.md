@@ -67,6 +67,15 @@ aeternavault-cli files latest             # asks for the passphrase
 - `--remember` stores the key in `~/.config/aeternavault/` (readable only by you) so jobs run unattended. Listing file names, restoring and extracting always need the passphrase.
 - In scripts: `printf '%s\n' "$PASS" | aeternavault-cli --passphrase-stdin files latest`, or the variable `AETERNAVAULT_PASSPHRASE`. Without a terminal, the CLI never waits for input.
 
+## Notifications
+
+```sh
+aeternavault-cli notify add --kind ntfy --url https://ntfy.sh/your-topic
+aeternavault-cli notify test
+```
+
+E-mail, Teams, Telegram, Slack, Discord, Gotify and webhooks: see [notifications.md](notifications.md).
+
 ## Settings
 
 ```sh

@@ -1,6 +1,6 @@
 @{
     RootModule           = 'AeternaVault.psm1'
-    ModuleVersion        = '0.5.0'
+    ModuleVersion        = '0.7.0'
     GUID                 = '5f0f3c52-8f7e-4b8e-9a51-6c2d7e1b4a90'
     Author               = 'AeternaVault contributors'
     Copyright            = 'MIT OR Apache-2.0'

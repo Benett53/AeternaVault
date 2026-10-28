@@ -464,6 +464,7 @@ pub struct Config {
     pub background: Background,
     pub advanced: Advanced,
     pub updates: Updates,
+    pub notifications: crate::notify::Notifications,
     pub fonts: Fonts,
     #[serde(
         rename = "schedule",
@@ -492,6 +493,7 @@ impl Default for Config {
             background: Background::default(),
             advanced: Advanced::default(),
             updates: Updates::default(),
+            notifications: crate::notify::Notifications::default(),
             fonts: Fonts::default(),
             schedules: Vec::new(),
             sources: Vec::new(),

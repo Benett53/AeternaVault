@@ -255,6 +255,23 @@ pub fn free_space(path: &Path) -> Option<u64> {
     }
 }
 
+/// (free, total) bytes of the drive holding `path`.
+pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(windows)]
+    {
+        windows::disk_space(path)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::disk_space(path)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// The window program (`aeternavault`), next to the running executable.
 /// Autostart, the Explorer menu and the file association start it.
 pub fn gui_executable() -> std::io::Result<PathBuf> {

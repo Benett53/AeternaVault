@@ -17,6 +17,7 @@ pub mod gui;
 pub mod history;
 pub mod i18n;
 pub mod logging;
+pub mod notify;
 pub mod paths;
 pub mod platform;
 pub mod state;

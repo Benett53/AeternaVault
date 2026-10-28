@@ -505,3 +505,50 @@ pub fn logo(ui: &mut Ui, size: f32) -> Response {
             .alt_text("AeternaVault"),
     )
 }
+
+/// A small (i) after a label: the explanation appears when pointing at it,
+/// and stays open below the row after a click. Returns whether it is open;
+/// show the text with [`info_text`] after the row.
+pub fn info_icon(ui: &mut Ui, id_salt: &str, text: &str) -> bool {
+    let p = *palette(ui);
+    let id = ui.id().with(("info", id_salt));
+    let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let size = 16.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let color = if response.hovered() || open {
+        p.accent
+    } else {
+        p.text_secondary
+    };
+    let painter = ui.painter();
+    painter.circle_stroke(
+        rect.center(),
+        size / 2.0 - 1.0,
+        egui::Stroke::new(1.2, color),
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "i",
+        egui::FontId::proportional(11.5),
+        color,
+    );
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(text);
+    if response.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_temp(id, open));
+    }
+    open
+}
+
+/// The explanation of an open [`info_icon`].
+pub fn info_text(ui: &mut Ui, open: bool, text: &str) {
+    if open {
+        let p = *palette(ui);
+        ui.add(
+            egui::Label::new(egui::RichText::new(text).size(13.5).color(p.text_secondary)).wrap(),
+        );
+    }
+}
