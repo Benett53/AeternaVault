@@ -364,6 +364,37 @@ pub fn schedule_dialog(app: &mut AeternaApp, ui: &mut Ui) {
             ui.checkbox(&mut schedule.catch_up, t.catch_up);
             ui.checkbox(&mut schedule.verify_after, t.verify_after)
                 .on_hover_text(t.verify_after_hint);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                widgets::secondary_text(ui, t.job_destination);
+                let shown = schedule
+                    .destination
+                    .as_ref()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| t.job_destination_general.to_string());
+                ui.label(shown);
+                if widgets::button(ui, ButtonKind::Quiet, t.choose, true).clicked()
+                    && let Some(folder) = rfd::FileDialog::new().pick_folder()
+                {
+                    schedule.destination = Some(folder);
+                }
+                if schedule.destination.is_some()
+                    && widgets::button(ui, ButtonKind::Quiet, t.job_destination_general, true)
+                        .clicked()
+                {
+                    schedule.destination = None;
+                }
+                widgets::info_icon(ui, "job-destination", t.job_destination_hint);
+            });
+            ui.horizontal(|ui| {
+                widgets::secondary_text(ui, t.job_before_command);
+                ui.add(
+                    egui::TextEdit::singleline(&mut schedule.before_command)
+                        .hint_text("pg_dump …")
+                        .desired_width(420.0),
+                );
+                widgets::info_icon(ui, "job-before", t.job_before_command_hint);
+            });
 
             ui.add_space(12.0);
             widgets::secondary_text(ui, t.schedule_what);

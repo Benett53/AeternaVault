@@ -347,3 +347,103 @@ mod tests {
         assert_eq!(entries[2].event, Event::Other);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Export (activity tab, `aeternavault-cli history --format`, notifications)
+// ---------------------------------------------------------------------------
+
+/// One line of an exported history.
+#[derive(Debug, Clone)]
+pub struct ExportRow {
+    pub at: chrono::DateTime<chrono::Local>,
+    pub severity: Severity,
+    pub title: String,
+    pub detail: String,
+}
+
+impl Severity {
+    pub fn code(self) -> &'static str {
+        match self {
+            Severity::Good => "ok",
+            Severity::Neutral => "info",
+            Severity::Warning => "warning",
+            Severity::Problem => "error",
+        }
+    }
+}
+
+/// The entries as rows in the given language, oldest first.
+pub fn export_rows(entries: &[Entry], lang: crate::i18n::Lang) -> Vec<ExportRow> {
+    entries
+        .iter()
+        .map(|e| {
+            let (title, detail, severity) = lang.history_entry(&e.event);
+            ExportRow {
+                at: e.at.with_timezone(&chrono::Local),
+                severity,
+                title,
+                detail,
+            }
+        })
+        .collect()
+}
+
+/// Plain text, one entry per line (detail indented below).
+pub fn to_text(rows: &[ExportRow]) -> String {
+    let mut out = String::new();
+    for row in rows {
+        out += &format!(
+            "{}  {:<7}  {}\n",
+            row.at.format("%Y-%m-%d %H:%M:%S"),
+            row.severity.code(),
+            row.title
+        );
+        if !row.detail.is_empty() {
+            for line in row.detail.lines() {
+                out += &format!("                              {line}\n");
+            }
+        }
+    }
+    out
+}
+
+/// CSV (RFC 4180) with a header line; opens in Excel and LibreOffice.
+pub fn to_csv(rows: &[ExportRow]) -> String {
+    fn field(text: &str) -> String {
+        if text.contains([',', '"', '\n', '\r', ';']) {
+            format!("\"{}\"", text.replace('"', "\"\""))
+        } else {
+            text.to_string()
+        }
+    }
+    let mut out = String::from("time,severity,event,detail\r\n");
+    for row in rows {
+        out += &format!(
+            "{},{},{},{}\r\n",
+            row.at.format("%Y-%m-%d %H:%M:%S"),
+            row.severity.code(),
+            field(&row.title),
+            field(&row.detail)
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn csv_quotes_fields() {
+        let rows = vec![ExportRow {
+            at: chrono::Local::now(),
+            severity: Severity::Problem,
+            title: "Backup \"A\" failed".into(),
+            detail: "disk full, 3 files".into(),
+        }];
+        let csv = to_csv(&rows);
+        assert!(csv.starts_with("time,severity,event,detail\r\n"));
+        assert!(csv.contains(",error,\"Backup \"\"A\"\" failed\",\"disk full, 3 files\"\r\n"));
+        assert!(to_text(&rows).contains("error"));
+    }
+}

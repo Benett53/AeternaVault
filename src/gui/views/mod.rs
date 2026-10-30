@@ -6,6 +6,7 @@ pub mod backup;
 pub mod backups;
 pub mod browse;
 pub mod jobs;
+pub mod notifications;
 pub mod restore;
 pub mod settings;
 pub mod working;

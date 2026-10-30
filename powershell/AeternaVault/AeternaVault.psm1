@@ -319,6 +319,37 @@ function Invoke-AVPrune {
     }
 }
 
+<#
+.SYNOPSIS
+Gives a backup a name shown next to its date; an empty name removes it.
+#>
+function Rename-AVBackup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0, ValueFromPipelineByPropertyName)][Alias('Id')][string]$Backup,
+        [Parameter(Mandatory, Position = 1)][AllowEmptyString()][string]$Name
+    )
+    process { Invoke-AVCli @('rename', $Backup, $Name) }
+}
+
+<#
+.SYNOPSIS
+Writes the activity history to a TXT or CSV file.
+.EXAMPLE
+Export-AVHistory -Path .ctivity.csv -Format Csv
+#>
+function Export-AVHistory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)][string]$Path,
+        [ValidateSet('Text', 'Csv', 'Json')][string]$Format = 'Csv',
+        [int]$Last = 0
+    )
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    Invoke-AVCli @('history', '--format', $Format.ToLowerInvariant(), '--last', "$Last", '--output', $full) -Raw | Out-Null
+    Get-Item -LiteralPath $full
+}
+
 # --- Folders and applications -------------------------------------------------
 
 <#
@@ -430,6 +461,8 @@ function ConvertTo-AVJobArgument {
     if ($Bound.ContainsKey('Name')) { $a.Add('--name'); $a.Add($Bound.Name) }
     if ($Bound.ContainsKey('NoCatchUp') -and $Bound.NoCatchUp) { $a.Add('--no-catch-up') }
     if ($Bound.ContainsKey('Verify')) { if ($Bound.Verify) { $a.Add('--verify') } else { $a.Add('--no-verify') } }
+    if ($Bound.ContainsKey('Destination')) { $a.Add('--destination'); $a.Add($(if ($Bound.Destination) { $Bound.Destination } else { '-' })) }
+    if ($Bound.ContainsKey('Before')) { $a.Add('--before'); $a.Add($(if ($Bound.Before) { $Bound.Before } else { '-' })) }
     , $a.ToArray()
 }
 
@@ -452,7 +485,11 @@ function New-AVJob {
         [switch]$AllFolders,
         [string]$Name,
         [switch]$NoCatchUp,
-        [switch]$Verify
+        [switch]$Verify,
+        # Back up to this folder instead of the general destination.
+        [string]$Destination,
+        # A command run before the backup, e.g. pg_dump into a backed-up folder.
+        [string]$Before
     )
     $bound = @{} + $PSBoundParameters
     if (-not $bound.ContainsKey('Every')) { $bound.Every = $Every }
@@ -475,7 +512,9 @@ function Set-AVJob {
         [switch]$AllFolders,
         [string]$Name,
         [switch]$NoCatchUp,
-        [bool]$Verify
+        [bool]$Verify,
+        [string]$Destination,
+        [string]$Before
     )
     process {
         $bound = @{} + $PSBoundParameters
@@ -767,5 +806,6 @@ Export-ModuleMember -Function @(
     'Get-AVRetention', 'Set-AVRetention', 'Get-AVDestination', 'Set-AVDestination',
     'Get-AVEncryption', 'Initialize-AVEncryption', 'Set-AVEncryption', 'Set-AVPassphrase',
     'Test-AVRecoveryKey', 'New-AVRecoveryKey', 'Set-AVRememberedKey',
-    'Get-AVConfig', 'Set-AVConfig', 'Get-AVSystem', 'Set-AVSystem'
+    'Get-AVConfig', 'Set-AVConfig', 'Get-AVSystem', 'Set-AVSystem',
+    'Rename-AVBackup', 'Export-AVHistory'
 )

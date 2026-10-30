@@ -2,6 +2,22 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-10-31
+
+### Added
+
+- Notifications have their own tab.
+- Activity: export as TXT or CSV, and "Send via notifications" (e-mail with the complete list as CSV attachment, chat services with the newest entries). `aeternavault-cli history --format csv|text|json --output FILE`, PowerShell `Export-AVHistory`.
+- Backup jobs can run a command before the backup (for example `pg_dump` into a folder that the job backs up). If it fails, the backup does not run and a problem is reported. `--before`, PowerShell `-Before`.
+- Backup jobs can use their own destination. `--destination`, PowerShell `-Destination`.
+- Backups carry the name of their job and can be renamed (Backups → Rename…, `aeternavault-cli rename`, `Rename-AVBackup`).
+- Administration guide: silent installation, database servers, monitoring (`docs/administration.md`).
+
+### Changed
+
+- The backup list shows how many files of an incremental backup are new or changed, so incremental backups no longer look like copies of each other.
+- Explanations moved behind (i) symbols (pointing or clicking shows them); more room in cards and between controls. The tab row wraps in narrow windows.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added

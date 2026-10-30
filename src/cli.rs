@@ -128,6 +128,13 @@ pub enum Command {
         #[arg(long, value_name = "DIR")]
         to: PathBuf,
     },
+    /// Give a backup a name (shown next to its date); an empty name removes it.
+    Rename {
+        backup: String,
+        name: String,
+        #[command(flatten)]
+        at: At,
+    },
     /// Remove old backups by the retention rules now.
     Prune {
         #[arg(long, short = 'y')]
@@ -156,9 +163,15 @@ pub enum Command {
     Config(ConfigCommand),
     /// What AeternaVault did (kept across sessions).
     History {
-        /// Only the newest entries.
+        /// Only the newest entries (0 = all).
         #[arg(long, default_value_t = 50)]
         last: usize,
+        /// `text` (default), `csv` or `json` (same as --json).
+        #[arg(long, value_enum, default_value_t = HistoryFormat::Text)]
+        format: HistoryFormat,
+        /// Write to this file instead of the screen.
+        #[arg(long, short = 'o', value_name = "FILE")]
+        output: Option<PathBuf>,
     },
     /// Where configuration, history and logs are stored.
     Paths,
@@ -296,6 +309,12 @@ pub struct JobSpec {
     /// Do not check the backup afterwards.
     #[arg(long, conflicts_with = "verify")]
     no_verify: bool,
+    /// Run this command before the backup (e.g. a database dump); `-` removes it.
+    #[arg(long, value_name = "COMMAND")]
+    before: Option<String>,
+    /// Back up to this folder instead of the general destination; `-` for the general one.
+    #[arg(long, value_name = "DIR")]
+    destination: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -415,6 +434,13 @@ pub enum ConfigCommand {
     Set { key: String, value: String },
     /// Path of the configuration file.
     Path,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HistoryFormat {
+    Text,
+    Csv,
+    Json,
 }
 
 #[derive(Subcommand, Debug)]
@@ -595,6 +621,18 @@ fn run(command: Command, ctx: &mut Ctx) -> anyhow::Result<Outcome> {
         Command::Delete { backups, yes } => delete(ctx, &backups, yes),
         Command::Move { backup, to } => move_backup(ctx, &backup, &to),
         Command::Prune { yes } => prune(ctx, yes),
+        Command::Rename { backup, name, at } => {
+            let destination = ctx.destination(&at)?;
+            let key = ctx.remembered_key(&destination);
+            let snapshot = ctx.find(&destination, &backup, key.as_ref())?;
+            manage::set_label(&snapshot, &name)
+                .with_context(|| format!("could not name {}", snapshot.id))?;
+            ctx.print(
+                &serde_json::json!({ "backup": snapshot.id, "name": name.trim() }),
+                || format!("Backup {} is now named {:?}.", snapshot.id, name.trim()),
+            );
+            Ok(Outcome::Ok)
+        }
         Command::Source(command) => source(ctx, command),
         Command::App(command) => app(ctx, command),
         Command::Job(command) => job(ctx, command),
@@ -602,7 +640,11 @@ fn run(command: Command, ctx: &mut Ctx) -> anyhow::Result<Outcome> {
         Command::Destination(command) => destination(ctx, command),
         Command::Encryption(command) => encryption(ctx, command),
         Command::Config(command) => config_command(ctx, command),
-        Command::History { last } => history_command(ctx, last),
+        Command::History {
+            last,
+            format,
+            output,
+        } => history_command(ctx, last, format, output),
         Command::Paths => paths_command(ctx),
         Command::Notify(command) => notify_command(ctx, command),
         Command::System(command) => system(ctx, command),
@@ -1001,6 +1043,8 @@ fn backup(ctx: &mut Ctx, full: bool, job: Option<String>) -> anyhow::Result<Outc
 #[derive(Serialize)]
 struct BackupView {
     id: String,
+    /// Name given with `rename`, or the job's name.
+    name: Option<String>,
     date: Option<String>,
     computer: String,
     status: String,
@@ -1032,6 +1076,7 @@ fn backup_views(ctx: &Ctx, list: &[SnapshotInfo]) -> Vec<BackupView> {
                 });
             BackupView {
                 id: s.id.clone(),
+                name: s.label.clone(),
                 date: s.started_at().map(local),
                 computer: s.computer.clone(),
                 status: match &s.header {
@@ -1075,7 +1120,9 @@ fn list(ctx: &mut Ctx, at: &At) -> anyhow::Result<Outcome> {
         for v in &views {
             out += &format!(
                 "{:<28} {:<24} {:>9} {:>10}  {:<9} {}\n",
-                v.id,
+                v.name
+                    .as_ref()
+                    .map_or_else(|| v.id.clone(), |n| format!("{} ({n})", v.id)),
                 v.status,
                 v.files.map(|f| Lang::En.count(f)).unwrap_or_default(),
                 v.bytes.map(bytes).unwrap_or_default(),
@@ -1876,6 +1923,20 @@ fn apply_spec(config: &Config, schedule: &mut Schedule, spec: &JobSpec) -> anyho
     if spec.no_verify {
         schedule.verify_after = false;
     }
+    if let Some(command) = &spec.before {
+        schedule.before_command = if command.trim() == "-" {
+            String::new()
+        } else {
+            command.trim().to_string()
+        };
+    }
+    if let Some(dir) = &spec.destination {
+        schedule.destination = if dir.as_os_str() == "-" {
+            None
+        } else {
+            Some(std::path::absolute(dir)?)
+        };
+    }
     Ok(())
 }
 
@@ -2397,10 +2458,39 @@ fn config_command(ctx: &mut Ctx, command: ConfigCommand) -> anyhow::Result<Outco
     Ok(Outcome::Ok)
 }
 
-fn history_command(ctx: &mut Ctx, last: usize) -> anyhow::Result<Outcome> {
+fn history_command(
+    ctx: &mut Ctx,
+    last: usize,
+    format: HistoryFormat,
+    output: Option<PathBuf>,
+) -> anyhow::Result<Outcome> {
     let entries = history::load(&ctx.paths.config_file);
-    let start = entries.len().saturating_sub(last);
+    let start = if last == 0 {
+        0
+    } else {
+        entries.len().saturating_sub(last)
+    };
     let entries = &entries[start..];
+    if format != HistoryFormat::Text || output.is_some() {
+        let lang = Lang::resolve(ctx.config.language);
+        let rows = history::export_rows(entries, lang);
+        let text = match format {
+            HistoryFormat::Csv => history::to_csv(&rows),
+            HistoryFormat::Json => serde_json::to_string_pretty(&entries)?,
+            HistoryFormat::Text => history::to_text(&rows),
+        };
+        match output {
+            Some(file) => {
+                std::fs::write(&file, text)
+                    .with_context(|| format!("could not write {}", file.display()))?;
+                if !ctx.json {
+                    println!("{} entries written to {}", rows.len(), file.display());
+                }
+            }
+            None => print!("{text}"),
+        }
+        return Ok(Outcome::Ok);
+    }
     ctx.print(&entries, || {
         entries
             .iter()

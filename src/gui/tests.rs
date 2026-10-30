@@ -504,6 +504,11 @@ fn render_readme_screenshots() {
     settle(&mut h);
     save(&mut h, "check-settings");
 
+    let mut h = build(1500.0, &|config| config.language = LanguageSetting::De);
+    goto(&mut h, View::Notifications);
+    settle(&mut h);
+    save(&mut h, "check-notifications");
+
     let mut h = build(800.0, &|config| config.language = LanguageSetting::De);
     settle(&mut h);
     h.state_mut().vault.dialog = Some(VaultDialog::ShowRecovery {

@@ -19,7 +19,7 @@ pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
         .fill(p.panel)
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::symmetric(26, 22))
+        .inner_margin(Margin::symmetric(30, 26))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui)
@@ -551,4 +551,15 @@ pub fn info_text(ui: &mut Ui, open: bool, text: &str) {
             egui::Label::new(egui::RichText::new(text).size(13.5).color(p.text_secondary)).wrap(),
         );
     }
+}
+
+/// A section title with an (i) that explains it (hover, or click to keep open).
+pub fn section_title_info(ui: &mut Ui, title: &str, info: &str) {
+    let open = ui
+        .horizontal(|ui| {
+            section_title(ui, title);
+            info_icon(ui, title, info)
+        })
+        .inner;
+    info_text(ui, open, info);
 }

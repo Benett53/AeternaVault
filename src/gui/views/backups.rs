@@ -37,11 +37,22 @@ pub fn snapshot_details(app: &AeternaApp, info: &SnapshotInfo) -> (String, Strin
             };
             let mut detail = mode.to_string();
             match info.total_stats() {
-                Some(stats) => detail.push_str(&format!(
-                    " · {} · {}",
-                    lang.files(stats.files),
-                    lang.bytes(stats.bytes)
-                )),
+                Some(stats) => {
+                    detail.push_str(&format!(
+                        " · {} · {}",
+                        lang.files(stats.files),
+                        lang.bytes(stats.bytes)
+                    ));
+                    // Incremental backups look complete; say what is really new.
+                    if h.mode == BackupMode::Incremental && h.base.is_some() {
+                        detail.push_str(" · ");
+                        detail.push_str(
+                            &t.backup_changed
+                                .replace("{new}", &lang.count(stats.copied_files))
+                                .replace("{size}", &lang.bytes(stats.copied_bytes)),
+                        );
+                    }
+                }
                 None => detail.push_str(&format!(" · {}", t.partly_locked)),
             }
             if info.is_split() {
@@ -52,10 +63,12 @@ pub fn snapshot_details(app: &AeternaApp, info: &SnapshotInfo) -> (String, Strin
             if !info.computer.eq_ignore_ascii_case(&app.computer) {
                 detail.push_str(&format!(" · {}", lang.computer_label(&info.computer)));
             }
-            (
-                lang.weekday_date(h.started_at.with_timezone(&chrono::Local)),
-                detail,
-            )
+            let date = lang.weekday_date(h.started_at.with_timezone(&chrono::Local));
+            let title = match &info.label {
+                Some(label) => format!("{label} · {date}"),
+                None => date,
+            };
+            (title, detail)
         }
         None if info.is_locked() => (info.id.clone(), t.locked_backup.to_string()),
         None => (info.id.clone(), lang.computer_label(&info.computer)),
@@ -287,6 +300,7 @@ fn list_card(app: &mut AeternaApp, ui: &mut Ui) {
         let checked = app.checked_snapshots();
         let single = (checked.len() == 1).then(|| checked[0].clone());
         let ready = !app.is_busy();
+        rename_row(app, ui, &ctx);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let one = single.is_some() && ready;
@@ -315,6 +329,13 @@ fn list_card(app: &mut AeternaApp, ui: &mut Ui) {
                 && let Some(s) = &single
             {
                 platform::open_in_file_manager(s.dir());
+            }
+            if app.viewer.is_none()
+                && widgets::button(ui, ButtonKind::Quiet, t.rename_backup, one).clicked()
+                && let Some(s) = &single
+            {
+                let text = s.label.clone().unwrap_or_default();
+                ui.data_mut(|d| d.insert_temp(rename_id(), (s.id.clone(), text)));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let label = if checked.len() > 1 {
@@ -355,10 +376,8 @@ fn retention_card(app: &mut AeternaApp, ui: &mut Ui) {
                 app.config.retention.enabled = on;
             }
             ui.add_space(4.0);
-            ui.vertical(|ui| {
-                widgets::strong_text(ui, t.retention_auto);
-                widgets::secondary_text(ui, t.retention_hint);
-            });
+            widgets::strong_text(ui, t.retention_auto);
+            widgets::info_icon(ui, "retention", t.retention_hint);
         });
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
@@ -403,4 +422,52 @@ fn retention_card(app: &mut AeternaApp, ui: &mut Ui) {
             }
         });
     });
+}
+
+fn rename_id() -> egui::Id {
+    egui::Id::new("rename-backup")
+}
+
+/// Inline editor for the name of one backup (opened by "Rename…").
+fn rename_row(app: &mut AeternaApp, ui: &mut Ui, ctx: &egui::Context) {
+    let t = app.lang.t();
+    let Some((id, mut text)) = ui.data(|d| d.get_temp::<(String, String)>(rename_id())) else {
+        return;
+    };
+    let mut close = false;
+    let mut save = false;
+    ui.horizontal(|ui| {
+        widgets::secondary_text(ui, t.rename_title);
+        let field = ui.add(egui::TextEdit::singleline(&mut text).desired_width(360.0));
+        if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            save = true;
+        }
+        if widgets::button(ui, ButtonKind::Secondary, t.rename_save, true).clicked() {
+            save = true;
+        }
+        if widgets::button(ui, ButtonKind::Quiet, t.cancel, true).clicked() {
+            close = true;
+        }
+        widgets::info_icon(ui, "rename", t.rename_hint);
+    });
+    if save {
+        let result = app
+            .all_snapshots()
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| crate::engine::manage::set_label(s, &text));
+        if let Some(Err(err)) = result {
+            app.notify(widgets::NoticeKind::Warning, err.to_string());
+        }
+        app.refresh_snapshots(ctx);
+        close = true;
+    }
+    ui.data_mut(|d| {
+        if close {
+            d.remove::<(String, String)>(rename_id());
+        } else {
+            d.insert_temp(rename_id(), (id, text));
+        }
+    });
+    ui.add_space(6.0);
 }

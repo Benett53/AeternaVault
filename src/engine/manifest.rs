@@ -35,6 +35,8 @@ pub const HEADER_FILE: &str = "snapshot.json";
 pub const INDEX_FILE: &str = "files.json";
 pub const ENCRYPTED_FILE: &str = "encrypted.avs";
 pub const META_DIR: &str = ".aeternavault";
+/// A name given to a backup afterwards (plain text, also for encrypted backups).
+pub const LABEL_FILE: &str = "label.txt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -94,6 +96,9 @@ pub struct SnapshotHeader {
     pub format: u32,
     pub app_version: String,
     pub id: String,
+    /// Name of the backup job that made it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub computer: String,
     pub user: String,
     pub mode: BackupMode,

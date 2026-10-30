@@ -13,14 +13,13 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
 
     widgets::card(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.vertical(|ui| widgets::section_title(ui, t.jobs_title));
+            ui.vertical(|ui| widgets::section_title_info(ui, t.jobs_title, t.schedule_hint));
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 if widgets::button(ui, ButtonKind::Primary, t.add_schedule, true).clicked() {
                     app.new_schedule();
                 }
             });
         });
-        widgets::secondary_text(ui, t.schedule_hint);
 
         // A backup that runs right now in the background.
         let running = app.background.as_ref().and_then(|b| b.service.running());

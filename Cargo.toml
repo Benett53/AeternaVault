@@ -1,6 +1,6 @@
 ﻿[package]
 name = "aeterna-vault"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Backups of folders as plain, browsable folders, optionally encrypted. Windows and Linux, window and command line."

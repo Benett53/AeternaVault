@@ -262,7 +262,23 @@ pub fn run_job(
     tracing::info!("backup job started: {label}");
 
     let key_for_check = key.clone();
-    let (mut run, report) = run_unattended(paths, &run_config, key, &label, cancel, on_progress);
+    let before = schedule
+        .map(|s| s.before_command.trim())
+        .unwrap_or_default();
+    let (mut run, report) = match run_before_command(before) {
+        Err(message) => (
+            AutomaticRun {
+                at: Utc::now(),
+                outcome: AutomaticOutcome::Failed,
+                message,
+                files: 0,
+                bytes: 0,
+                schedule: label.clone(),
+            },
+            None,
+        ),
+        Ok(()) => run_unattended(paths, &run_config, key, &label, cancel, on_progress),
+    };
     if let (Some(s), Some(report)) = (schedule, &report)
         && s.verify_after
         && run.outcome.is_success()
@@ -541,5 +557,66 @@ pub fn scope_text(schedule: &Schedule, config: &Config, lang: Lang) -> String {
         t.scope_nothing.to_string()
     } else {
         lang.list_names(&parts)
+    }
+}
+
+/// Runs a job's command before its backup (`cmd /C` on Windows, `sh -c`
+/// elsewhere) and waits for it. A failure stops the job.
+pub fn run_before_command(command: &str) -> Result<(), String> {
+    if command.is_empty() {
+        return Ok(());
+    }
+    tracing::info!("running the command before the backup: {command}");
+    let mut process = if cfg!(windows) {
+        let mut p = std::process::Command::new("cmd");
+        p.args(["/D", "/C", command]);
+        p
+    } else {
+        let mut p = std::process::Command::new("sh");
+        p.args(["-c", command]);
+        p
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: no console flashes up for background jobs.
+        process.creation_flags(0x0800_0000);
+    }
+    match process.output() {
+        Ok(output) if output.status.success() => {
+            tracing::info!("the command before the backup finished");
+            Ok(())
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let last = stderr
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("");
+            let message = format!(
+                "the command before the backup failed ({}): {}",
+                output.status,
+                last.trim()
+            );
+            tracing::error!("{message}");
+            Err(message)
+        }
+        Err(err) => {
+            let message = format!("the command before the backup could not start: {err}");
+            tracing::error!("{message}");
+            Err(message)
+        }
+    }
+}
+
+#[cfg(test)]
+mod before_command_tests {
+    #[test]
+    fn failing_command_stops_the_job() {
+        assert!(super::run_before_command("").is_ok());
+        assert!(super::run_before_command("exit 0").is_ok());
+        let err = super::run_before_command("exit 3").unwrap_err();
+        assert!(err.contains("failed"), "{err}");
     }
 }

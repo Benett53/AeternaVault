@@ -115,8 +115,8 @@ pub fn apply(ctx: &egui::Context, appearance: Appearance) {
     );
     ctx.set_visuals_of(Theme::Light, visuals(&LIGHT, false));
     ctx.all_styles_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(11.0, 9.0);
-        style.spacing.button_padding = egui::vec2(16.0, 7.0);
+        style.spacing.item_spacing = egui::vec2(12.0, 11.0);
+        style.spacing.button_padding = egui::vec2(18.0, 8.0);
         style.spacing.interact_size.y = 32.0;
         style.spacing.window_margin = Margin::same(24);
         style.spacing.indent = 24.0;

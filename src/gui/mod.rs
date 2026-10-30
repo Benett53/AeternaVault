@@ -172,18 +172,20 @@ pub enum View {
     Backups,
     Jobs,
     Apps,
+    Notifications,
     Settings,
     Activity,
 }
 
 impl View {
     /// In the order of the tabs.
-    pub const ALL: [View; 7] = [
+    pub const ALL: [View; 8] = [
         View::Backup,
         View::Restore,
         View::Backups,
         View::Jobs,
         View::Apps,
+        View::Notifications,
         View::Settings,
         View::Activity,
     ];
@@ -641,8 +643,9 @@ impl AeternaApp {
                 });
 
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 24.0;
+                // Wraps into a second row when the window is narrow.
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(20.0, 2.0);
                     for (number, view) in self.visible_views().into_iter().enumerate() {
                         let selected = self.view == view && matches!(self.screen, Screen::Main);
                         let label = view_label(t, view);
@@ -871,6 +874,7 @@ pub fn view_label(t: &crate::i18n::Tr, view: View) -> &'static str {
         View::Backups => t.nav_backups,
         View::Jobs => t.nav_jobs,
         View::Apps => t.nav_apps,
+        View::Notifications => t.nav_notifications,
         View::Settings => t.nav_settings,
         View::Activity => t.nav_activity,
     }
@@ -984,6 +988,7 @@ impl eframe::App for AeternaApp {
                                 View::Backups => views::backups::show(self, ui),
                                 View::Jobs => views::jobs::show(self, ui),
                                 View::Apps => views::apps::show(self, ui),
+                                View::Notifications => views::notifications::show(self, ui),
                                 View::Settings => views::settings::show(self, ui),
                                 View::Activity => views::activity::show(self, ui),
                             });

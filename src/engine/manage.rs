@@ -57,6 +57,22 @@ fn index_file(part: &SnapshotInfo) -> Option<PathBuf> {
     }
 }
 
+/// Gives a backup a name, shown in lists instead of only its date. The name is
+/// stored in plain text next to the backup (`label.txt`), also for encrypted
+/// backups. An empty name removes it.
+pub fn set_label(snapshot: &SnapshotInfo, label: &str) -> std::io::Result<()> {
+    let path = snapshot.dir().join(META_DIR).join(manifest::LABEL_FILE);
+    let label = label.trim();
+    if label.is_empty() {
+        match fsops::remove_file(&path) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        }
+    } else {
+        fsops::write_bytes_atomic(&path, label.as_bytes())
+    }
+}
+
 /// Deletes backups (by qualified id) from `destination`.
 pub fn delete(
     destination: &Path,

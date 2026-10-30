@@ -242,6 +242,13 @@ pub struct Schedule {
     /// Folders (by path) this schedule backs up when `all_folders` is off.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<PathBuf>,
+    /// A command run before the backup, e.g. a database dump into a folder
+    /// that is backed up. If it fails, the backup does not run.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub before_command: String,
+    /// Another destination for this job (empty: the general destination).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<PathBuf>,
     /// Read the new backup again afterwards and compare every file with its checksum.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub verify_after: bool,
@@ -261,6 +268,8 @@ impl Default for Schedule {
             only_on_ac_power: false,
             all_folders: true,
             folders: Vec::new(),
+            destination: None,
+            before_command: String::new(),
             verify_after: false,
         }
     }
@@ -465,6 +474,9 @@ pub struct Config {
     pub advanced: Advanced,
     pub updates: Updates,
     pub notifications: crate::notify::Notifications,
+    /// Name for the next backup (set from a job, not saved).
+    #[serde(skip)]
+    pub backup_label: Option<String>,
     pub fonts: Fonts,
     #[serde(
         rename = "schedule",
@@ -494,6 +506,7 @@ impl Default for Config {
             advanced: Advanced::default(),
             updates: Updates::default(),
             notifications: crate::notify::Notifications::default(),
+            backup_label: None,
             fonts: Fonts::default(),
             schedules: Vec::new(),
             sources: Vec::new(),
@@ -572,6 +585,15 @@ impl Config {
     /// The configuration as one schedule sees it: only its folders.
     pub fn for_schedule(&self, schedule: &Schedule) -> Config {
         let mut config = self.clone();
+        if let Some(destination) = schedule
+            .destination
+            .as_ref()
+            .filter(|d| !d.as_os_str().is_empty())
+        {
+            config.destination = destination.clone();
+        }
+        let name = schedule.name.trim();
+        config.backup_label = (!name.is_empty()).then(|| name.to_string());
         if !schedule.all_folders {
             for source in &mut config.sources {
                 source.enabled = source.enabled

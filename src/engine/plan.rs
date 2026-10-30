@@ -142,6 +142,8 @@ fn push(items: &mut Vec<PlanItem>, summary: &mut Summary, item: PlanItem) {
 #[derive(Debug, Clone)]
 pub struct BackupPlan {
     pub mode: BackupMode,
+    /// Name stored with the backup (the job's name).
+    pub label: Option<String>,
     pub destination: PathBuf,
     pub computer: String,
     /// The backup gets a plain part (a folder) …
@@ -286,6 +288,7 @@ pub fn plan_backup(
         base: plain_base.as_ref().map(|(info, _)| info.clone()),
         encrypted_base: encrypted_base.as_ref().map(|(info, _)| info.clone()),
         hardlink_unchanged: config.advanced.hardlink_unchanged,
+        label: config.backup_label.clone(),
         sources: Vec::new(),
         items: Vec::new(),
         summary: Summary::default(),

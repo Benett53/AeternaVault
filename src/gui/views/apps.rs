@@ -21,7 +21,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
 
     widgets::card(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.vertical(|ui| widgets::section_title(ui, t.apps_title));
+            ui.vertical(|ui| widgets::section_title_info(ui, t.apps_title, t.apps_hint));
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 if widgets::button(ui, ButtonKind::Quiet, t.refresh, app.apps.job.is_none())
                     .on_hover_text("F5")
@@ -31,8 +31,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                 }
             });
         });
-        ui.add(egui::Label::new(egui::RichText::new(t.apps_hint).color(p.text_secondary)).wrap());
-        ui.add_space(8.0);
+        ui.add_space(4.0);
         ui.add(
             egui::TextEdit::singleline(&mut app.apps.search)
                 .hint_text(t.search)

@@ -82,6 +82,10 @@ try {
 
     Assert ((Get-AVStatus).backups -ge 2) 'Get-AVStatus'
     Assert (@(Get-AVHistory).Count -ge 3) 'Get-AVHistory'
+    $csv = Export-AVHistory (Join-Path $root 'activity.csv') -Format Csv
+    Assert ((Get-Content -LiteralPath $csv.FullName -TotalCount 1) -eq 'time,severity,event,detail') 'Export-AVHistory'
+    Rename-AVBackup latest 'Before update' | Out-Null
+    Assert (@(Get-AVBackup | Where-Object { $_.name -eq 'Before update' }).Count -eq 1) 'Rename-AVBackup'
     Write-Host 'All module checks passed.'
 }
 finally {

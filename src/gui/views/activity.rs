@@ -28,7 +28,17 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
 
     widgets::card(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.vertical(|ui| widgets::section_title(ui, t.nav_activity));
+            ui.vertical(|ui| {
+                widgets::section_title_info(
+                    ui,
+                    t.nav_activity,
+                    if technical {
+                        t.technical_log_hint
+                    } else {
+                        t.history_hint
+                    },
+                )
+            });
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 if widgets::button(ui, ButtonKind::Quiet, t.open_log_folder, true).clicked() {
                     platform::open_in_file_manager(&app.paths.log_dir);
@@ -43,14 +53,9 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                 }
             });
         });
-        widgets::secondary_text(
-            ui,
-            if technical {
-                t.technical_log_hint
-            } else {
-                t.history_hint
-            },
-        );
+        if !technical {
+            export_row(app, ui);
+        }
         ui.add_space(6.0);
         ui.add(
             egui::TextEdit::singleline(&mut filter)
@@ -178,4 +183,83 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         d.insert_temp(technical_id, technical);
         d.insert_temp(filter_id, filter);
     });
+}
+
+/// Export as TXT or CSV, or send through the notification channels.
+fn export_row(app: &mut AeternaApp, ui: &mut Ui) {
+    use crate::gui::widgets::NoticeKind;
+    use crate::history;
+
+    let t = app.lang.t();
+    let lang = app.lang;
+    let has_entries = !app.history.is_empty();
+    let result_id = egui::Id::new("activity-send-result");
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let stamp = chrono::Local::now().format("%Y-%m-%d").to_string();
+        for (label, extension, csv) in [(t.export_txt, "txt", false), (t.export_csv, "csv", true)] {
+            if widgets::button(ui, ButtonKind::Secondary, label, has_entries).clicked()
+                && let Some(file) = rfd::FileDialog::new()
+                    .set_file_name(format!("aeternavault-activity-{stamp}.{extension}"))
+                    .add_filter(extension.to_uppercase(), &[extension])
+                    .save_file()
+            {
+                let rows = history::export_rows(&app.history, lang);
+                let text = if csv {
+                    history::to_csv(&rows)
+                } else {
+                    history::to_text(&rows)
+                };
+                match std::fs::write(&file, text) {
+                    Ok(()) => app.notify(
+                        NoticeKind::Success,
+                        format!("{} {}", t.log_saved, file.display()),
+                    ),
+                    Err(err) => app.notify(NoticeKind::Error, err.to_string()),
+                }
+            }
+        }
+        let channels = app.config.notifications.active();
+        let send = widgets::button(ui, ButtonKind::Secondary, t.send_log, has_entries)
+            .on_hover_text(if channels {
+                t.send_log_hint
+            } else {
+                t.log_no_channels
+            });
+        if send.clicked() {
+            if !channels {
+                app.notify(NoticeKind::Info, t.log_no_channels.to_string());
+            } else {
+                let rows = history::export_rows(&app.history, lang);
+                let newest = &rows[rows.len().saturating_sub(200)..];
+                let text = history::to_text(newest);
+                let csv = history::to_csv(&rows);
+                let title = t
+                    .log_send_title
+                    .replace("{computer}", &crate::platform::computer_name());
+                let config = app.config.clone();
+                let ctx = ui.ctx().clone();
+                let (sent, failed) = (t.log_sent, t.log_send_failed);
+                std::thread::spawn(move || {
+                    let failures = crate::notify::send_log(&config, &title, &text, &csv);
+                    let message = if failures.is_empty() {
+                        sent.to_string()
+                    } else {
+                        failures
+                            .iter()
+                            .map(|(channel, error)| format!("{failed} {channel}: {error}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    ctx.data_mut(|d| d.insert_temp(result_id, message));
+                    ctx.request_repaint();
+                });
+            }
+        }
+    });
+    if let Some(message) = ui.data(|d| d.get_temp::<String>(result_id)) {
+        widgets::secondary_text(ui, message);
+    }
+    ui.add_space(4.0);
 }

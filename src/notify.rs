@@ -229,6 +229,8 @@ pub struct Message {
     pub title: String,
     pub body: String,
     pub severity: Severity,
+    /// A file for e-mail (name, content); other channels get only the text.
+    pub attachment: Option<(String, Vec<u8>)>,
 }
 
 /// Facts about one backup run, for the templates.
@@ -367,6 +369,7 @@ pub fn messages_for_run(
             } else {
                 Severity::Info
             },
+            attachment: None,
         });
     }
     if low_space(settings, facts) {
@@ -380,6 +383,7 @@ pub fn messages_for_run(
                 lang,
             ),
             severity: Severity::Warning,
+            attachment: None,
         });
     }
     out
@@ -462,6 +466,57 @@ pub fn after_manual_backup(
     std::thread::spawn(move || after_run(&config, &run, report.as_ref()));
 }
 
+/// Most chat services limit messages to a few thousand characters.
+const CHAT_LIMIT: usize = 3500;
+
+/// Sends an exported log to all enabled channels: e-mail with the CSV file
+/// attached, chat services with the newest lines of the text. Returns
+/// (channel, error) for every channel that failed.
+pub fn send_log(config: &Config, title: &str, text: &str, csv: &str) -> Vec<(String, String)> {
+    let mut failures = Vec::new();
+    for channel in config.notifications.channels.iter().filter(|c| c.enabled) {
+        let message = if channel.kind == ChannelKind::Email {
+            Message {
+                title: title.to_string(),
+                body: text.to_string(),
+                severity: Severity::Info,
+                attachment: Some((
+                    format!(
+                        "aeternavault-activity-{}.csv",
+                        chrono::Local::now().format("%Y-%m-%d")
+                    ),
+                    csv.as_bytes().to_vec(),
+                )),
+            }
+        } else {
+            Message {
+                title: title.to_string(),
+                body: newest_lines(text, CHAT_LIMIT),
+                severity: Severity::Info,
+                attachment: None,
+            }
+        };
+        if let Err(err) = send(channel, &message) {
+            tracing::warn!("activity log via {} failed: {err:#}", channel.label());
+            failures.push((channel.label(), format!("{err:#}")));
+        }
+    }
+    failures
+}
+
+/// The end of `text` that fits into `limit` bytes, cut at a line.
+fn newest_lines(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut start = text.len() - limit;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let cut = text[start..].find('\n').map_or(start, |i| start + i + 1);
+    format!("…\n{}", &text[cut..])
+}
+
 /// A test message for one channel.
 pub fn test_message(lang: Lang) -> Message {
     let t = lang.t();
@@ -471,6 +526,7 @@ pub fn test_message(lang: Lang) -> Message {
             .notify_test_message
             .replace("{computer}", &platform::computer_name()),
         severity: Severity::Info,
+        attachment: None,
     }
 }
 
@@ -638,8 +694,10 @@ fn send_email(channel: &Channel, message: &Message) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("sender address {from_text:?}: {e}"))?;
     let mut builder = lettre::Message::builder()
         .from(from)
-        .subject(message.title.clone())
-        .header(ContentType::TEXT_PLAIN);
+        .subject(message.title.clone());
+    if message.attachment.is_none() {
+        builder = builder.header(ContentType::TEXT_PLAIN);
+    }
     for to in channel
         .to
         .split([',', ';'])
@@ -650,7 +708,20 @@ fn send_email(channel: &Channel, message: &Message) -> anyhow::Result<()> {
             .parse()
             .map_err(|e| anyhow::anyhow!("recipient {to:?}: {e}"))?);
     }
-    let email = builder.body(message.body.clone())?;
+    let email = match &message.attachment {
+        None => builder.body(message.body.clone())?,
+        Some((name, content)) => {
+            use lettre::message::{Attachment, MultiPart, SinglePart};
+            builder.multipart(
+                MultiPart::mixed()
+                    .singlepart(SinglePart::plain(message.body.clone()))
+                    .singlepart(
+                        Attachment::new(name.clone())
+                            .body(content.clone(), ContentType::parse("text/csv")?),
+                    ),
+            )?
+        }
+    };
 
     let host = channel.smtp_host.trim();
     let mut transport = match channel.smtp_security {

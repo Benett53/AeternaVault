@@ -168,6 +168,7 @@ mod tests {
                 format: 2,
                 app_version: String::new(),
                 id: format!("s{id:03}"),
+                label: None,
                 computer: "PC".into(),
                 user: String::new(),
                 mode: crate::config::BackupMode::Incremental,
@@ -182,6 +183,7 @@ mod tests {
                 stats: SnapshotStats::default(),
             }),
             companion: None,
+            label: None,
         }
     }
 

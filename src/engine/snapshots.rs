@@ -24,6 +24,8 @@ pub struct SnapshotInfo {
     pub header: Option<SnapshotHeader>,
     /// The encrypted part of a partly encrypted backup (this is the plain part).
     pub companion: Option<Box<SnapshotInfo>>,
+    /// Name given afterwards (`label.txt`), else the job's name.
+    pub label: Option<String>,
 }
 
 impl SnapshotInfo {
@@ -252,6 +254,10 @@ pub fn list(destination: &Path, key: Option<&VaultKey>) -> EngineResult<Vec<Snap
         if !meta.is_dir() {
             continue;
         }
+        let renamed = std::fs::read_to_string(meta.join(manifest::LABEL_FILE))
+            .ok()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty());
         let plain = meta.join(HEADER_FILE).is_file();
         let encrypted = meta.join(ENCRYPTED_FILE).is_file();
         let encrypted_info = encrypted.then(|| {
@@ -272,6 +278,9 @@ pub fn list(destination: &Path, key: Option<&VaultKey>) -> EngineResult<Vec<Snap
                     dir: dir.clone(),
                     destination: destination.to_path_buf(),
                 },
+                label: renamed
+                    .clone()
+                    .or_else(|| header.as_ref().and_then(|h| h.label.clone())),
                 header,
                 companion: None,
             }
@@ -290,7 +299,12 @@ pub fn list(destination: &Path, key: Option<&VaultKey>) -> EngineResult<Vec<Snap
                 .map(|h| h.computer.clone())
                 .or_else(|| computer_suffix(&name))
                 .unwrap_or_default();
+            let label = renamed
+                .clone()
+                .or_else(|| header.as_ref().and_then(|h| h.label.clone()))
+                .or_else(|| encrypted_info.as_ref().and_then(|e| e.label.clone()));
             snapshots.push(SnapshotInfo {
+                label,
                 id: name,
                 computer,
                 location: Location::Plain {

@@ -132,6 +132,7 @@ impl AeternaApp {
             Key::Num5,
             Key::Num6,
             Key::Num7,
+            Key::Num8,
         ];
         for (index, key) in numbers.into_iter().enumerate() {
             if consume(Modifiers::CTRL, key)

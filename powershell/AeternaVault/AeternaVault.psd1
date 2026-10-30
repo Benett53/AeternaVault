@@ -1,6 +1,6 @@
 @{
     RootModule           = 'AeternaVault.psm1'
-    ModuleVersion        = '0.7.0'
+    ModuleVersion        = '0.8.0'
     GUID                 = '5f0f3c52-8f7e-4b8e-9a51-6c2d7e1b4a90'
     Author               = 'AeternaVault contributors'
     Copyright            = 'MIT OR Apache-2.0'
@@ -18,7 +18,8 @@
         'Get-AVRetention', 'Set-AVRetention', 'Get-AVDestination', 'Set-AVDestination',
         'Get-AVEncryption', 'Initialize-AVEncryption', 'Set-AVEncryption', 'Set-AVPassphrase',
         'Test-AVRecoveryKey', 'New-AVRecoveryKey', 'Set-AVRememberedKey',
-        'Get-AVConfig', 'Set-AVConfig', 'Get-AVSystem', 'Set-AVSystem'
+        'Get-AVConfig', 'Set-AVConfig', 'Get-AVSystem', 'Set-AVSystem',
+        'Rename-AVBackup', 'Export-AVHistory'
     )
     CmdletsToExport      = @()
     VariablesToExport    = @()
