@@ -1809,6 +1809,9 @@ pub struct Tr {
     pub job_destination_hint: &'static str,
     pub job_before_command: &'static str,
     pub job_before_command_hint: &'static str,
+    pub notify_message_hidden: &'static str,
+    pub adv_flush: &'static str,
+    pub tip_flush: &'static str,
 }
 
 pub static EN: Tr = Tr {
@@ -2283,6 +2286,9 @@ pub static EN: Tr = Tr {
     job_destination_hint: "A job can back up to its own folder, for example a NAS. Encrypted backups need encryption to be set up at that destination too.",
     job_before_command: "Command before",
     job_before_command_hint: "Runs before the backup and is waited for, e.g. a database dump into a folder that this job backs up: pg_dump --format=custom --file D:\\Dumps\\db.dump db. If it fails, the backup does not run and a problem is reported.",
+    notify_message_hidden: "Details are in the activity log on this computer (not sent, because backups are encrypted).",
+    adv_flush: "Write every file safely to the disk",
+    tip_flush: "Each file is flushed to the disk before it counts as backed up, so a power failure cannot leave empty or partial copies. Slower with many small files, especially on USB hard disks.",
 };
 
 pub static DE: Tr = Tr {
@@ -2757,6 +2763,9 @@ pub static DE: Tr = Tr {
     job_destination_hint: "Ein Job kann in einen eigenen Ordner sichern, zum Beispiel ein NAS. Für verschlüsselte Sicherungen muss die Verschlüsselung auch an diesem Ziel eingerichtet sein.",
     job_before_command: "Befehl vorher",
     job_before_command_hint: "Läuft vor der Sicherung und wird abgewartet, z. B. ein Datenbank-Dump in einen Ordner, den dieser Job sichert: pg_dump --format=custom --file D:\\Dumps\\db.dump db. Schlägt er fehl, läuft die Sicherung nicht und ein Problem wird gemeldet.",
+    notify_message_hidden: "Details stehen im Protokoll auf diesem Computer (nicht gesendet, weil Sicherungen verschlüsselt werden).",
+    adv_flush: "Jede Datei sicher auf den Datenträger schreiben",
+    tip_flush: "Jede Datei wird auf den Datenträger geschrieben, bevor sie als gesichert gilt. So hinterlässt ein Stromausfall keine leeren oder halben Kopien. Langsamer bei vielen kleinen Dateien, besonders auf USB-Festplatten.",
 };
 
 #[cfg(test)]

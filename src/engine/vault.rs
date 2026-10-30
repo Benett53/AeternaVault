@@ -308,6 +308,23 @@ AeternaVault, or run: aeternavault-cli list --destination \"<this folder's paren
 https://github.com/Benett53/AeternaVault
 ";
 
+/// Whether an encrypted blob has exactly the size its content needs. A blob
+/// cut short (e.g. by a power failure) is stored again instead of reused.
+pub fn blob_intact(path: &Path, plain_size: u64) -> bool {
+    use std::io::Read;
+    let Ok(len) = fs::metadata(path).map(|m| m.len()) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_err()
+    {
+        return false;
+    }
+    crypto::stream_size(&magic, plain_size) == Some(len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

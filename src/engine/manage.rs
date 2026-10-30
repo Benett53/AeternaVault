@@ -147,6 +147,7 @@ pub fn delete(
             fsops::copy_hashed(&src, &dst, Some(&entry.sha256), cancel, &mut |_| {})
                 .map_err(|e| copy_error("could not keep a file needed by", &dst, e))?;
             let _ = fsops::set_modified(&dst, entry.modified);
+            fsops::set_readonly(&dst);
             entry.blob = own;
             report.rehomed_files += 1;
             changed = true;
@@ -488,6 +489,7 @@ fn copy_parts(
                     })
                     .map_err(|e| copy_error("could not copy", &src, e))?;
                     let _ = fsops::set_modified(&dst, entry.modified);
+                    fsops::set_readonly(&dst);
                     entry.blob = own;
                     progress.files_done += 1;
                     report.files += 1;

@@ -127,6 +127,9 @@ impl Source {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Advanced {
+    /// Flush every backed-up file to the disk before it counts as stored.
+    /// Slower with many small files on USB drives, safe against power failures.
+    pub flush_to_disk: bool,
     /// Skip OneDrive/cloud files that are not stored locally (reading them
     /// would trigger a download).
     pub skip_online_only_files: bool,
@@ -152,6 +155,7 @@ pub struct Advanced {
 impl Default for Advanced {
     fn default() -> Self {
         Self {
+            flush_to_disk: true,
             skip_online_only_files: true,
             hardlink_unchanged: true,
             confirm_before_start: true,
@@ -658,9 +662,25 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Write to a temporary file first so a crash never leaves a half-written config.
+        // Write to a temporary file first so a crash never leaves a half-written
+        // config. It holds passwords and tokens of notification channels, so on
+        // Linux only the owner may read it (Windows: the profile is per user).
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text)?;
+        {
+            use std::io::Write;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            let mut file = options.open(&tmp)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
         std::fs::rename(&tmp, path)
     }
 }

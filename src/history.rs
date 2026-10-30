@@ -410,6 +410,14 @@ pub fn to_text(rows: &[ExportRow]) -> String {
 /// CSV (RFC 4180) with a header line; opens in Excel and LibreOffice.
 pub fn to_csv(rows: &[ExportRow]) -> String {
     fn field(text: &str) -> String {
+        // A cell starting with = + - @ is a formula in spreadsheet programs
+        // (CSV injection); an apostrophe makes it plain text.
+        let text = if text.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+            format!("'{text}")
+        } else {
+            text.to_string()
+        };
+        let text = text.as_str();
         if text.contains([',', '"', '\n', '\r', ';']) {
             format!("\"{}\"", text.replace('"', "\"\""))
         } else {
@@ -445,5 +453,13 @@ mod export_tests {
         assert!(csv.starts_with("time,severity,event,detail\r\n"));
         assert!(csv.contains(",error,\"Backup \"\"A\"\" failed\",\"disk full, 3 files\"\r\n"));
         assert!(to_text(&rows).contains("error"));
+        let formula = vec![ExportRow {
+            at: chrono::Local::now(),
+            severity: Severity::Neutral,
+            title: "=HYPERLINK(\"x\")".into(),
+            detail: "+1".into(),
+        }];
+        let csv = to_csv(&formula);
+        assert!(csv.contains(",\"'=HYPERLINK(\"\"x\"\")\",'+1\r\n"), "{csv}");
     }
 }

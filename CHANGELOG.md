@@ -2,6 +2,19 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] - 2026-10-31
+
+### Fixed
+
+- After a power failure, a backed-up file could remain empty or incomplete, and later incremental backups linked to it instead of copying it again. Files are now flushed to the disk before they count as backed up (Settings → Advanced), and an earlier copy is reused only if its size and time match the index; otherwise it is copied again.
+- The same for encrypted backups: stored content is reused only if its size matches exactly; damaged content is stored again.
+- Backed-up files are read-only. Unchanged files of several backups share the same data, so editing one in a backup folder changed all of them.
+- `config.toml` holds notification passwords and tokens: on Linux it is now readable only by its owner, and it is flushed to the disk when saved.
+- Notifications refuse to send tokens over unencrypted `http://` or SMTP passwords without TLS (except to this computer). Tokens and passwords are removed from error messages and the log.
+- With encryption on, notifications no longer include warning texts, which can name files of encrypted folders.
+- CSV export: cells that start with `=`, `+`, `-` or `@` are no longer run as formulas in spreadsheet programs.
+- The command before a backup no longer receives `AETERNAVAULT_PASSPHRASE`, is stopped when the job is cancelled, and cannot block on large error output.
+
 ## [0.8.0] - 2026-10-31
 
 ### Added

@@ -71,6 +71,20 @@ fn restore_plan(destination: &Path, target: RestoreTarget, key: Option<&VaultKey
     plan::plan_restore(&latest, options, key, &CancelToken::default(), &mut quiet()).unwrap()
 }
 
+/// Changes a stored file on purpose. Backed-up files are read-only, which is
+/// itself checked here.
+fn tamper(path: &Path) {
+    assert!(
+        fs::write(path, "tampered").is_err(),
+        "backed-up files are read-only"
+    );
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions).unwrap();
+    fs::write(path, "tampered").unwrap();
+}
+
 fn list_all_files(root: &Path) -> Vec<PathBuf> {
     walkdir::WalkDir::new(root)
         .into_iter()
@@ -190,7 +204,7 @@ fn damaged_backup_is_detected_on_restore() {
     let report = run(&plan(&config, None), None);
 
     // Silently corrupt a stored file.
-    fs::write(report.snapshot_dir.join("Documents/letter.txt"), "tampered").unwrap();
+    tamper(&report.snapshot_dir.join("Documents/letter.txt"));
 
     let target = tmp.path().join("Restored");
     let restore_plan = restore_plan(
@@ -465,7 +479,7 @@ fn delete_verify_and_move_backups() {
     assert!(second.snapshot_dir.join("Documents/letter.txt").is_file());
 
     // Damage is found without restoring.
-    fs::write(second.snapshot_dir.join("Documents/letter.txt"), "tampered").unwrap();
+    tamper(&second.snapshot_dir.join("Documents/letter.txt"));
     let check = verify::verify(
         &listed[0],
         None,
@@ -656,4 +670,54 @@ fn same_drive_is_recognised() {
             Path::new(r"E:\Backups")
         ));
     }
+}
+
+#[test]
+fn damaged_earlier_copy_is_not_reused() {
+    let (_tmp, source, config) = setup();
+    let first = run(&plan(&config, None), None);
+    // The copy in the first backup is cut short (e.g. by a power failure).
+    tamper(&first.snapshot_dir.join("Documents/letter.txt"));
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = run(&plan(&config, None), None);
+    assert_ne!(first.snapshot_dir, second.snapshot_dir);
+    assert_eq!(
+        fs::read_to_string(second.snapshot_dir.join("Documents/letter.txt")).unwrap(),
+        fs::read_to_string(source.join("letter.txt")).unwrap(),
+        "the file is copied again instead of linked to the damaged copy"
+    );
+}
+
+#[test]
+fn encrypted_stream_size_is_exact() {
+    use super::crypto::{BLOB_MAGIC, GCM_MAGIC, stream_size};
+    let key = VaultKey::from_master([7u8; 32], Cipher::XChaCha20Poly1305);
+    for plain in [0usize, 1, 1024 * 1024, 1024 * 1024 + 1, 3 * 1024 * 1024] {
+        let data = vec![1u8; plain];
+        let mut out = Vec::new();
+        key.encrypt_stream(
+            &mut data.as_slice(),
+            &mut out,
+            &CancelToken::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            stream_size(BLOB_MAGIC, plain as u64),
+            Some(out.len() as u64),
+            "{plain}"
+        );
+    }
+    let key = VaultKey::from_master([7u8; 32], Cipher::Aes256Gcm);
+    let mut out = Vec::new();
+    key.encrypt_stream(
+        &mut [1u8; 10].as_slice(),
+        &mut out,
+        &CancelToken::default(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(&out[..4], GCM_MAGIC);
+    assert_eq!(stream_size(GCM_MAGIC, 10), Some(out.len() as u64));
 }

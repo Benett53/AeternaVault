@@ -16,6 +16,37 @@ use super::{CancelToken, format_sha256, from_unix_nanos, vault};
 
 const BUFFER_SIZE: usize = 1024 * 1024;
 
+/// Whether written files are flushed to the disk before they get their real
+/// name (`advanced.flush_to_disk`). Without it, a power failure shortly after
+/// a backup can leave files that are empty or incomplete on the disk.
+static FLUSH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_flush(on: bool) {
+    FLUSH.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn finish(output: BufWriter<File>) -> io::Result<()> {
+    let file = output.into_inner().map_err(|e| e.into_error())?;
+    if FLUSH.load(std::sync::atomic::Ordering::Relaxed) {
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Marks a backed-up file read-only. Unchanged files of later backups are
+/// hard links to the same data, so editing one in a backup folder would change
+/// every backup that contains it; read-only prevents that by accident.
+pub fn set_readonly(path: &Path) {
+    let result = fs::metadata(path).and_then(|m| {
+        let mut permissions = m.permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions)
+    });
+    if let Err(err) = result {
+        tracing::debug!("could not mark {} read-only: {err}", path.display());
+    }
+}
+
 #[derive(Debug)]
 pub enum CopyError {
     Io(io::Error),
@@ -125,6 +156,7 @@ fn write_verified(
         let mut output = BufWriter::with_capacity(BUFFER_SIZE, File::create(&partial)?);
         let hash = produce(&mut output)?;
         output.flush()?;
+        finish(output)?;
         Ok(hash)
     })();
     let hash = match result {
@@ -173,6 +205,7 @@ pub fn encrypt_into_vault(
         let mut output = BufWriter::with_capacity(BUFFER_SIZE, File::create(&temp)?);
         let digest = key.encrypt_stream(&mut input, &mut output, cancel, on_bytes)?;
         output.flush()?;
+        finish(output)?;
         Ok::<_, CopyError>(digest)
     })();
     let digest = match result {
@@ -185,7 +218,10 @@ pub fn encrypt_into_vault(
 
     let id = key.blob_id(&digest);
     let target = vault::blob_path(destination, &id);
-    if target.is_file() {
+    // The same content is stored once. An existing copy is reused only if it
+    // is complete (same size as the new one); a damaged one is replaced.
+    let new_len = fs::metadata(&temp).map(|m| m.len()).ok();
+    if target.is_file() && fs::metadata(&target).map(|m| m.len()).ok() == new_len {
         let _ = fs::remove_file(&temp);
         return Ok((id, format_sha256(&digest), false));
     }

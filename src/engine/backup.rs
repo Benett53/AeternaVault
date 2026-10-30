@@ -80,6 +80,7 @@ pub fn run_backup(
         });
     }
 
+    fsops::set_flush(plan.flush_to_disk);
     let key = if plan.encrypted_part {
         Some(key.ok_or(EngineError::Locked)?)
     } else {
@@ -174,7 +175,10 @@ pub fn run_backup(
                         let root = plan.base.as_ref()?.blob_root()?;
                         Some((root.join(safe_relative_path(&b.blob)?), b))
                     })
-                    .filter(|(path, _)| path.is_file());
+                    // Only an intact earlier copy may be reused: same size and
+                    // time as recorded. A copy that was cut short (power failure)
+                    // or changed in the backup folder is copied fresh instead.
+                    .filter(|(path, _)| base_copy_intact(path, item.size, item.modified));
                 match base_path {
                     Some((base_path, base)) => {
                         if plan.hardlink_unchanged && fsops::hard_link(&base_path, &dst).is_ok() {
@@ -198,6 +202,7 @@ pub fn run_backup(
                                 dst.display()
                             );
                         }
+                        fsops::set_readonly(&dst);
                         stats.copied_files += 1;
                         stats.copied_bytes += size;
                         (own_blob, sha)
@@ -208,7 +213,7 @@ pub fn run_backup(
                 let existing = item.blob.as_ref().filter(|b| {
                     reuse_base
                         && b.encrypted
-                        && vault::blob_path(&plan.destination, &b.blob).is_file()
+                        && vault::blob_intact(&vault::blob_path(&plan.destination, &b.blob), size)
                 });
                 match existing {
                     Some(base) => {
@@ -433,4 +438,17 @@ fn new_snapshot_id(plan: &BackupPlan) -> EngineResult<String> {
         "could not find a free backup name",
         std::io::Error::from(std::io::ErrorKind::AlreadyExists),
     ))
+}
+
+/// Whether a file of an earlier backup still has the size and modification
+/// time of its index entry (2 s tolerance for FAT and network drives).
+fn base_copy_intact(path: &std::path::Path, size: u64, modified: i64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() != size {
+        return false;
+    }
+    let actual = meta.modified().map(to_unix_nanos).unwrap_or(0);
+    (actual - modified).abs() <= 2_000_000_000
 }

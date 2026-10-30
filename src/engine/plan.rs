@@ -144,6 +144,7 @@ pub struct BackupPlan {
     pub mode: BackupMode,
     /// Name stored with the backup (the job's name).
     pub label: Option<String>,
+    pub flush_to_disk: bool,
     pub destination: PathBuf,
     pub computer: String,
     /// The backup gets a plain part (a folder) …
@@ -289,6 +290,7 @@ pub fn plan_backup(
         encrypted_base: encrypted_base.as_ref().map(|(info, _)| info.clone()),
         hardlink_unchanged: config.advanced.hardlink_unchanged,
         label: config.backup_label.clone(),
+        flush_to_disk: config.advanced.flush_to_disk,
         sources: Vec::new(),
         items: Vec::new(),
         summary: Summary::default(),

@@ -260,6 +260,8 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         .on_hover_text(t.tip_skip_online);
         ui.checkbox(&mut app.config.advanced.hardlink_unchanged, t.adv_hardlinks)
             .on_hover_text(t.tip_hardlinks);
+        ui.checkbox(&mut app.config.advanced.flush_to_disk, t.adv_flush)
+            .on_hover_text(t.tip_flush);
         ui.checkbox(&mut app.config.advanced.confirm_before_start, t.adv_confirm)
             .on_hover_text(t.tip_confirm);
         ui.checkbox(

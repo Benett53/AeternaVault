@@ -323,7 +323,13 @@ pub fn facts_for_run(
             (Some(f), Some(t)) if t > 0 => Some(f as f64 * 100.0 / t as f64),
             _ => None,
         },
-        message: run.message.clone(),
+        // With encryption on, a warning may name a file of an encrypted
+        // folder; it must not leave the computer.
+        message: if config.encryption.enabled && !run.message.is_empty() {
+            lang.t().notify_message_hidden.to_string()
+        } else {
+            run.message.clone()
+        },
     }
 }
 
@@ -557,6 +563,65 @@ fn post_json(url: &str, bearer: Option<&str>, body: &serde_json::Value) -> anyho
 
 /// Sends one message through one channel.
 pub fn send(channel: &Channel, message: &Message) -> anyhow::Result<()> {
+    check_transport(channel)?;
+    send_unchecked(channel, message)
+        .map_err(|err| anyhow::anyhow!(redact(&format!("{err:#}"), channel)))
+}
+
+fn is_loopback(host: &str) -> bool {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.")
+}
+
+/// The host of an `http://…` URL.
+fn http_host(url: &str) -> Option<&str> {
+    let rest = url.trim().strip_prefix("http://").or_else(|| {
+        let lower = url.trim().get(..7)?;
+        lower
+            .eq_ignore_ascii_case("http://")
+            .then(|| &url.trim()[7..])
+    })?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = authority.rsplit('@').next().unwrap_or_default();
+    Some(if authority.starts_with('[') {
+        authority.split(']').next().map_or(authority, |h| &h[1..])
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    })
+}
+
+/// Passwords and tokens are only sent encrypted, except to this computer.
+pub fn check_transport(channel: &Channel) -> anyhow::Result<()> {
+    let has_secret = !channel.token.trim().is_empty();
+    if channel.kind.uses_url()
+        && has_secret
+        && let Some(host) = http_host(&channel.url)
+        && !is_loopback(host)
+    {
+        anyhow::bail!("the token would be sent unencrypted; use an https:// address");
+    }
+    if channel.kind == ChannelKind::Email
+        && channel.smtp_security == SmtpSecurity::None
+        && !channel.smtp_user.trim().is_empty()
+        && !is_loopback(&channel.smtp_host)
+    {
+        anyhow::bail!("the SMTP password would be sent unencrypted; choose STARTTLS or TLS");
+    }
+    Ok(())
+}
+
+/// Error texts can contain URLs; tokens and passwords never reach the log.
+pub fn redact(text: &str, channel: &Channel) -> String {
+    let mut out = text.to_string();
+    for secret in [channel.token.trim(), channel.smtp_password.as_str()] {
+        if secret.len() >= 4 {
+            out = out.replace(secret, "***");
+        }
+    }
+    out
+}
+
+fn send_unchecked(channel: &Channel, message: &Message) -> anyhow::Result<()> {
     let text = format!("{}\n\n{}", message.title, message.body);
     match channel.kind {
         ChannelKind::Ntfy => {
@@ -807,6 +872,43 @@ mod tests {
         // Threshold in GB.
         settings.low_space_gb = 50;
         assert!(low_space(&settings, &facts()));
+    }
+
+    #[test]
+    fn secrets_only_travel_encrypted() {
+        let mut c = Channel {
+            kind: ChannelKind::Webhook,
+            url: "http://hooks.example.com/x".into(),
+            token: "secret-token".into(),
+            ..Channel::default()
+        };
+        assert!(check_transport(&c).is_err());
+        c.url = "https://hooks.example.com/x".into();
+        assert!(check_transport(&c).is_ok());
+        c.url = "http://127.0.0.1:8080/x".into();
+        assert!(check_transport(&c).is_ok());
+        c.url = "http://user@evil.example:80/x".into();
+        assert!(check_transport(&c).is_err());
+        let mail = Channel {
+            kind: ChannelKind::Email,
+            smtp_host: "smtp.example.com".into(),
+            smtp_security: SmtpSecurity::None,
+            smtp_user: "a@example.com".into(),
+            smtp_password: "pw123456".into(),
+            ..Channel::default()
+        };
+        assert!(check_transport(&mail).is_err());
+        assert_eq!(
+            redact(
+                "failed: https://api.telegram.org/botsecret-token/send pw123456",
+                &Channel {
+                    token: "secret-token".into(),
+                    smtp_password: "pw123456".into(),
+                    ..Channel::default()
+                }
+            ),
+            "failed: https://api.telegram.org/bot***/send ***"
+        );
     }
 
     #[test]

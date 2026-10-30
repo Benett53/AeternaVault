@@ -545,6 +545,20 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// The exact size of an encrypted stream of `plain` bytes (format from its
+/// first four bytes). `None` for an unknown format.
+pub fn stream_size(magic: &[u8; 4], plain: u64) -> Option<u64> {
+    let header = if magic == BLOB_MAGIC {
+        4 + PREFIX_SIZE as u64
+    } else if magic == GCM_MAGIC {
+        4 + 32
+    } else {
+        return None;
+    };
+    let chunks = plain.div_ceil(CHUNK_SIZE as u64).max(1);
+    Some(header + plain + chunks * TAG_SIZE as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

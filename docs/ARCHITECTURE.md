@@ -59,6 +59,13 @@ Every backup and restore is first planned by read-only code (`sources`, `scan`, 
 
 Each file is written as `<name>.aeterna-partial` and renamed once it is complete. The header records whether a backup completed, was cancelled or failed; only completed backups serve as the base of the next incremental one.
 
+## Integrity
+
+- Every file is written as `<name>.aeterna-partial`, flushed to the disk (`advanced.flush_to_disk`), checked against its SHA-256 where known, and only then renamed.
+- An incremental backup reuses an earlier copy only if its size and modification time match the index (plain), or its size matches the exact encrypted size (encrypted). Anything else is copied again.
+- Backed-up files are read-only, because hard-linked files share their data between backups.
+- `verify` reads every file again and compares it with its checksum; jobs can do this after each backup.
+
 ## Security rule for encrypted backups
 
 The key remembered on a computer (DPAPI on Windows, owner-only file on Linux) is used to write, list, check, move and delete. Reading names or contents (browse, open, extract, restore) always requires the passphrase or recovery key in the current session: in the window for 15 minutes or until it is hidden, on the command line per call.

@@ -265,7 +265,7 @@ pub fn run_job(
     let before = schedule
         .map(|s| s.before_command.trim())
         .unwrap_or_default();
-    let (mut run, report) = match run_before_command(before) {
+    let (mut run, report) = match run_before_command(before, cancel) {
         Err(message) => (
             AutomaticRun {
                 at: Utc::now(),
@@ -561,18 +561,21 @@ pub fn scope_text(schedule: &Schedule, config: &Config, lang: Lang) -> String {
 }
 
 /// Runs a job's command before its backup (`cmd /C` on Windows, `sh -c`
-/// elsewhere) and waits for it. A failure stops the job.
-pub fn run_before_command(command: &str) -> Result<(), String> {
+/// elsewhere) and waits for it. A failure stops the job. Cancelling the job
+/// stops the command. The passphrase variable is not passed on, and the
+/// command's error output goes to a file so a talkative command cannot block.
+pub fn run_before_command(command: &str, cancel: &CancelToken) -> Result<(), String> {
+    use std::process::{Command, Stdio};
     if command.is_empty() {
         return Ok(());
     }
     tracing::info!("running the command before the backup: {command}");
     let mut process = if cfg!(windows) {
-        let mut p = std::process::Command::new("cmd");
+        let mut p = Command::new("cmd");
         p.args(["/D", "/C", command]);
         p
     } else {
-        let mut p = std::process::Command::new("sh");
+        let mut p = Command::new("sh");
         p.args(["-c", command]);
         p
     };
@@ -582,41 +585,75 @@ pub fn run_before_command(command: &str) -> Result<(), String> {
         // CREATE_NO_WINDOW: no console flashes up for background jobs.
         process.creation_flags(0x0800_0000);
     }
-    match process.output() {
-        Ok(output) if output.status.success() => {
-            tracing::info!("the command before the backup finished");
-            Ok(())
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let last = stderr
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("");
-            let message = format!(
-                "the command before the backup failed ({}): {}",
-                output.status,
-                last.trim()
-            );
-            tracing::error!("{message}");
-            Err(message)
-        }
+    let errors =
+        std::env::temp_dir().join(format!("aeternavault-before-{}.log", std::process::id()));
+    let fail = |message: String| {
+        tracing::error!("{message}");
+        Err(message)
+    };
+    let stderr = match std::fs::File::create(&errors) {
+        Ok(file) => Stdio::from(file),
+        Err(_) => Stdio::null(),
+    };
+    let mut child = match process
+        .env_remove(PASSPHRASE_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .spawn()
+    {
+        Ok(child) => child,
         Err(err) => {
-            let message = format!("the command before the backup could not start: {err}");
-            tracing::error!("{message}");
-            Err(message)
+            return fail(format!(
+                "the command before the backup could not start: {err}"
+            ));
         }
+    };
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if cancel.is_cancelled() => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&errors);
+                return fail("the command before the backup was stopped".into());
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            Err(err) => return fail(format!("the command before the backup failed: {err}")),
+        }
+    };
+    let output = std::fs::read(&errors).unwrap_or_default();
+    let _ = std::fs::remove_file(&errors);
+    if status.success() {
+        tracing::info!("the command before the backup finished");
+        return Ok(());
     }
+    let text = String::from_utf8_lossy(&output);
+    let last = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    fail(format!(
+        "the command before the backup failed ({status}): {}",
+        last.trim()
+    ))
 }
 
 #[cfg(test)]
 mod before_command_tests {
     #[test]
     fn failing_command_stops_the_job() {
-        assert!(super::run_before_command("").is_ok());
-        assert!(super::run_before_command("exit 0").is_ok());
-        let err = super::run_before_command("exit 3").unwrap_err();
+        let cancel = crate::engine::CancelToken::default();
+        assert!(super::run_before_command("", &cancel).is_ok());
+        assert!(super::run_before_command("exit 0", &cancel).is_ok());
+        let failing = if cfg!(windows) {
+            "echo broken 1>&2 & exit 3"
+        } else {
+            "echo broken 1>&2; exit 3"
+        };
+        let err = super::run_before_command(failing, &cancel).unwrap_err();
+        assert!(err.contains("broken"), "{err}");
         assert!(err.contains("failed"), "{err}");
     }
 }
