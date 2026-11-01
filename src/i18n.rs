@@ -1956,7 +1956,7 @@ pub static EN: Tr = Tr {
     activity_empty: "Nothing has happened yet.",
     unexpected_problem: "An unexpected problem occurred. Details are in the activity log.",
 
-    apps_hint: "Data of applications found on this computer. Adding one puts its folders into the folders to back up, where you can choose what to keep. Sign-ins and saved passwords are left out.",
+    apps_hint: "Data of applications found on this computer. Adding one puts its folders into the folders to back up, where you can choose what to keep. Cookies and saved passwords are left out.",
 
     select_all: "Select all",
     select_none: "Select none",
@@ -2433,7 +2433,7 @@ pub static DE: Tr = Tr {
     activity_empty: "Bisher ist nichts geschehen.",
     unexpected_problem: "Ein unerwartetes Problem ist aufgetreten. Details stehen im Protokoll.",
 
-    apps_hint: "Daten der Anwendungen auf diesem Computer. Beim Hinzufügen kommen ihre Ordner zu den zu sichernden Ordnern, wo du auswählen kannst, was bewahrt wird. Anmeldungen und gespeicherte Passwörter werden nicht gesichert.",
+    apps_hint: "Daten der Anwendungen auf diesem Computer. Beim Hinzufügen kommen ihre Ordner zu den zu sichernden Ordnern, wo du auswählen kannst, was bewahrt wird. Cookies und gespeicherte Passwörter werden nicht gesichert.",
 
     select_all: "Alles auswählen",
     select_none: "Nichts auswählen",

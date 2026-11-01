@@ -455,7 +455,7 @@ fn encryption_card(app: &mut AeternaApp, ui: &mut Ui) {
                 )
                 .clicked()
                 {
-                    if app.vault.key.is_some() {
+                    if app.vault.can_read() {
                         app.vault.dialog = Some(crate::gui::VaultDialog::Change {
                             passphrase: String::new(),
                             repeat: String::new(),

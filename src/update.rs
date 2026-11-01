@@ -359,7 +359,11 @@ fn download(url: &str, dest: &Path, progress: &impl Fn(u64, Option<u64>)) -> Res
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok());
     let mut reader = response.into_body().into_reader();
-    let mut file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
     let mut received = 0u64;
@@ -400,8 +404,10 @@ fn download_and_install(
     let expected = expected_hash(&sums, &plan.asset)
         .ok_or_else(|| format!("{} is not in the checksum list", plan.asset))?;
 
-    let dir = std::env::temp_dir().join(format!("{TEMP_PREFIX}{}", release.version));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // A private, newly created folder: nobody else can swap the download
+    // between the checksum check and the installation.
+    let dir = crate::platform::private_temp_dir(&format!("{TEMP_PREFIX}{}-", release.version))
+        .map_err(|e| e.to_string())?;
     let file = dir.join(&plan.asset);
     let actual = download(&asset.url, &file, &progress)?;
     if actual != expected {

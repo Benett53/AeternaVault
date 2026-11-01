@@ -67,6 +67,18 @@ pub fn run_backup(
     let started_at = Utc::now();
     let (files_total, bytes_total) = plan.copy_totals();
 
+    // Encrypted content is only written with the key of this destination's
+    // vault; with any other key it could not be read with its passphrase.
+    if plan.encrypted_part
+        && let Some(key) = key
+    {
+        let header = vault::read_header(&plan.destination)
+            .at("could not read", &vault::vault_dir(&plan.destination))?;
+        if key.fingerprint() != header.key_check {
+            return Err(EngineError::Locked);
+        }
+    }
+
     let _lock = DestinationLock::acquire(&plan.destination)
         .at("could not prepare", &plan.destination)?
         .ok_or(EngineError::AlreadyRunning)?;
@@ -317,7 +329,17 @@ pub fn run_backup(
         base,
         encrypted,
         split,
-        sources: source_records.clone(),
+        // A partly encrypted backup names in its readable header only the
+        // folders that have readable files.
+        sources: if split && !encrypted {
+            source_records
+                .iter()
+                .filter(|r| data.entries.iter().any(|e| e.source == r.key))
+                .cloned()
+                .collect()
+        } else {
+            source_records.clone()
+        },
         known_paths: known_paths.clone(),
         stats: data.stats.clone(),
     };

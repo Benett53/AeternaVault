@@ -85,6 +85,17 @@ pub fn run_restore(
         let target = plan.sources[item.source].root.join(rel);
         progress.current = target.display().to_string();
 
+        // Into a chosen folder: never through a link placed inside it.
+        if let crate::engine::plan::RestoreTarget::Folder(root) = &plan.options.target
+            && let Err(err) = fsops::ensure_no_links(root, &target)
+        {
+            tracing::warn!("not restored: {err}");
+            report.warnings.push(err.to_string());
+            report.failed += 1;
+            progress.files_done += 1;
+            continue;
+        }
+
         // The target may have appeared since the preview; respect "keep existing".
         if item.kind == ItemKind::New
             && plan.options.conflict == ConflictPolicy::KeepExisting

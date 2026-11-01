@@ -721,3 +721,147 @@ fn encrypted_stream_size_is_exact() {
     assert_eq!(&out[..4], GCM_MAGIC);
     assert_eq!(stream_size(GCM_MAGIC, 10), Some(out.len() as u64));
 }
+
+fn test_vault(destination: &Path, passphrase: &str) -> VaultKey {
+    vault::create_with(
+        destination,
+        passphrase,
+        vault::VaultOptions {
+            cipher: Cipher::XChaCha20Poly1305,
+            kdf: KdfParams::TEST,
+        },
+        KdfParams::TEST,
+    )
+    .unwrap()
+    .key
+}
+
+/// Audit F03: the readable header of a partly encrypted backup must not
+/// decide where the encrypted files go.
+#[test]
+fn edited_plain_header_cannot_redirect_encrypted_files() {
+    let (tmp, source, mut config) = setup();
+    let key = test_vault(&config.destination, "secret words");
+    config.encryption.enabled = true;
+    config.encryption.scope = crate::config::EncryptionScope::Selected;
+    config.sources[0].encrypt_paths = vec!["photos".into()];
+    let report = run(&plan(&config, Some(&key)), Some(&key));
+    assert!(report.header.split);
+
+    // Someone with access to the storage points the folder elsewhere.
+    let evil = tmp.path().join("Evil");
+    let header_file = report.snapshot_dir.join(META_DIR).join("snapshot.json");
+    let mut header: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&header_file).unwrap()).unwrap();
+    for record in header["sources"].as_array_mut().unwrap() {
+        record["path"] = serde_json::json!(evil);
+        record["portable"] = serde_json::Value::Null;
+    }
+    fs::write(&header_file, serde_json::to_string(&header).unwrap()).unwrap();
+
+    fs::remove_dir_all(source.join("photos")).unwrap();
+    let plan = restore_plan(&config.destination, RestoreTarget::Original, Some(&key));
+    restore::run_restore(&plan, Some(&key), &CancelToken::default(), &mut quiet()).unwrap();
+    assert!(
+        source.join("photos/summer.jpg").is_file(),
+        "encrypted file back in its own place"
+    );
+    assert!(
+        !evil.join("photos").exists(),
+        "nothing encrypted written to the edited path"
+    );
+}
+
+/// Audit F05: content is never encrypted with the key of another vault.
+#[test]
+fn backup_with_the_key_of_another_vault_is_refused() {
+    let (tmp, _source, mut config) = setup();
+    let key_a = test_vault(&tmp.path().join("VaultA"), "a");
+    let _key_b = test_vault(&config.destination, "b");
+    config.encryption.enabled = true;
+    let plan = plan(&config, Some(&key_a));
+    let result = backup::run_backup(
+        &plan,
+        Some(&key_a),
+        &LiveFiles,
+        &CancelToken::default(),
+        &mut quiet(),
+    );
+    assert!(
+        matches!(result, Err(crate::error::EngineError::Locked)),
+        "{result:?}"
+    );
+    assert!(
+        snapshots::list(&config.destination, None)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Audit F07: a stored blob damaged without changing its size is replaced
+/// by the next full backup instead of being reused.
+#[test]
+fn damaged_encrypted_content_is_repaired_by_a_full_backup() {
+    let (_tmp, _source, mut config) = setup();
+    let key = test_vault(&config.destination, "secret");
+    config.encryption.enabled = true;
+    run(&plan(&config, Some(&key)), Some(&key));
+    for blob in list_all_files(&vault::vault_dir(&config.destination).join(vault::BLOB_DIR)) {
+        let mut bytes = fs::read(&blob).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x55;
+        fs::write(&blob, bytes).unwrap();
+    }
+    config.mode = BackupMode::Full;
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = run(&plan(&config, Some(&key)), Some(&key));
+    let newest = snapshots::list(&config.destination, Some(&key))
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == second.header.id)
+        .unwrap();
+    let check = super::verify::verify(
+        &newest,
+        Some(&key),
+        true,
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert!(check.is_ok(), "{check:?}");
+}
+
+/// Audit F08: implausible key settings in vault.json are refused before any
+/// key derivation.
+#[test]
+fn implausible_key_settings_are_refused() {
+    let (_tmp, _source, config) = setup();
+    test_vault(&config.destination, "secret");
+    let file = vault::vault_dir(&config.destination).join(vault::VAULT_FILE);
+    let mut header: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    header["slots"][0]["kdf"]["memory_kib"] = serde_json::json!(u32::MAX);
+    fs::write(&file, serde_json::to_string(&header).unwrap()).unwrap();
+    assert!(vault::unlock(&config.destination, "secret").is_err());
+}
+
+/// Audit F04: nothing is written through a link inside a chosen folder.
+#[cfg(unix)]
+#[test]
+fn restore_into_a_folder_does_not_follow_links() {
+    let (tmp, _source, config) = setup();
+    run(&plan(&config, None), None);
+    let target = tmp.path().join("Restored");
+    let outside = tmp.path().join("Outside");
+    fs::create_dir_all(&target).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, target.join("Documents")).unwrap();
+    let plan = restore_plan(&config.destination, RestoreTarget::Folder(target), None);
+    let report = restore::run_restore(&plan, None, &CancelToken::default(), &mut quiet()).unwrap();
+    assert!(report.failed > 0);
+    assert_eq!(
+        fs::read_dir(&outside).unwrap().count(),
+        0,
+        "nothing written outside"
+    );
+}

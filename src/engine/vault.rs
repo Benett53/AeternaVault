@@ -114,8 +114,25 @@ pub fn check_secret(destination: &Path, secret: &str) -> Result<SlotKind, Crypto
     open_slots(&header, secret).map(|(_, kind)| kind)
 }
 
+/// The strongest key settings AeternaVault offers are 1 GiB and 4 passes; a
+/// header asking for much more is damaged or made to exhaust the computer.
+const MAX_SLOTS: usize = 8;
+const MAX_KDF_MEMORY_KIB: u32 = 4 * 1024 * 1024;
+const MAX_KDF_ITERATIONS: u32 = 64;
+const MAX_KDF_PARALLELISM: u32 = 16;
+
 fn open_slots(header: &VaultHeader, secret: &str) -> Result<(VaultKey, SlotKind), CryptoError> {
     let cipher = header.data_cipher()?;
+    let plausible = header.slots.len() <= MAX_SLOTS
+        && header.slots.iter().all(|slot| {
+            slot.kdf.memory_kib <= MAX_KDF_MEMORY_KIB
+                && (1..=MAX_KDF_ITERATIONS).contains(&slot.kdf.iterations)
+                && (1..=MAX_KDF_PARALLELISM).contains(&slot.kdf.parallelism)
+        });
+    if !plausible {
+        tracing::warn!("vault.json asks for implausible key settings; not opened");
+        return Err(CryptoError::Damaged);
+    }
     let mut last_error = CryptoError::WrongKey;
     for slot in &header.slots {
         match slot.open(secret, cipher) {

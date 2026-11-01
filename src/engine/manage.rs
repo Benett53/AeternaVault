@@ -307,13 +307,23 @@ pub fn extract(
             report.cancelled = true;
             break;
         }
+        let Some(rel) = safe_relative_path(&file.path) else {
+            report
+                .failed
+                .push(format!("{}: invalid path in the index", file.path));
+            continue;
+        };
         let dst_rel = file
             .source
             .split('/')
             .map(super::sources::sanitize_segment)
             .collect::<PathBuf>()
-            .join(safe_relative_path(&file.path).unwrap_or_default());
+            .join(rel);
         let dst = target.join(dst_rel);
+        if let Err(err) = fsops::ensure_no_links(target, &dst) {
+            report.failed.push(err.to_string());
+            continue;
+        }
         progress.current = dst.display().to_string();
         let mut on_bytes = |n| {
             progress.bytes_done += n;
@@ -416,6 +426,25 @@ pub fn transfer(
             let _ = fsops::remove_dir_all(&new_dir);
         }
         result?;
+
+        // The old copy goes only after every file at the new place has been
+        // read again and matched its checksum.
+        let moved = snapshots::list(target, key)?
+            .into_iter()
+            .find(|s| s.id == snapshot.id)
+            .ok_or_else(|| EngineError::SnapshotNotFound(snapshot.id.clone()))?;
+        let check = super::verify::verify(&moved, key, false, cancel, &mut |_| {})?;
+        if !check.is_ok() {
+            return Err(EngineError::io(
+                format!(
+                    "the copy at {} is not complete ({} damaged, {} missing); the backup stays where it was",
+                    target.display(),
+                    check.damaged.len(),
+                    check.missing.len()
+                ),
+                std::io::Error::from(std::io::ErrorKind::InvalidData),
+            ));
+        }
     }
 
     report.delete = delete(
@@ -510,7 +539,9 @@ fn copy_parts(
                 if vault::exists(target) {
                     let target_vault = vault::read_header(target)
                         .at("could not read", &vault::vault_dir(target))?;
-                    if target_vault.vault_id != source_vault.vault_id {
+                    if target_vault.vault_id != source_vault.vault_id
+                        || target_vault.key_check != source_vault.key_check
+                    {
                         return Err(EngineError::io(
                             "the new location already holds other encrypted backups",
                             std::io::Error::from(std::io::ErrorKind::AlreadyExists),

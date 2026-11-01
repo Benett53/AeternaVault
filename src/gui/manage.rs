@@ -14,17 +14,20 @@ use crate::engine::{retention, verify};
 use crate::platform;
 
 /// Opened files are decrypted into this folder and removed at the next start.
-pub fn open_folder() -> PathBuf {
-    std::env::temp_dir().join("AeternaVault-open")
-}
+/// Folders with copies of opened files: `<temp>/AeternaVault-open-<random>`.
+const OPEN_PREFIX: &str = "AeternaVault-open-";
 
-/// Removes copies of opened files from earlier sessions.
+/// Removes copies of opened files from earlier sessions (and the shared
+/// folder of AeternaVault 0.8 and older).
 pub fn clean_open_folder() {
-    let folder = open_folder();
-    let Ok(entries) = std::fs::read_dir(&folder) else {
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("AeternaVault-open"));
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
         return;
     };
-    for entry in entries.flatten() {
+    for entry in entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(OPEN_PREFIX))
+    {
         let old = entry
             .metadata()
             .and_then(|m| m.modified())
@@ -258,9 +261,14 @@ impl AeternaApp {
         snapshot: SnapshotInfo,
         file: StoredFile,
     ) {
-        let target = open_folder().join(crate::engine::crypto::hex(
-            &crate::engine::crypto::random_bytes::<6>(),
-        ));
+        // A new folder only this user can open (no shared /tmp exposure).
+        let target = match crate::platform::private_temp_dir(OPEN_PREFIX) {
+            Ok(dir) => dir,
+            Err(err) => {
+                self.notify(NoticeKind::Error, err.to_string());
+                return;
+            }
+        };
         self.start_extract(ctx, snapshot, Some(vec![file]), target, true);
     }
 

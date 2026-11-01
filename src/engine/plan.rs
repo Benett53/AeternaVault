@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::crypto::VaultKey;
+use super::manifest::SourceRecord;
 use super::manifest::{self, FileEntry, SnapshotHeader};
 use super::scan::{self, Excludes, ScanOptions, SkipReason};
 use super::selection::Selection;
@@ -437,9 +438,18 @@ pub fn plan_backup(
     Ok(plan)
 }
 
+/// Windows file names ignore case, Linux file names do not: `A.txt` and
+/// `a.txt` are two files there and must never be matched with each other.
 fn path_key(path: &Path) -> String {
     path.components()
-        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .map(|c| {
+            let part = c.as_os_str().to_string_lossy();
+            if cfg!(windows) {
+                part.to_lowercase()
+            } else {
+                part.into_owned()
+            }
+        })
         .collect::<Vec<_>>()
         .join("\\")
 }
@@ -488,6 +498,31 @@ pub fn is_skipped(skip: &HashSet<String>, key: &str) -> bool {
     skip.contains(key)
 }
 
+/// Where the files of one backed-up folder go when restoring.
+fn planned_source(
+    record: &SourceRecord,
+    target: &RestoreTarget,
+    here: &KnownPaths,
+) -> PlannedSource {
+    let root = match target {
+        RestoreTarget::Original => record
+            .portable
+            .as_deref()
+            .and_then(|p| here.resolve(p))
+            .unwrap_or_else(|| record.path.clone()),
+        RestoreTarget::Folder(folder) => record
+            .key
+            .split('/')
+            .fold(folder.clone(), |acc, part| acc.join(sanitize_segment(part))),
+    };
+    PlannedSource {
+        name: record.name.clone(),
+        root,
+        key: record.key.clone(),
+        portable: record.portable.clone(),
+    }
+}
+
 pub fn plan_restore(
     snapshot: &SnapshotInfo,
     options: RestoreOptions,
@@ -511,34 +546,26 @@ pub fn plan_restore(
     let here = KnownPaths::current();
     let destination = snapshot.destination();
 
-    let sources: Vec<PlannedSource> = header
-        .sources
-        .iter()
-        .map(|record| {
-            let root = match &options.target {
-                RestoreTarget::Original => record
-                    .portable
-                    .as_deref()
-                    .and_then(|p| here.resolve(p))
-                    .unwrap_or_else(|| record.path.clone()),
-                RestoreTarget::Folder(folder) => record
-                    .key
-                    .split('/')
-                    .fold(folder.clone(), |acc, part| acc.join(sanitize_segment(part))),
-            };
-            PlannedSource {
-                name: record.name.clone(),
-                root,
-                key: record.key.clone(),
-                portable: record.portable.clone(),
-            }
-        })
-        .collect();
-    let key_to_index: HashMap<&str, usize> = sources
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.key.as_str(), i))
-        .collect();
+    // Every part names its own folders. The folders of the encrypted part come
+    // only from its own, authenticated header, never from the readable plain
+    // header next to it, which anyone with access to the storage could edit.
+    let mut sources: Vec<PlannedSource> = Vec::new();
+    let mut part_sources: Vec<HashMap<String, usize>> = Vec::new();
+    for (part, _) in &parts {
+        let part_header = part.header.as_ref().ok_or(EngineError::Locked)?;
+        if part_header.id != header.id || (part.is_encrypted() != part_header.encrypted) {
+            return Err(EngineError::Manifest {
+                path: part.dir().to_path_buf(),
+                message: "the parts of this backup do not belong together".into(),
+            });
+        }
+        let mut map = HashMap::new();
+        for record in &part_header.sources {
+            map.insert(record.key.clone(), sources.len());
+            sources.push(planned_source(record, &options.target, &here));
+        }
+        part_sources.push(map);
+    }
 
     let mut plan = RestorePlan {
         snapshot: snapshot.clone(),
@@ -557,12 +584,13 @@ pub fn plan_restore(
 
     let entries = parts
         .iter()
-        .flat_map(|(part, index)| index.files.iter().map(move |entry| (*part, entry)));
-    for (part, entry) in entries {
+        .enumerate()
+        .flat_map(|(n, (part, index))| index.files.iter().map(move |entry| (n, *part, entry)));
+    for (n, part, entry) in entries {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
-        let Some(&source) = key_to_index.get(entry.source.as_str()) else {
+        let Some(&source) = part_sources[n].get(entry.source.as_str()) else {
             continue;
         };
         let planned = &sources[source];

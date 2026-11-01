@@ -656,11 +656,13 @@ impl AeternaApp {
     pub fn refresh_vault(&mut self) {
         let header = vault::read_header(&self.config.destination).ok();
         let same_vault = match (&self.vault.header, &header) {
-            (Some(a), Some(b)) => a.vault_id == b.vault_id,
+            (Some(a), Some(b)) => a.vault_id == b.vault_id && a.key_check == b.key_check,
             _ => false,
         };
         if !same_vault {
+            // Another vault: neither its key nor the permission to read carry over.
             self.vault.key = None;
+            self.vault.read_until = None;
         }
         if let Some(header) = &header {
             if self.vault.key.is_none() {
@@ -799,7 +801,9 @@ impl AeternaApp {
     }
 
     pub fn change_passphrase(&mut self, passphrase: &str) -> Result<(), String> {
-        let Some(key) = &self.vault.key else {
+        // Changing a key slot needs the passphrase entered in this session,
+        // not only the key remembered for automatic backups.
+        let Some(key) = self.vault.key.as_ref().filter(|_| self.vault.can_read()) else {
             return Err(self.lang.error_message(&EngineError::Locked));
         };
         vault::change_passphrase(&self.config.destination, key, passphrase)
@@ -827,7 +831,7 @@ impl AeternaApp {
 
     /// Creates a new recovery key (the old one stops working) and shows it.
     pub fn replace_recovery_key(&mut self) {
-        let Some(key) = self.vault.key.clone() else {
+        let Some(key) = self.vault.key.clone().filter(|_| self.vault.can_read()) else {
             self.open_unlock(AfterUnlock::ReplaceRecovery);
             return;
         };

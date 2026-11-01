@@ -13,7 +13,8 @@
 #            {PROGRAMFILES} {PROGRAMFILESX86}
 #   Linux:   {HOME} {CONFIG} (~/.config) {DATA} (~/.local/share) {DOCUMENTS}
 #
-# Sign-ins (cookies, tokens) and saved passwords are always excluded.
+# Cookies and saved passwords are excluded; other site data may still hold
+# sign-ins, so profiles are marked sensitive (encryption is suggested).
 #
 # Fields: id, name, name_de, category, note_en, note_de, windows, linux,
 #         exclude (patterns), sensitive (suggest encryption)
@@ -25,8 +26,8 @@
 id = "firefox"
 name = "Firefox"
 category = "browsers"
-note_en = "Bookmarks, history, extensions and settings of all profiles. Sign-ins and saved passwords are left out. Close Firefox before backing up."
-note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen aller Profile. Anmeldungen und gespeicherte Passwörter werden nicht gesichert. Firefox vor dem Sichern schließen."
+note_en = "Bookmarks, history, extensions and settings of all profiles. Cookies and saved passwords are left out; other site data can still hold sign-ins, so encrypt this backup. Close Firefox before backing up."
+note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen aller Profile. Cookies und gespeicherte Passwörter werden nicht gesichert; andere Website-Daten können trotzdem Anmeldungen enthalten, daher verschlüsselt sichern. Firefox vor dem Sichern schließen."
 windows = ['{APPDATA}\Mozilla\Firefox']
 linux = ['{HOME}/.mozilla/firefox', '{HOME}/snap/firefox/common/.mozilla/firefox', '{HOME}/.var/app/org.mozilla.firefox/.mozilla/firefox']
 exclude = ["cookies.sqlite*", "logins.json", "logins-backup.json", "key4.db", "signedInUser.json", "cache2", "startupCache", "shader-cache", "Crash Reports", "Pending Pings", "crashes", "minidumps", "datareporting", "saved-telemetry-pings", "parent.lock", "lock", ".parentlock"]
@@ -36,41 +37,45 @@ sensitive = true
 id = "chrome"
 name = "Google Chrome"
 category = "browsers"
-note_en = "Bookmarks, history, extensions and settings. Sign-ins and saved passwords are left out. Close Chrome before backing up."
-note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Anmeldungen und gespeicherte Passwörter werden nicht gesichert. Chrome vor dem Sichern schließen."
+note_en = "Bookmarks, history, extensions and settings. Cookies and saved passwords are left out; other site data can still hold sign-ins, so encrypt this backup. Close Chrome before backing up."
+note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Cookies und gespeicherte Passwörter werden nicht gesichert; andere Website-Daten können trotzdem Anmeldungen enthalten, daher verschlüsselt sichern. Chrome vor dem Sichern schließen."
 windows = ['{LOCALAPPDATA}\Google\Chrome\User Data']
 linux = ['{CONFIG}/google-chrome']
 exclude = ["Cookies", "Cookies-journal", "Login Data", "Login Data-journal", "Login Data For Account", "Login Data For Account-journal", "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Service Worker", "Crashpad", "component_crx_cache", "optimization_guide_model_store", "Safe Browsing", "*.log", "LOCK", "Singleton*"]
 
+sensitive = true
 [[app]]
 id = "edge"
 name = "Microsoft Edge"
 category = "browsers"
-note_en = "Bookmarks, history, extensions and settings. Sign-ins and saved passwords are left out. Close Edge before backing up."
-note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Anmeldungen und gespeicherte Passwörter werden nicht gesichert. Edge vor dem Sichern schließen."
+note_en = "Bookmarks, history, extensions and settings. Cookies and saved passwords are left out; other site data can still hold sign-ins, so encrypt this backup. Close Edge before backing up."
+note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Cookies und gespeicherte Passwörter werden nicht gesichert; andere Website-Daten können trotzdem Anmeldungen enthalten, daher verschlüsselt sichern. Edge vor dem Sichern schließen."
 windows = ['{LOCALAPPDATA}\Microsoft\Edge\User Data']
 linux = ['{CONFIG}/microsoft-edge']
 exclude = ["Cookies", "Cookies-journal", "Login Data", "Login Data-journal", "Login Data For Account", "Login Data For Account-journal", "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Service Worker", "Crashpad", "component_crx_cache", "optimization_guide_model_store", "Safe Browsing", "*.log", "LOCK", "Singleton*"]
 
+sensitive = true
 [[app]]
 id = "brave"
 name = "Brave"
 category = "browsers"
-note_en = "Bookmarks, history, extensions and settings. Sign-ins and saved passwords are left out. Close Brave before backing up."
-note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Anmeldungen und gespeicherte Passwörter werden nicht gesichert. Brave vor dem Sichern schließen."
+note_en = "Bookmarks, history, extensions and settings. Cookies and saved passwords are left out; other site data can still hold sign-ins, so encrypt this backup. Close Brave before backing up."
+note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Cookies und gespeicherte Passwörter werden nicht gesichert; andere Website-Daten können trotzdem Anmeldungen enthalten, daher verschlüsselt sichern. Brave vor dem Sichern schließen."
 windows = ['{LOCALAPPDATA}\BraveSoftware\Brave-Browser\User Data']
 linux = ['{CONFIG}/BraveSoftware/Brave-Browser']
 exclude = ["Cookies", "Cookies-journal", "Login Data", "Login Data-journal", "Login Data For Account", "Login Data For Account-journal", "Cache", "Code Cache", "GPUCache", "DawnCache", "GrShaderCache", "ShaderCache", "Service Worker", "Crashpad", "component_crx_cache", "Safe Browsing", "*.log", "LOCK", "Singleton*"]
 
+sensitive = true
 [[app]]
 id = "chromium"
 name = "Chromium"
 category = "browsers"
-note_en = "Bookmarks, history, extensions and settings. Sign-ins and saved passwords are left out."
-note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Anmeldungen und gespeicherte Passwörter werden nicht gesichert."
+note_en = "Bookmarks, history, extensions and settings. Cookies and saved passwords are left out; other site data can still hold sign-ins, so encrypt this backup."
+note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Cookies und gespeicherte Passwörter werden nicht gesichert; andere Website-Daten können trotzdem Anmeldungen enthalten, daher verschlüsselt sichern."
 linux = ['{CONFIG}/chromium']
 exclude = ["Cookies", "Cookies-journal", "Login Data", "Login Data-journal", "Login Data For Account", "Login Data For Account-journal", "Cache", "Code Cache", "GPUCache", "GrShaderCache", "ShaderCache", "Service Worker", "Crashpad", "*.log", "LOCK", "Singleton*"]
 
+sensitive = true
 # ---------------------------------------------------------------- email
 
 [[app]]

@@ -568,9 +568,14 @@ pub fn send(channel: &Channel, message: &Message) -> anyhow::Result<()> {
         .map_err(|err| anyhow::anyhow!(redact(&format!("{err:#}"), channel)))
 }
 
+/// Only `localhost` and real loopback addresses; a name like
+/// `127.example.com` is an ordinary host.
 fn is_loopback(host: &str) -> bool {
     let host = host.trim().trim_start_matches('[').trim_end_matches(']');
-    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.")
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// The host of an `http://…` URL.
@@ -592,13 +597,13 @@ fn http_host(url: &str) -> Option<&str> {
 
 /// Passwords and tokens are only sent encrypted, except to this computer.
 pub fn check_transport(channel: &Channel) -> anyhow::Result<()> {
-    let has_secret = !channel.token.trim().is_empty();
+    // Webhook addresses are secrets themselves (Teams, Slack, Discord, ntfy
+    // topics), so every address must use https, except one on this computer.
     if channel.kind.uses_url()
-        && has_secret
         && let Some(host) = http_host(&channel.url)
         && !is_loopback(host)
     {
-        anyhow::bail!("the token would be sent unencrypted; use an https:// address");
+        anyhow::bail!("unencrypted http:// addresses are not used; use https://");
     }
     if channel.kind == ChannelKind::Email
         && channel.smtp_security == SmtpSecurity::None
@@ -613,8 +618,18 @@ pub fn check_transport(channel: &Channel) -> anyhow::Result<()> {
 /// Error texts can contain URLs; tokens and passwords never reach the log.
 pub fn redact(text: &str, channel: &Channel) -> String {
     let mut out = text.to_string();
+    // The full address can carry a secret in its path or query.
+    let url = channel.url.trim();
+    if !url.is_empty() {
+        let host_end = url
+            .find("://")
+            .map(|i| i + 3)
+            .and_then(|start| url[start..].find('/').map(|i| start + i))
+            .unwrap_or(url.len());
+        out = out.replace(url, &format!("{}/***", &url[..host_end]));
+    }
     for secret in [channel.token.trim(), channel.smtp_password.as_str()] {
-        if secret.len() >= 4 {
+        if !secret.is_empty() {
             out = out.replace(secret, "***");
         }
     }
@@ -887,6 +902,16 @@ mod tests {
         assert!(check_transport(&c).is_ok());
         c.url = "http://127.0.0.1:8080/x".into();
         assert!(check_transport(&c).is_ok());
+        c.url = "http://127.example.test/x".into();
+        assert!(check_transport(&c).is_err());
+        c.url = "http://[::1]:8080/x".into();
+        assert!(check_transport(&c).is_ok());
+        let secret_url = Channel {
+            kind: ChannelKind::Slack,
+            url: "http://hooks.slack.com/services/T0/B0/XXXX".into(),
+            ..Channel::default()
+        };
+        assert!(check_transport(&secret_url).is_err());
         c.url = "http://user@evil.example:80/x".into();
         assert!(check_transport(&c).is_err());
         let mail = Channel {

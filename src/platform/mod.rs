@@ -341,6 +341,34 @@ pub fn same_drive(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// A new folder in the temporary directory that only this user can open
+/// (Linux: mode 0700; Windows: the per-user temporary folder). The name is
+/// unpredictable and the folder must not exist yet, so a folder or link
+/// prepared by someone else is never used.
+pub fn private_temp_dir(prefix: &str) -> std::io::Result<PathBuf> {
+    let base = std::env::temp_dir();
+    for _ in 0..8 {
+        let dir = base.join(format!(
+            "{prefix}{}",
+            crate::engine::crypto::hex(&crate::engine::crypto::random_bytes::<8>())
+        ));
+        #[cfg(unix)]
+        let builder = {
+            let mut builder = std::fs::DirBuilder::new();
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+}
+
 /// Whether a process with this id runs on this computer. `None` if that
 /// cannot be told (other systems, no permission to ask).
 pub fn process_running(pid: u32) -> Option<bool> {

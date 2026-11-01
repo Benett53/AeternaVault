@@ -61,7 +61,7 @@ pub fn run_unattended(
 ) -> (AutomaticRun, Option<BackupReport>) {
     let sources = Sources::collect(config, &KnownPaths::current());
     let key = if config.encryption.enabled {
-        key.or_else(|| unattended_key(paths, config))
+        key_for_destination(paths, config, key)
     } else {
         None
     };
@@ -123,20 +123,6 @@ pub fn run_unattended(
                 total.files,
                 total.bytes,
             );
-            match apply_retention(
-                &config.destination,
-                &config.retention,
-                &computer,
-                key.as_ref(),
-                cancel,
-            ) {
-                Some(Err(err)) => tracing::warn!("old backups could not be removed: {err}"),
-                Some(Ok(removed)) => {
-                    tracing::info!("{} old backups removed", removed.deleted.len());
-                    record_retention(&paths.config_file, &removed);
-                }
-                None => {}
-            }
             (run, Some(report))
         }
         Err(err) => {
@@ -262,6 +248,7 @@ pub fn run_job(
     tracing::info!("backup job started: {label}");
 
     let key_for_check = key.clone();
+    let mut verified = true;
     let before = schedule
         .map(|s| s.before_command.trim())
         .unwrap_or_default();
@@ -284,8 +271,32 @@ pub fn run_job(
         && run.outcome.is_success()
         && !cancel.is_cancelled()
     {
-        let key = key_for_check.or_else(|| unattended_key(paths, &run_config));
-        check_backup(paths, &run_config, report, key.as_ref(), cancel, &mut run);
+        let key = key_for_destination(paths, &run_config, key_for_check.clone());
+        verified = check_backup(paths, &run_config, report, key.as_ref(), cancel, &mut run);
+    }
+    // Old backups are removed only after a backup that completed and, if the
+    // job checks its backups, passed the check: the newest intact copy is
+    // never given up for one that may be damaged.
+    if report.is_some() && run.outcome.is_success() && verified && !cancel.is_cancelled() {
+        let key = if run_config.encryption.enabled {
+            key_for_destination(paths, &run_config, key_for_check)
+        } else {
+            None
+        };
+        match apply_retention(
+            &run_config.destination,
+            &run_config.retention,
+            &platform::computer_name(),
+            key.as_ref(),
+            cancel,
+        ) {
+            Some(Err(err)) => tracing::warn!("old backups could not be removed: {err}"),
+            Some(Ok(removed)) => {
+                tracing::info!("{} old backups removed", removed.deleted.len());
+                record_retention(&paths.config_file, &removed);
+            }
+            None => {}
+        }
     }
 
     let schedule_id = schedule.map(|s| s.id.clone());
@@ -449,6 +460,7 @@ pub fn removal_dates(
 
 /// Reads the new backup again and compares every file with its checksum.
 /// Problems turn the run into "completed with notes".
+/// Whether the new backup passed its check.
 fn check_backup(
     paths: &AppPaths,
     config: &Config,
@@ -456,13 +468,13 @@ fn check_backup(
     key: Option<&VaultKey>,
     cancel: &CancelToken,
     run: &mut AutomaticRun,
-) {
+) -> bool {
     let Some(id) = report
         .snapshot_dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
     else {
-        return;
+        return false;
     };
     let computer = platform::computer_name();
     let result = crate::engine::snapshots::find(&config.destination, &id, &computer, key).and_then(
@@ -492,10 +504,27 @@ fn check_backup(
                     check.missing.len()
                 );
             }
+            check.is_ok()
         }
-        Ok(_) => {}
-        Err(err) => tracing::warn!("the backup could not be checked: {err}"),
+        Ok(_) => false,
+        Err(err) => {
+            tracing::warn!("the backup could not be checked: {err}");
+            false
+        }
     }
+}
+
+/// The key for the destination of this run: the given one only if it opens
+/// this destination's vault, otherwise the one remembered for it. A job with
+/// its own destination never uses the key of another vault.
+fn key_for_destination(
+    paths: &AppPaths,
+    config: &Config,
+    key: Option<VaultKey>,
+) -> Option<VaultKey> {
+    let header = vault::read_header(&config.destination).ok()?;
+    key.filter(|k| k.fingerprint() == header.key_check)
+        .or_else(|| unattended_key(paths, config))
 }
 
 fn outcome_for(err: &EngineError) -> AutomaticOutcome {

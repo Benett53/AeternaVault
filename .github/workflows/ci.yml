@@ -122,6 +122,15 @@ jobs:
       - name: Tests
         run: sh .github/test-summary.sh
 
+      # Known vulnerabilities in dependencies (RustSec) fail the build.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Security advisories
+        run: cargo audit
+
       - name: PowerShell module (PowerShell 7)
         run: |
           cargo build --locked --no-default-features --bin aeternavault-cli

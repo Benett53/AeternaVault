@@ -15,6 +15,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 - CSV export: cells that start with `=`, `+`, `-` or `@` are no longer run as formulas in spreadsheet programs.
 - The command before a backup no longer receives `AETERNAVAULT_PASSPHRASE`, is stopped when the job is cancelled, and cannot block on large error output.
 
+### Security
+
+Findings of an external source audit (31.10.2026):
+
+- Restoring a partly encrypted backup took the folders of the encrypted files from the readable header, which anyone with access to the storage could edit. Encrypted files now go only where their authenticated header says, and both parts must belong together.
+- A job with its own destination could encrypt with the key of the vault open in the window. Each destination now uses only its own key; a backup with a key that does not match the destination's vault is refused before anything is written.
+- Restoring or copying into a chosen folder no longer writes through symbolic links or junctions inside it. Temporary files get unpredictable names and are only created new.
+- Moving a backup removes the old copy only after every file at the new place has been read again and matched its checksum, and only within the same vault and key.
+- Encrypted content is always stored freshly encrypted, which also repairs a stored copy damaged without changing its size. Automatic jobs remove old backups only after the new backup completed and, with checking on, passed the check.
+- Changing the passphrase or the recovery key in the window needs the passphrase entered in this session; switching to another vault ends read access.
+- `vault.json` with implausible key settings is refused before any key derivation.
+- Notifications: every `http://` address is refused except on this computer (webhook addresses are secrets), loopback is checked by address instead of name prefix, and addresses are shortened in error messages.
+- Opened encrypted files and downloaded updates go into new folders only the user can open (Linux 0700).
+- Linux: file names that differ only in case are no longer mixed up in incremental backups.
+- The browser profile notes no longer promise more than the exclusions do; browser profiles are marked sensitive.
+- `ctutils` updated to 0.4.7 (RUSTSEC-2026-0385). CI checks dependencies with `cargo audit`.
+
 ## [0.8.0] - 2026-10-31
 
 ### Added

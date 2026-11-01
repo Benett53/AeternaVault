@@ -84,13 +84,58 @@ impl From<CryptoError> for CopyError {
     }
 }
 
+/// A new, unpredictable name next to `dst`. It is always created with
+/// `create_new`, so a prepared file or link under that name is never followed.
 fn partial_path(dst: &Path) -> PathBuf {
     let mut name = dst
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_default();
-    name.push(".aeterna-partial");
+    name.push(format!(
+        ".{}.aeterna-partial",
+        crypto::hex(&crypto::random_bytes::<6>())
+    ));
     dst.with_file_name(name)
+}
+
+fn create_new(path: &Path) -> io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+/// Fails if a folder between `root` and `path` (or `path` itself) is a
+/// symbolic link, junction or other reparse point: restoring into a chosen
+/// folder must never write somewhere else through a link placed there.
+pub fn ensure_no_links(root: &Path, path: &Path) -> io::Result<()> {
+    let mut current = Some(path);
+    while let Some(p) = current {
+        match fs::symlink_metadata(p) {
+            Ok(meta) if is_link(&meta) => {
+                return Err(io::Error::other(format!(
+                    "{} is a link; nothing is written through links",
+                    p.display()
+                )));
+            }
+            _ => {}
+        }
+        if p == root {
+            break;
+        }
+        current = p.parent().filter(|parent| parent.starts_with(root));
+    }
+    Ok(())
+}
+
+fn is_link(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
 }
 
 /// Copy `src` to `dst` while computing SHA-256. If `expected` is given, the
@@ -153,7 +198,7 @@ fn write_verified(
     }
     let partial = partial_path(dst);
     let result = (|| {
-        let mut output = BufWriter::with_capacity(BUFFER_SIZE, File::create(&partial)?);
+        let mut output = BufWriter::with_capacity(BUFFER_SIZE, create_new(&partial)?);
         let hash = produce(&mut output)?;
         output.flush()?;
         finish(output)?;
@@ -202,7 +247,7 @@ pub fn encrypt_into_vault(
     ));
     let result = (|| {
         let mut input = BufReader::with_capacity(BUFFER_SIZE, File::open(src)?);
-        let mut output = BufWriter::with_capacity(BUFFER_SIZE, File::create(&temp)?);
+        let mut output = BufWriter::with_capacity(BUFFER_SIZE, create_new(&temp)?);
         let digest = key.encrypt_stream(&mut input, &mut output, cancel, on_bytes)?;
         output.flush()?;
         finish(output)?;
@@ -218,13 +263,11 @@ pub fn encrypt_into_vault(
 
     let id = key.blob_id(&digest);
     let target = vault::blob_path(destination, &id);
-    // The same content is stored once. An existing copy is reused only if it
-    // is complete (same size as the new one); a damaged one is replaced.
-    let new_len = fs::metadata(&temp).map(|m| m.len()).ok();
-    if target.is_file() && fs::metadata(&target).map(|m| m.len()).ok() == new_len {
-        let _ = fs::remove_file(&temp);
-        return Ok((id, format_sha256(&digest), false));
-    }
+    // The same content is stored once. The freshly encrypted copy always
+    // replaces an existing one (atomically): this repairs a stored copy that
+    // was damaged without changing its size, and older backups that refer to
+    // it stay readable because the content is the same.
+    let existed = target.is_file();
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -232,7 +275,7 @@ pub fn encrypt_into_vault(
         let _ = fs::remove_file(&temp);
         return Err(err.into());
     }
-    Ok((id, format_sha256(&digest), true))
+    Ok((id, format_sha256(&digest), !existed))
 }
 
 /// Restore the original modification time, so later comparisons (and the
@@ -264,7 +307,7 @@ pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
     let tmp = partial_path(path);
     {
-        let mut file = File::create(&tmp)?;
+        let mut file = create_new(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
     }
