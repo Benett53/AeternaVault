@@ -40,7 +40,7 @@ With `--passphrase-stdin`, the SMTP password is read from standard input instead
 | `low_space_gb` (alert below this many GB free, 0 = off) | `0` |
 | `overdue_days` (alert when an enabled job had no successful backup for longer, 0 = off) | `3` |
 
-The overdue alert is checked in the background every 15 minutes, so it also comes when backups do not run at all (computer off, drive not connected, job stuck). A weekly job counts as overdue after 8 days at the earliest. The alert is repeated once a day until a backup of the job succeeds.
+The overdue alert is checked in the background every 15 minutes (Linux: with every run of the systemd timer), so it also comes when backups do not run at all (computer off, drive not connected, job stuck). A weekly job counts as overdue after 8 days at the earliest. The alert is repeated once a day until a backup of the job succeeds.
 
 ## Texts
 

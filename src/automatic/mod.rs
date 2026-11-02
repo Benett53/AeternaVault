@@ -379,6 +379,8 @@ pub fn run_due(
             }
         }
     });
+    // The timer runs every few minutes, also when no backup is due.
+    crate::notify::check_overdue(&paths.config_file, config);
     let due = due_jobs(config, &state, since_start);
     if due.is_empty() {
         tracing::debug!("no backup job is due");
