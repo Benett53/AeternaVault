@@ -349,6 +349,27 @@ pub fn latest_usable(
         })
 }
 
+/// Whether every stored copy of `computer` was read within `days`: by a full
+/// backup or by a health check.
+pub fn checked_recently(
+    destination: &Path,
+    computer: &str,
+    key: Option<&VaultKey>,
+    days: u32,
+) -> bool {
+    let since = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+    list(destination, key).is_ok_and(|all| {
+        all.iter().flat_map(SnapshotInfo::parts).any(|s| {
+            s.computer.eq_ignore_ascii_case(computer)
+                && s.header.as_ref().is_some_and(|h| {
+                    h.started_at >= since
+                        && h.status.is_usable_base()
+                        && (h.mode == crate::config::BackupMode::Full || h.health_check)
+                })
+        })
+    })
+}
+
 /// Whether another computer already writes backups into `destination`.
 pub fn has_other_computers(destination: &Path, computer: &str) -> bool {
     list(destination, None).is_ok_and(|all| {

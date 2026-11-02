@@ -146,6 +146,10 @@ pub struct Advanced {
     /// Draw the window with OpenGL instead of Direct3D 12 (for graphics drivers
     /// that show glitches). Takes effect on the next start.
     pub compatibility_graphics: bool,
+    /// Every this many days, an incremental backup reads every stored copy it
+    /// reuses and stores it again from the original if it is damaged
+    /// ("health check"). A full backup counts as one. 0: never.
+    pub health_check_days: u32,
     /// Register `.avault` files so a double-click opens the backups in AeternaVault.
     pub open_by_double_click: bool,
     /// "Back up with AeternaVault" in the Explorer context menu of folders.
@@ -163,6 +167,7 @@ impl Default for Advanced {
             restore_conflict: ConflictPolicy::default(),
             destination_app_folder: true,
             compatibility_graphics: false,
+            health_check_days: 30,
             open_by_double_click: true,
             explorer_menu: false,
         }

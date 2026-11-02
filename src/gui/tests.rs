@@ -267,10 +267,12 @@ fn set_up_encryption_and_back_up_encrypted() {
         *remember = false;
     }
     click(&mut harness, "Unlock");
-    assert!(matches!(
-        harness.state().vault.dialog,
-        Some(VaultDialog::Unlock { error: Some(_), .. })
-    ));
+    wait_until(&mut harness, "wrong passphrase message", |app| {
+        matches!(
+            app.vault.dialog,
+            Some(VaultDialog::Unlock { error: Some(_), .. })
+        )
+    });
     if let Some(VaultDialog::Unlock { secret, .. }) = &mut harness.state_mut().vault.dialog {
         *secret = "quiet archive of many summers".into();
     }

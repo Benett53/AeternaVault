@@ -24,7 +24,7 @@ Backups of folders as plain, browsable folders, optionally encrypted. Windows an
 | | |
 |---|---|
 | Plain backups | Every backup is a normal folder named by its date. Unchanged files are hard links, so each backup looks complete but takes little space. |
-| Encryption | Optional, for everything or only marked folders. Argon2id and XChaCha20-Poly1305 or AES-256-GCM; names and sizes stay hidden. Readable without AeternaVault ([format](docs/ENCRYPTION.md), [Python tool](tools/aeterna-decrypt.py)). |
+| Encryption | Optional, for everything or only marked folders. Argon2id and XChaCha20-Poly1305 or AES-256-GCM; names and folder structure stay hidden. Readable without AeternaVault ([format](docs/ENCRYPTION.md), [Python tool](tools/aeterna-decrypt.py)). |
 | Selection | Tick or untick any sub-folder or file; exclusion patterns. |
 | Application data | Detects data folders of browsers, mail, notes, SSH/GPG keys, games and OBS. Cookies and saved passwords are left out; browser profiles are marked sensitive. |
 | Backup jobs | Daily, weekly, every few hours or at start; missed backups are made up. Windows: notification area; Linux: systemd user timer. |

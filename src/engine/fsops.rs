@@ -98,16 +98,54 @@ fn partial_path(dst: &Path) -> PathBuf {
     dst.with_file_name(name)
 }
 
+/// New files are readable only by this user until their permissions are set
+/// on purpose (Linux; on Windows they inherit the folder's permissions).
 fn create_new(path: &Path) -> io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).open(path)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
 }
 
-/// Fails if a folder between `root` and `path` (or `path` itself) is a
-/// symbolic link, junction or other reparse point: restoring into a chosen
-/// folder must never write somewhere else through a link placed there.
+/// Permission bits of a file to store with it (Linux only).
+pub fn unix_mode(meta: &fs::Metadata) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Some(meta.permissions().mode() & 0o777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+/// Gives a written file the permission bits of its original. Never more than
+/// read, write and execute: set-user-ID and similar bits are not restored.
+pub fn set_mode(path: &Path, mode: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(err) = fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777)) {
+            tracing::debug!("could not set permissions on {}: {err}", path.display());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+}
+
+/// Fails if a folder below `root` on the way to `path` (or `path` itself) is
+/// a symbolic link, junction or other reparse point: restoring must never
+/// write somewhere else through a link placed there. `root` itself (the
+/// chosen folder, or a backed-up folder) may be a link the user set up.
 pub fn ensure_no_links(root: &Path, path: &Path) -> io::Result<()> {
     let mut current = Some(path);
     while let Some(p) = current {
+        if p == root {
+            break;
+        }
         match fs::symlink_metadata(p) {
             Ok(meta) if is_link(&meta) => {
                 return Err(io::Error::other(format!(
@@ -116,9 +154,6 @@ pub fn ensure_no_links(root: &Path, path: &Path) -> io::Result<()> {
                 )));
             }
             _ => {}
-        }
-        if p == root {
-            break;
         }
         current = p.parent().filter(|parent| parent.starts_with(root));
     }
@@ -194,7 +229,7 @@ fn write_verified(
     produce: impl FnOnce(&mut dyn Write) -> Result<String, CopyError>,
 ) -> Result<String, CopyError> {
     if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)?;
+        create_dir_all(parent)?;
     }
     let partial = partial_path(dst);
     let result = (|| {
@@ -240,7 +275,7 @@ pub fn encrypt_into_vault(
     on_bytes: &mut dyn FnMut(u64),
 ) -> Result<(String, String, bool), CopyError> {
     let blobs = vault::vault_dir(destination).join(vault::BLOB_DIR);
-    fs::create_dir_all(&blobs)?;
+    create_dir_all(&blobs)?;
     let temp = blobs.join(format!(
         ".tmp-{}.aeterna-partial",
         crypto::hex(&crypto::random_bytes::<8>())
@@ -269,7 +304,7 @@ pub fn encrypt_into_vault(
     // it stay readable because the content is the same.
     let existed = target.is_file();
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
+        create_dir_all(parent)?;
     }
     if let Err(err) = fs::rename(&temp, &target) {
         let _ = fs::remove_file(&temp);
@@ -287,23 +322,32 @@ pub fn set_modified(path: &Path, modified: i64) -> io::Result<()> {
 
 pub fn hard_link(existing: &Path, new: &Path) -> io::Result<()> {
     if let Some(parent) = new.parent() {
-        fs::create_dir_all(parent)?;
+        create_dir_all(parent)?;
     }
     fs::hard_link(existing, new)
 }
 
+/// New folders are private on Linux, like new files.
 pub fn create_dir_all(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(path)
 }
 
 /// Create a new, not yet existing directory.
 pub fn create_new_dir(path: &Path) -> io::Result<()> {
-    fs::create_dir(path)
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(false);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(path)
 }
 
 pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        create_dir_all(parent)?;
     }
     let tmp = partial_path(path);
     {
@@ -341,7 +385,7 @@ impl DestinationLock {
     const STALE_AFTER: Duration = Duration::from_secs(12 * 3600);
 
     pub fn acquire(destination: &Path) -> io::Result<Option<Self>> {
-        fs::create_dir_all(destination)?;
+        create_dir_all(destination)?;
         let path = destination.join(Self::FILE);
         for _ in 0..2 {
             match OpenOptions::new().write(true).create_new(true).open(&path) {

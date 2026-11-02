@@ -85,10 +85,12 @@ pub fn run_restore(
         let target = plan.sources[item.source].root.join(rel);
         progress.current = target.display().to_string();
 
-        // Into a chosen folder: never through a link placed inside it.
-        if let crate::engine::plan::RestoreTarget::Folder(root) = &plan.options.target
-            && let Err(err) = fsops::ensure_no_links(root, &target)
-        {
+        // Never through a link placed inside the chosen or original folder.
+        let root = match &plan.options.target {
+            crate::engine::plan::RestoreTarget::Folder(root) => root,
+            crate::engine::plan::RestoreTarget::Original => &plan.sources[item.source].root,
+        };
+        if let Err(err) = fsops::ensure_no_links(root, &target) {
             tracing::warn!("not restored: {err}");
             report.warnings.push(err.to_string());
             report.failed += 1;
@@ -139,6 +141,7 @@ pub fn run_restore(
 
         match result {
             Ok(_) => {
+                fsops::set_mode(&target, item.mode);
                 if let Err(err) = fsops::set_modified(&target, item.modified) {
                     tracing::debug!(
                         "could not set modification time on {}: {err}",

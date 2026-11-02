@@ -54,6 +54,7 @@ pub fn verify(
     for part in snapshot.parts() {
         parts.push((part, part.load_index(key)?));
     }
+    super::plan::check_parts(&parts)?;
 
     let mut report = VerifyReport::default();
     let mut progress = Progress {
@@ -149,7 +150,7 @@ pub fn verify(
     Ok(report)
 }
 
-fn file_hash(
+pub(crate) fn file_hash(
     path: &std::path::Path,
     cancel: &CancelToken,
     on_bytes: &mut dyn FnMut(u64),
@@ -171,7 +172,7 @@ fn file_hash(
     Ok(format_sha256(&hasher.finalize()))
 }
 
-fn decrypted_hash(
+pub(crate) fn decrypted_hash(
     key: &VaultKey,
     path: &std::path::Path,
     cancel: &CancelToken,

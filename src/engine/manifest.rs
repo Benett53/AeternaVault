@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::crypto::VaultKey;
 use crate::config::BackupMode;
@@ -113,6 +114,14 @@ pub struct SnapshotHeader {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub split: bool,
     pub sources: Vec<SourceRecord>,
+    /// Every reused stored copy was read and checked (see
+    /// `Advanced::health_check_days`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub health_check: bool,
+    /// Encrypted part of a partly encrypted backup: digest of the readable
+    /// part (see [`plain_digest`]), so that it cannot be edited or added later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plain_digest: Option<String>,
     /// Known folders of the backed-up user, for remapping on restore.
     #[serde(default)]
     pub known_paths: KnownPaths,
@@ -129,6 +138,9 @@ pub struct FileEntry {
     /// Last-modified time in nanoseconds since the Unix epoch.
     pub modified: i64,
     pub sha256: String,
+    /// Linux permission bits of the original (`0o640` …), restored with the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
     /// Where the content lives:
     /// * plain: relative to the destination, e.g. `2026-09-12 10-10/Documents/a.txt`
     ///   (may point into an older backup on file systems without hard links),
@@ -148,6 +160,57 @@ pub struct FileIndex {
 pub struct EncryptedSnapshot {
     pub header: SnapshotHeader,
     pub index: FileIndex,
+}
+
+/// What decides where the files of a readable part go and what they contain:
+/// its folders and, per file, name, size, time, permissions and SHA-256. Where a plain
+/// file is stored (`blob`) is left out, as it changes when older backups are
+/// deleted.
+pub fn plain_digest(header: &SnapshotHeader, index: &FileIndex) -> String {
+    let sources: Vec<_> = header
+        .sources
+        .iter()
+        .map(|s| (&s.key, &s.path, &s.portable))
+        .collect();
+    let files: Vec<_> = index
+        .files
+        .iter()
+        .map(|f| (&f.source, &f.path, f.size, f.modified, &f.sha256, f.mode))
+        .collect();
+    let bytes = serde_json::to_vec(&(&header.id, sources, files)).unwrap_or_default();
+    super::format_sha256(&Sha256::digest(bytes))
+}
+
+/// Whether the readable part of a backup belongs to its encrypted part. The
+/// readable part is not authenticated by itself: anyone who can write to the
+/// storage could add or edit one. The encrypted header decides.
+pub fn check_plain_part(
+    plain: &SnapshotHeader,
+    index: &FileIndex,
+    encrypted: &SnapshotHeader,
+) -> Result<(), &'static str> {
+    if !encrypted.split {
+        return Err("readable files were added to a fully encrypted backup");
+    }
+    if plain.id != encrypted.id {
+        return Err("the parts of this backup do not belong together");
+    }
+    match &encrypted.plain_digest {
+        Some(digest) if *digest != plain_digest(plain, index) => {
+            Err("the readable part of this backup was changed")
+        }
+        Some(_) => Ok(()),
+        // Backups of version 0.8.1 and older: the readable part may only use
+        // folders that the encrypted header names.
+        None => {
+            let known = |r: &SourceRecord| encrypted.sources.iter().any(|e| e == r);
+            if plain.sources.iter().all(known) {
+                Ok(())
+            } else {
+                Err("the readable part of this backup names other folders")
+            }
+        }
+    }
 }
 
 pub fn read_header(meta_dir: &Path) -> EngineResult<SnapshotHeader> {

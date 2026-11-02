@@ -33,6 +33,15 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             ui.add(egui::DragValue::new(&mut n.low_space_gb).range(0..=100_000));
             ui.label(t.notify_low_space_gb);
         });
+        let open = ui
+            .horizontal_wrapped(|ui| {
+                ui.label(t.notify_overdue);
+                ui.add(egui::DragValue::new(&mut n.overdue_days).range(0..=365));
+                ui.label(t.notify_overdue_days);
+                widgets::info_icon(ui, "overdue", t.tip_overdue)
+            })
+            .inner;
+        widgets::info_text(ui, open, t.tip_overdue);
     });
     ui.add_space(14.0);
     widgets::card(ui, |ui| {

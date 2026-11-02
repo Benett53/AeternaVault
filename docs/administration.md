@@ -33,7 +33,7 @@ aeternavault-cli system background on
 
 ## Monitoring
 
-- **Notifications** after every backup and when space runs low: e-mail, Teams, Telegram, ntfy, Slack, Discord, Gotify, webhook ([notifications.md](notifications.md)).
+- **Notifications** after every backup, when space runs low, and when a job had no successful backup for several days (`notifications.overdue_days`): e-mail, Teams, Telegram, ntfy, Slack, Discord, Gotify, webhook ([notifications.md](notifications.md)).
 - **Exit codes** of `aeternavault-cli`: `0` success, `1` error, `2` completed with problems. `aeternavault-cli status --json` for monitoring systems.
 - **Activity history**: tab Activity (export as TXT or CSV, or send through the notification channels), or `aeternavault-cli history --format csv --last 0 --output activity.csv`.
 - **Logs**: `%LOCALAPPDATA%\AeternaVault\logs` (14 days, one file per day). `AETERNAVAULT_LOG=debug` for more detail.
@@ -41,3 +41,5 @@ aeternavault-cli system background on
 ## Checking backups
 
 `aeternavault-cli verify latest` reads every file again and compares it with its checksum; a job does the same after each backup with `--verify`. Test a restore regularly into a separate folder: `aeternavault-cli restore latest --to D:\RestoreTest --yes`.
+
+Incremental backups reuse copies of unchanged files. Every 30 days (`aeternavault-cli config set advanced.health_check_days 30`, 0 = never) one backup reads all of them and stores a damaged copy again from the original (health check). That backup takes about as long as reading the whole backup once.

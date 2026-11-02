@@ -87,8 +87,18 @@ pub fn exists(destination: &Path) -> bool {
     vault_dir(destination).join(VAULT_FILE).is_file()
 }
 
+/// A real `vault.json` has two key slots and is about 2 KB.
+const MAX_HEADER_BYTES: u64 = 64 * 1024;
+
 pub fn read_header(destination: &Path) -> io::Result<VaultHeader> {
-    let text = fs::read_to_string(vault_dir(destination).join(VAULT_FILE))?;
+    use std::io::Read;
+    let mut text = String::new();
+    fs::File::open(vault_dir(destination).join(VAULT_FILE))?
+        .take(MAX_HEADER_BYTES + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_HEADER_BYTES {
+        return Err(io::Error::other("vault.json is too large"));
+    }
     serde_json::from_str(&text).map_err(io::Error::other)
 }
 
@@ -114,22 +124,37 @@ pub fn check_secret(destination: &Path, secret: &str) -> Result<SlotKind, Crypto
     open_slots(&header, secret).map(|(_, kind)| kind)
 }
 
-/// The strongest key settings AeternaVault offers are 1 GiB and 4 passes; a
-/// header asking for much more is damaged or made to exhaust the computer.
-const MAX_SLOTS: usize = 8;
-const MAX_KDF_MEMORY_KIB: u32 = 4 * 1024 * 1024;
-const MAX_KDF_ITERATIONS: u32 = 64;
-const MAX_KDF_PARALLELISM: u32 = 16;
+/// AeternaVault writes two slots, with at most 1 GiB and 4 passes (the
+/// strongest setting). A header asking for more is damaged or made to exhaust
+/// the computer: it is refused before any key derivation. The limits leave
+/// room for one more slot and twice the passes.
+const MAX_SLOTS: usize = 3;
+const MAX_KDF_MEMORY_KIB: u32 = 1024 * 1024;
+const MAX_KDF_ITERATIONS: u32 = 8;
+const MAX_KDF_PARALLELISM: u32 = 4;
+/// Memory times passes of all slots together: two slots of the strongest setting.
+const MAX_KDF_TOTAL_COST: u64 = 2 * 1024 * 1024 * 4;
+
+/// Whether the key settings in a header are within what AeternaVault uses.
+pub fn plausible_kdf(header: &VaultHeader) -> bool {
+    let total: u64 = header
+        .slots
+        .iter()
+        .map(|s| u64::from(s.kdf.memory_kib) * u64::from(s.kdf.iterations))
+        .sum();
+    !header.slots.is_empty()
+        && header.slots.len() <= MAX_SLOTS
+        && total <= MAX_KDF_TOTAL_COST
+        && header.slots.iter().all(|slot| {
+            (8..=MAX_KDF_MEMORY_KIB).contains(&slot.kdf.memory_kib)
+                && (1..=MAX_KDF_ITERATIONS).contains(&slot.kdf.iterations)
+                && (1..=MAX_KDF_PARALLELISM).contains(&slot.kdf.parallelism)
+        })
+}
 
 fn open_slots(header: &VaultHeader, secret: &str) -> Result<(VaultKey, SlotKind), CryptoError> {
     let cipher = header.data_cipher()?;
-    let plausible = header.slots.len() <= MAX_SLOTS
-        && header.slots.iter().all(|slot| {
-            slot.kdf.memory_kib <= MAX_KDF_MEMORY_KIB
-                && (1..=MAX_KDF_ITERATIONS).contains(&slot.kdf.iterations)
-                && (1..=MAX_KDF_PARALLELISM).contains(&slot.kdf.parallelism)
-        });
-    if !plausible {
+    if !plausible_kdf(header) {
         tracing::warn!("vault.json asks for implausible key settings; not opened");
         return Err(CryptoError::Damaged);
     }
@@ -174,7 +199,7 @@ pub(crate) fn create_with(
             "an encrypted vault already exists at this destination",
         )));
     }
-    fs::create_dir_all(dir.join(BLOB_DIR))?;
+    super::fsops::create_dir_all(&dir.join(BLOB_DIR))?;
     platform::set_hidden(&dir);
 
     let key = VaultKey::generate(options.cipher);
@@ -198,14 +223,11 @@ pub(crate) fn create_with(
     })
 }
 
+/// Written under a new, unpredictable name first: a file or link prepared
+/// under a known temporary name is never followed.
 fn write_header(destination: &Path, header: &VaultHeader) -> io::Result<()> {
-    let dir = vault_dir(destination);
-    let tmp = dir.join("vault.json.tmp");
-    fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(header).map_err(io::Error::other)?,
-    )?;
-    fs::rename(tmp, dir.join(VAULT_FILE))
+    let bytes = serde_json::to_vec_pretty(header).map_err(io::Error::other)?;
+    super::fsops::write_bytes_atomic(&vault_dir(destination).join(VAULT_FILE), &bytes)
 }
 
 /// Writes the double-click file into an encrypted backup's folder.
@@ -222,6 +244,10 @@ fn checked_header(destination: &Path, key: &VaultKey) -> Result<VaultHeader, Cry
     let header = read_header(destination)?;
     if header.key_check != key.fingerprint() {
         return Err(CryptoError::WrongKey);
+    }
+    // The settings of a slot are reused when it is replaced.
+    if !plausible_kdf(&header) {
+        return Err(CryptoError::Damaged);
     }
     Ok(header)
 }

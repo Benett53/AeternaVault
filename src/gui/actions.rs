@@ -681,6 +681,7 @@ impl AeternaApp {
             remember: then == AfterUnlock::Remember || self.config.any_schedule_enabled(),
             error: None,
             then,
+            working: None,
         });
     }
 
@@ -756,14 +757,29 @@ impl AeternaApp {
         Ok(created.recovery_key)
     }
 
-    pub fn unlock_vault(
+    /// Derives the key in the background; the window stays responsive.
+    pub fn start_unlock(&self, ctx: &egui::Context, secret: String) -> super::UnlockResult {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let destination = self.config.destination.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(vault::unlock(&destination, &secret));
+            ctx.request_repaint();
+        });
+        receiver
+    }
+
+    pub fn finish_unlock(
         &mut self,
         ctx: &egui::Context,
-        secret: &str,
+        result: Result<
+            (vault::VaultHeader, crate::engine::crypto::VaultKey),
+            crate::engine::crypto::CryptoError,
+        >,
         remember: bool,
         then: AfterUnlock,
     ) -> Result<(), String> {
-        let (header, key) = vault::unlock(&self.config.destination, secret).map_err(|e| {
+        let (header, key) = result.map_err(|e| {
             if matches!(e, crate::engine::crypto::CryptoError::WrongKey) {
                 self.lang.t().wrong_passphrase.to_string()
             } else {

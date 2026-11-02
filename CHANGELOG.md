@@ -2,6 +2,31 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-11-02
+
+### Added
+
+- Health check: once every 30 days (Settings → Advanced, `advanced.health_check_days`), an incremental backup reads every stored copy it reuses and compares its checksum. A damaged copy is stored again from the original. A full backup counts as a health check.
+- Overdue alert: a notification when an enabled job has had no successful backup for more than 3 days (`notifications.overdue_days`, weekly jobs at least 8). Checked in the background, also when backups do not run at all; repeated once a day.
+- Linux: the permission bits of each file are stored and restored. Backed-up copies are never more readable than the original; new folders are private (0700).
+
+### Changed
+
+- Unlocking in the window runs in the background; the window stays responsive while the key is derived.
+- Retention never removes the newest backup in which every file was backed up. A newer backup with unreadable files no longer replaces it.
+
+### Security
+
+Findings of a second external source review (01.11.2026):
+
+- A readable part placed next to a fully encrypted backup, or an edited readable part of a partly encrypted backup, is refused before a restore or check writes or reports anything. New partly encrypted backups store a checksum of their readable part in the encrypted header.
+- Restoring to the original place no longer writes through symbolic links or junctions placed inside a backed-up folder.
+- `vault.json` is written under an unpredictable temporary name. The Python decryptor creates its temporary files exclusively and does not write through links.
+- Tighter limits for key settings in `vault.json` (3 slots, 1 GiB, 8 passes, a total budget, 64 KiB file size), also when a key slot is replaced and in the Python decryptor.
+- Linux: files that differ only in upper and lower case are kept apart in incremental backups (0.8.1 fixed only the folder names).
+- Addresses in notification errors are reduced to scheme and host in every form, including user names, passwords, queries and fragments.
+- Documentation: the size of each stored content is visible in encrypted backups; the README no longer says otherwise.
+
 ## [0.8.1] - 2026-10-31
 
 ### Fixed

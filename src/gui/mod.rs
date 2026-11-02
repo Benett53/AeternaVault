@@ -326,6 +326,16 @@ pub enum AfterUnlock {
     Remember,
 }
 
+pub type UnlockResult = std::sync::mpsc::Receiver<
+    Result<
+        (
+            crate::engine::vault::VaultHeader,
+            crate::engine::crypto::VaultKey,
+        ),
+        crate::engine::crypto::CryptoError,
+    >,
+>;
+
 pub enum VaultDialog {
     Create {
         passphrase: String,
@@ -350,6 +360,8 @@ pub enum VaultDialog {
         remember: bool,
         error: Option<String>,
         then: AfterUnlock,
+        /// The key is being derived in the background (this can take seconds).
+        working: Option<UnlockResult>,
     },
     Change {
         passphrase: String,

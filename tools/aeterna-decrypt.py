@@ -98,8 +98,35 @@ def normalize(kind: str, secret: str) -> bytes:
     return secret.encode("utf-8")
 
 
+# Key settings AeternaVault writes: two slots, at most 1 GiB and 4 passes. A
+# header asking for more is damaged or made to exhaust the computer (the same
+# limits as in the app).
+MAX_HEADER_BYTES = 64 * 1024
+MAX_SLOTS = 3
+MAX_MEMORY_KIB = 1024 * 1024
+MAX_ITERATIONS = 8
+MAX_PARALLELISM = 4
+MAX_TOTAL_COST = 2 * 1024 * 1024 * 4
+
+
+def check_kdf(vault: dict) -> None:
+    slots = vault.get("slots") or []
+    ok = 0 < len(slots) <= MAX_SLOTS and all(
+        isinstance(s["kdf"]["memory_kib"], int)
+        and isinstance(s["kdf"]["iterations"], int)
+        and isinstance(s["kdf"]["parallelism"], int)
+        and 8 <= s["kdf"]["memory_kib"] <= MAX_MEMORY_KIB
+        and 1 <= s["kdf"]["iterations"] <= MAX_ITERATIONS
+        and 1 <= s["kdf"]["parallelism"] <= MAX_PARALLELISM
+        for s in slots
+    )
+    if not ok or sum(s["kdf"]["memory_kib"] * s["kdf"]["iterations"] for s in slots) > MAX_TOTAL_COST:
+        sys.exit("vault.json asks for implausible key settings; not opened.")
+
+
 def unlock(vault: dict, secret: str) -> bytes:
     """Returns the 32-byte vault key, trying every key slot."""
+    check_kdf(vault)
     for slot in vault["slots"]:
         kdf = slot["kdf"]
         kek = hash_secret_raw(
@@ -176,6 +203,21 @@ def read_snapshot(data_key: bytes, path: Path) -> dict:
     return json.loads(out.value())
 
 
+def no_links_below(root: Path, path: Path) -> None:
+    """Nothing is written through a link placed inside the target folder."""
+    current = path
+    while current != root and root in current.parents:
+        if current.is_symlink() or getattr(os.path, "isjunction", lambda _: False)(current):
+            raise ValueError(f"{current} is a link; nothing is written through links")
+        current = current.parent
+
+
+def create_private(path: Path):
+    """A new file under an unpredictable name, never following a prepared link."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return os.fdopen(os.open(path, flags, 0o600), "wb")
+
+
 def safe_join(root: Path, *parts: str) -> Path:
     target = root
     for part in parts:
@@ -217,7 +259,11 @@ def main() -> None:
     if len(sys.argv) < 3 or sys.argv[2] not in ("list", "extract"):
         sys.exit(__doc__)
     destination, vault_dir = find_vault(Path(sys.argv[1]))
-    vault = json.loads((vault_dir / "vault.json").read_text(encoding="utf-8"))
+    with open(vault_dir / "vault.json", "rb") as file:
+        raw = file.read(MAX_HEADER_BYTES + 1)
+    if len(raw) > MAX_HEADER_BYTES:
+        sys.exit("vault.json is too large.")
+    vault = json.loads(raw.decode("utf-8"))
     if vault["cipher"] not in (XCHACHA, AESGCM_NAME):
         sys.exit(f"Unknown cipher {vault['cipher']}; this script may be too old.")
     secret = os.environ.get("AETERNAVAULT_PASSPHRASE") or getpass.getpass("Passphrase or recovery key: ")
@@ -248,19 +294,26 @@ def main() -> None:
         blob = entry["blob"]
         source = vault_dir / "blobs" / blob[:2] / f"{blob}.avb"
         output = safe_join(target, entry["source"], entry["path"])
-        output.parent.mkdir(parents=True, exist_ok=True)
-        partial = output.with_name(output.name + ".partial")
+        partial = output.with_name(f"{output.name}.{os.urandom(6).hex()}.partial")
+        created = False
         try:
-            with open(source, "rb") as reader, open(partial, "wb") as writer:
+            no_links_below(target, output)
+            output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with open(source, "rb") as reader, create_private(partial) as writer:
+                created = True
                 digest = decrypt_stream(data_key, reader, writer)
             if digest != entry["sha256"].lower():
                 raise ValueError("checksum mismatch")
+            no_links_below(target, output)
             partial.replace(output)
+            if os.name != "nt" and isinstance(entry.get("mode"), int):
+                os.chmod(output, entry["mode"] & 0o777)
             seconds = entry["modified"] / 1_000_000_000
             os.utime(output, (seconds, seconds))
         except Exception as error:  # report and continue with the next file
             failed += 1
-            partial.unlink(missing_ok=True)
+            if created:
+                partial.unlink(missing_ok=True)
             print(f"could not restore {entry['source']}/{entry['path']}: {error}", file=sys.stderr)
     total = len(snapshot["index"]["files"])
     print(f"{name}: {total - failed} of {total} files restored to {target}")

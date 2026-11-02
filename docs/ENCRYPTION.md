@@ -15,7 +15,7 @@ by AeternaVault with both ciphers.
 ## Goals
 
 - Nobody without the passphrase or the recovery key can read file contents,
-  file names, folder structure or the sizes of individual files.
+  file names or the folder structure.
 - Damaged or modified data is detected; it is never restored silently.
 - Unchanged files are stored once, so synchronising a vault to a cloud folder
   only uploads what is new.
@@ -23,8 +23,9 @@ by AeternaVault with both ciphers.
 - Automatic backups can run without typing the passphrase, without storing it.
 - The data stays readable without AeternaVault.
 
-Not goals: hiding *that* backups exist, their dates, their approximate total
-size or the number of stored files.
+Not goals: hiding *that* backups exist, their dates, their total size, the
+number of stored contents or the size of each one (a blob is about as large as
+the file it holds; identical content is stored once, which is visible too).
 
 ## Choices when setting up
 
@@ -141,6 +142,12 @@ the first time it opens the destination (renames only, nothing is re-encrypted).
 `argon2id+aes256gcm-stream-1mib` and names the cipher used for new streams. Hex is
 lower-case.
 
+A reader must refuse a header that asks for more than AeternaVault writes, before
+deriving any key: more than 64 KiB, more than 3 slots, more than 1 GiB memory,
+8 iterations or 4 lanes per slot, or more than 8 GiB × iterations for all slots
+together (two slots of the strongest setting). Otherwise a manipulated header
+could make every unlock attempt exhaust the computer.
+
 ## Encrypted streams (`.avb`, `.avs`)
 
 Plaintext is split into chunks of exactly 1 048 576 bytes; the last chunk may be
@@ -211,13 +218,15 @@ One stream per backup; its plaintext is UTF-8 JSON:
     ],
     "known_paths": { "values": [ ["APPDATA", "C:\\Users\\anna\\AppData\\Roaming"] ] },
     "stats": { "files": 1234, "bytes": 5678, "copied_files": 3, "copied_bytes": 10, "linked_files": 0,
-               "referenced_files": 1231, "skipped": 0, "failed": 0 }
+               "referenced_files": 1231, "skipped": 0, "failed": 0 },
+    "health_check": true,
+    "plain_digest": "<hex, only in a partly encrypted backup>"
   },
   "index": {
     "format": 3,
     "files": [
       { "source": "Documents", "path": "Letters/2026/a.txt", "size": 13, "modified": 1757872800000000000,
-        "sha256": "<hex of the plaintext>", "blob": "<blob id>" }
+        "sha256": "<hex of the plaintext>", "mode": 420, "blob": "<blob id>" }
     ],
     "warnings": []
   }
@@ -227,6 +236,10 @@ One stream per backup; its plaintext is UTF-8 JSON:
 - `source` is the folder inside the backup (`/`-separated, e.g. `Documents`);
   `path` is relative to it, `/`-separated.
 - `modified` is nanoseconds since 1970-01-01 UTC.
+- `mode` (optional, Linux) is the permission bits of the original; only the
+  read, write and execute bits are restored.
+- `health_check` (optional): every reused stored content was read and checked
+  during this backup.
 - A restore must reject paths containing `..`, drive letters or absolute paths.
 
 The name of the backup folder (its date) is not encrypted.
@@ -247,6 +260,20 @@ When only marked items are encrypted, one backup folder holds both parts:
 Both headers have `"split": true`. Each index lists only the files stored in its
 part. AeternaVault lists, restores, checks, moves and deletes both parts together.
 
+The readable part is not authenticated by itself: anyone who can write to the
+storage could edit it or put one next to a fully encrypted backup. The encrypted
+header therefore decides:
+
+- `"split": false` in the encrypted header: a readable part next to it is refused.
+- `plain_digest` (since 0.9.0) is SHA-256 over the JSON array
+  `[id, [[key, path, portable], …], [[source, path, size, modified, sha256, mode], …]]`
+  of the readable header and index. A mismatch is refused. `blob` is left out,
+  because it changes when older plain backups are deleted.
+- Without `plain_digest` (0.8.1 and older), every folder of the readable header
+  must be listed identically in the encrypted header.
+
+A refused readable part stops a restore or check before anything is written.
+
 ## Opening without restoring
 
 - In AeternaVault: *Backups → Browse*, double-click
@@ -265,10 +292,12 @@ part. AeternaVault lists, restores, checks, moves and deletes both parts togethe
 
 1. Unlock: try each key slot with the entered secret; compare the key check.
 2. Decrypt the chosen `.avs` index.
-3. For each file, decrypt its blob into `<target>.aeterna-partial`, compute
-   SHA-256 of the plaintext, compare with the index, then rename into place.
-   Any authentication or checksum failure leaves the target untouched and is
-   reported.
+3. For each file, decrypt its blob into a new file with an unpredictable name
+   (`<target>.<random>.aeterna-partial`, created exclusively), compute SHA-256
+   of the plaintext, compare with the index, then rename into place. Any
+   authentication or checksum failure leaves the target untouched and is
+   reported. Nothing is written through a symbolic link or junction below the
+   target folder.
 
 ## Threat model in short
 
@@ -277,6 +306,8 @@ part. AeternaVault lists, restores, checks, moves and deletes both parts togethe
 | Cloud provider or someone with the backup drive reads the files | Yes |
 | Someone modifies or deletes files in the vault | Detected on restore and by *Check* (deleted data cannot be recovered) |
 | Someone swaps whole `.avs` or blob files between backups of the same vault | Mostly detected by checksums; an old but authentic backup can be put back in place of a newer one |
+| Someone adds or edits the readable part of a partly encrypted backup | Detected; restore and check are refused |
+| Someone learns how large each stored file is | Not protected (see Goals) |
 | Weak passphrase and a determined attacker | Argon2id slows guessing; a strong passphrase is still essential |
 | Malware running as your user | No — it can read your files directly, and a remembered key |
 | Opened files in `%TEMP%` | Decrypted copies exist until the next start of AeternaVault |

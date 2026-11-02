@@ -18,7 +18,7 @@ jobs:
     name: Tag matches Cargo.toml
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           [ "${GITHUB_REF_NAME}" = "v$version" ] || { echo "Tag ${GITHUB_REF_NAME} does not match $version"; exit 1; }
@@ -33,9 +33,9 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: dist
           merge-multiple: true
@@ -54,7 +54,7 @@ jobs:
           rm "$RUNNER_TEMP/minisign.key"
 
       - name: Build provenance attestation
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: |
             dist/*.exe

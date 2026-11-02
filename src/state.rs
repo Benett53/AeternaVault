@@ -59,6 +59,12 @@ pub struct ScheduleState {
     /// Last time a run was started (whatever the outcome).
     pub last_attempt: Option<DateTime<Utc>>,
     pub last_run: Option<AutomaticRun>,
+    /// Last run that completed (with or without notes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_success: Option<DateTime<Utc>>,
+    /// Last alert that this schedule is overdue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overdue_alerted: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

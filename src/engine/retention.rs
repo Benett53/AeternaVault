@@ -10,6 +10,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Datelike, Local, Utc};
 
+use super::manifest::SnapshotStatus;
 use super::snapshots::SnapshotInfo;
 use crate::config::Retention;
 
@@ -36,7 +37,12 @@ pub fn to_remove(snapshots: &[SnapshotInfo], policy: &Retention, computer: &str)
         .iter()
         .filter_map(|s| Some((s.qualified_id(), s.header.as_ref()?.started_at)))
         .collect();
-    let keep = kept(&dated, policy);
+    let mut keep = kept(&dated, policy);
+    // A backup with files that could not be read does not replace the last
+    // one that has everything: that one stays until a newer one is complete.
+    if let Some(complete) = usable.iter().find(|s| is_complete(s)) {
+        keep.insert(complete.qualified_id());
+    }
 
     own.into_iter()
         .filter(|s| !keep.contains(&s.qualified_id()))
@@ -49,6 +55,15 @@ pub fn to_remove(snapshots: &[SnapshotInfo], policy: &Retention, computer: &str)
         .filter(|s| !s.needs_unlock())
         .map(SnapshotInfo::qualified_id)
         .collect()
+}
+
+/// Whether every part of a backup finished without failed files.
+fn is_complete(snapshot: &SnapshotInfo) -> bool {
+    snapshot.parts().all(|p| {
+        p.header
+            .as_ref()
+            .is_some_and(|h| h.status == SnapshotStatus::Complete)
+    })
 }
 
 /// Which of `backups` (complete ones, newest first) the policy keeps.
@@ -179,6 +194,8 @@ mod tests {
                 encrypted: false,
                 split: false,
                 sources: Vec::new(),
+                plain_digest: None,
+                health_check: false,
                 known_paths: Default::default(),
                 stats: SnapshotStats::default(),
             }),
@@ -253,6 +270,33 @@ mod tests {
         };
         let plan = forecast(&all, &generous, "PC", &future[..3]);
         assert!(plan.iter().any(|(_, r)| *r == Removal::NotWithin));
+    }
+
+    /// Audit R08: backups with unreadable files never push out the last
+    /// complete one, however strict the rules are.
+    #[test]
+    fn warnings_do_not_push_out_the_last_complete_backup() {
+        let all = vec![
+            snapshot(1, 0, SnapshotStatus::CompleteWithWarnings),
+            snapshot(2, 1, SnapshotStatus::CompleteWithWarnings),
+            snapshot(3, 2, SnapshotStatus::Complete),
+            snapshot(4, 3, SnapshotStatus::Complete),
+        ];
+        let strict = Retention {
+            enabled: true,
+            keep_last: 1,
+            keep_daily: 0,
+            keep_weekly: 0,
+            keep_monthly: 0,
+        };
+        let removed = to_remove(&all, &strict, "PC");
+        assert_eq!(removed, vec!["s002".to_string(), "s004".to_string()]);
+        // Once a newer backup is complete, the older one may go.
+        let mut all = all;
+        all.insert(0, snapshot(5, 0, SnapshotStatus::Complete));
+        let removed = to_remove(&all, &strict, "PC");
+        assert!(removed.contains(&"s003".to_string()));
+        assert!(!removed.contains(&"s005".to_string()));
     }
 
     #[test]

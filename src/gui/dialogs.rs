@@ -213,9 +213,13 @@ pub fn confirmation(app: &mut AeternaApp, ui: &mut Ui) {
         .show(ui.ctx(), |ui| {
             let p = *palette(ui);
             ui.set_width(dialog_width(ui, 640.0));
+            let mut health_check = false;
             let (title, body, overwrite) = match pending {
                 Pending::Backup(plan) => {
                     let (files, bytes) = plan.copy_totals();
+                    // Only matters when there is something to reuse.
+                    health_check =
+                        plan.health_check && (plan.base.is_some() || plan.encrypted_base.is_some());
                     (
                         t.confirm_backup_title,
                         lang.confirm_backup(files, bytes, &plan.destination.display().to_string()),
@@ -237,6 +241,10 @@ pub fn confirmation(app: &mut AeternaApp, ui: &mut Ui) {
             if overwrite {
                 ui.add_space(4.0);
                 wrapped(ui, t.confirm_overwrite, Some(p.warning));
+            }
+            if health_check {
+                ui.add_space(4.0);
+                wrapped(ui, t.confirm_health_check, Some(p.text_secondary));
             }
             ui.add_space(16.0);
             ui.horizontal(|ui| {
@@ -788,9 +796,11 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
             remember,
             error,
             then,
+            working,
         } => {
             let mut submit = false;
             let then = *then;
+            let busy = working.is_some();
             let modal = egui::Modal::new(egui::Id::new("vault-unlock"))
                 .frame(frame)
                 .show(&ctx, |ui| {
@@ -805,7 +815,13 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                     }
                     ui.add_space(4.0);
                     ui.checkbox(remember, t.remember_on_computer);
-                    if let Some(error) = error.as_ref() {
+                    if busy {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(14.0));
+                            wrapped(ui, t.unlocking, Some(p.text_secondary));
+                        });
+                    } else if let Some(error) = error.as_ref() {
                         ui.add_space(4.0);
                         wrapped(ui, error, Some(p.error));
                     }
@@ -813,9 +829,8 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                     ui.horizontal(|ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let label = t.unlock.trim_end_matches('…');
-                            if widgets::button(ui, ButtonKind::Primary, label, !secret.is_empty())
-                                .clicked()
-                            {
+                            let ready = !secret.is_empty() && !busy;
+                            if widgets::button(ui, ButtonKind::Primary, label, ready).clicked() {
                                 submit = true;
                             }
                             if widgets::button(ui, ButtonKind::Secondary, t.cancel, true).clicked()
@@ -828,9 +843,23 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
             if modal.should_close() {
                 keep_open = false;
             }
-            if submit && !secret.is_empty() {
-                let secret_value = std::mem::take(secret);
-                match app.unlock_vault(&ctx, &secret_value, *remember, then) {
+            if submit && !secret.is_empty() && !busy {
+                *error = None;
+                *working = Some(app.start_unlock(&ctx, std::mem::take(secret)));
+            }
+            let finished = match working.as_ref().map(|w| w.try_recv()) {
+                Some(Ok(result)) => Some(result),
+                Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                    Some(Err(crate::engine::crypto::CryptoError::Damaged))
+                }
+                Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => None,
+            };
+            // Closed while checking: the result is not used.
+            if let Some(result) = finished
+                && keep_open
+            {
+                *working = None;
+                match app.finish_unlock(&ctx, result, *remember, then) {
                     Ok(()) => {
                         // The follow-up step may have opened the next dialog.
                         return;

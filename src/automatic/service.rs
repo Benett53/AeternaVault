@@ -24,6 +24,8 @@ use crate::state::{AutomaticRun, State};
 
 /// How often the thread looks at the clock when nothing wakes it earlier.
 const TICK: Duration = Duration::from_secs(20);
+/// How often the service looks for jobs without a recent successful backup.
+const OVERDUE_CHECK: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -186,7 +188,13 @@ fn worker_loop(shared: &Arc<Shared>) {
         });
     }
 
+    let mut overdue_checked: Option<Instant> = None;
     while !shared.stop.load(Ordering::Relaxed) {
+        if overdue_checked.is_none_or(|at| at.elapsed() > OVERDUE_CHECK) {
+            overdue_checked = Some(Instant::now());
+            let config = lock(&shared.config).clone();
+            crate::notify::check_overdue(&shared.paths.config_file, &config);
+        }
         if !shared.window_busy.load(Ordering::Relaxed) && lock(&shared.running).is_none() {
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| check_and_run(shared)));
             if outcome.is_err() {

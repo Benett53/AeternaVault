@@ -22,13 +22,13 @@ jobs:
     name: Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # rustup is preinstalled; rust-toolchain.toml selects stable.
+      # rustup is preinstalled; rust-toolchain.toml selects the Rust version.
       - name: Install Rust
         run: rustup show
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Formatting
         run: cargo fmt --all --check
@@ -79,9 +79,9 @@ jobs:
           }
 
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2
         with:
-          tool: cargo-cyclonedx
+          tool: cargo-cyclonedx@0.5.9
 
       # Software bill of materials: every crate that went into the programs.
       - name: SBOM
@@ -91,7 +91,7 @@ jobs:
           if (-not $bom) { throw "no SBOM was written" }
           Copy-Item $bom.FullName dist\sbom.cdx.json
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows
           path: dist/*
@@ -101,7 +101,7 @@ jobs:
     name: Linux
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Build dependencies
         run: |
@@ -112,7 +112,7 @@ jobs:
       - name: Install Rust
         run: rustup show
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Clippy
         run: |
@@ -124,9 +124,9 @@ jobs:
 
       # Known vulnerabilities in dependencies (RustSec) fail the build.
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2
         with:
-          tool: cargo-audit
+          tool: cargo-audit@0.22.2
 
       - name: Security advisories
         run: cargo audit
@@ -137,9 +137,9 @@ jobs:
           pwsh -NoProfile -File powershell/tests/smoke.ps1 -Cli target/debug/aeternavault-cli
 
       - name: Install cargo-deb
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2
         with:
-          tool: cargo-deb
+          tool: cargo-deb@3.8.0
 
       - name: Package
         run: sh installer/linux/package.sh
@@ -153,7 +153,7 @@ jobs:
           previous=$(ls previous/*.deb 2>/dev/null | head -n 1 || true)
           sh installer/linux/test-packages.sh $previous
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: linux
           path: dist/*

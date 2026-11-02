@@ -98,6 +98,8 @@ pub struct PlanItem {
     pub blob: Option<BlobRef>,
     /// Backup: stored in the encrypted part. Restore: comes from it.
     pub encrypted: bool,
+    /// Restore: Linux permission bits of the original.
+    pub mode: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +159,9 @@ pub struct BackupPlan {
     /// Previous encrypted backup (or encrypted part).
     pub encrypted_base: Option<SnapshotInfo>,
     pub hardlink_unchanged: bool,
+    /// Health check: every stored copy that would be reused is read first and
+    /// stored again from the original if it is damaged.
+    pub health_check: bool,
     pub sources: Vec<PlannedSource>,
     pub items: Vec<PlanItem>,
     pub summary: Summary,
@@ -256,7 +261,7 @@ pub fn plan_backup(
     let plain_base = load_base(false);
     let encrypted_base = if may_encrypt { load_base(true) } else { None };
 
-    // Lookup per part: lowercase source path -> lowercase relative path -> entry.
+    // Lookup per part: source path -> relative path -> entry (see `path_key`).
     type Lookup<'a> = HashMap<String, HashMap<String, &'a FileEntry>>;
     let mut lookups: [Lookup<'_>; 2] = [HashMap::new(), HashMap::new()];
     for (part, base) in [(0usize, &plain_base), (1, &encrypted_base)] {
@@ -276,7 +281,7 @@ pub fn plan_backup(
                 lookups[part]
                     .entry(path.clone())
                     .or_default()
-                    .insert(entry.path.to_lowercase(), entry);
+                    .insert(rel_key(&entry.path), entry);
             }
         }
     }
@@ -290,6 +295,14 @@ pub fn plan_backup(
         base: plain_base.as_ref().map(|(info, _)| info.clone()),
         encrypted_base: encrypted_base.as_ref().map(|(info, _)| info.clone()),
         hardlink_unchanged: config.advanced.hardlink_unchanged,
+        health_check: config.mode == BackupMode::Incremental
+            && config.advanced.health_check_days > 0
+            && !snapshots::checked_recently(
+                &destination,
+                input.computer,
+                input.key,
+                config.advanced.health_check_days,
+            ),
         label: config.backup_label.clone(),
         flush_to_disk: config.advanced.flush_to_disk,
         sources: Vec::new(),
@@ -329,7 +342,7 @@ pub fn plan_backup(
         let mut seen = HashSet::new();
 
         for file in scanned.files {
-            let lower = file.rel.to_lowercase();
+            let lower = rel_key(&file.rel);
             let encrypted = source.encrypt.applies(&file.rel);
             let part = usize::from(encrypted);
             let same_part = previous[part].and_then(|m| m.get(&lower));
@@ -367,6 +380,7 @@ pub fn plan_backup(
                     note: None,
                     blob,
                     encrypted,
+                    mode: None,
                 },
             );
         }
@@ -393,6 +407,7 @@ pub fn plan_backup(
                     note: Some(skipped.reason.into()),
                     blob: None,
                     encrypted: false,
+                    mode: None,
                 },
             );
         }
@@ -419,6 +434,7 @@ pub fn plan_backup(
                     note: None,
                     blob: None,
                     encrypted: false,
+                    mode: None,
                 },
             );
         }
@@ -452,6 +468,15 @@ fn path_key(path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("\\")
+}
+
+/// The same rule for a `/`-separated path inside a backed-up folder.
+fn rel_key(rel: &str) -> String {
+    if cfg!(windows) {
+        rel.to_lowercase()
+    } else {
+        rel.to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -496,6 +521,23 @@ impl RestorePlan {
 
 pub fn is_skipped(skip: &HashSet<String>, key: &str) -> bool {
     skip.contains(key)
+}
+
+/// Refuses a readable part that the encrypted part does not vouch for, before
+/// anything is written.
+pub(crate) fn check_parts(parts: &[(&SnapshotInfo, manifest::FileIndex)]) -> EngineResult<()> {
+    let [(plain, index), (encrypted, _)] = parts else {
+        return Ok(());
+    };
+    let (Some(plain_header), Some(encrypted_header)) = (&plain.header, &encrypted.header) else {
+        return Err(EngineError::Locked);
+    };
+    manifest::check_plain_part(plain_header, index, encrypted_header).map_err(|message| {
+        EngineError::Manifest {
+            path: plain.dir().to_path_buf(),
+            message: message.into(),
+        }
+    })
 }
 
 /// Where the files of one backed-up folder go when restoring.
@@ -545,6 +587,7 @@ pub fn plan_restore(
     }
     let here = KnownPaths::current();
     let destination = snapshot.destination();
+    check_parts(&parts)?;
 
     // Every part names its own folders. The folders of the encrypted part come
     // only from its own, authenticated header, never from the readable plain
@@ -612,6 +655,7 @@ pub fn plan_restore(
                 encrypted: part.is_encrypted(),
             }),
             encrypted: part.is_encrypted(),
+            mode: entry.mode,
         };
 
         let Some(rel) = safe_relative_path(&entry.path) else {

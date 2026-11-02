@@ -181,6 +181,9 @@ pub struct Notifications {
     pub low_space_percent: u8,
     /// Alert when the destination has less than this many GB free (0 = off).
     pub low_space_gb: u64,
+    /// Alert when an enabled job has had no successful backup for more than
+    /// this many days (0 = off). Checked in the background.
+    pub overdue_days: u32,
     /// Templates; empty means the built-in text in the interface language.
     pub success_title: String,
     pub success_message: String,
@@ -200,6 +203,7 @@ impl Default for Notifications {
             on_skipped: false,
             low_space_percent: 10,
             low_space_gb: 0,
+            overdue_days: 3,
             success_title: String::new(),
             success_message: String::new(),
             problem_title: String::new(),
@@ -427,6 +431,114 @@ pub fn after_run(config: &Config, run: &AutomaticRun, report: Option<&BackupRepo
     }
 }
 
+/// Enabled jobs without a successful backup for longer than allowed, with the
+/// time of their last success. A weekly job gets at least eight days.
+pub fn overdue_jobs<'a>(
+    config: &'a Config,
+    state: &crate::state::State,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<(
+    &'a crate::config::Schedule,
+    Option<chrono::DateTime<chrono::Utc>>,
+)> {
+    let days = config.notifications.overdue_days;
+    if days == 0 {
+        return Vec::new();
+    }
+    config
+        .schedules
+        .iter()
+        .filter(|s| s.enabled)
+        .filter_map(|schedule| {
+            let entry = state
+                .schedules
+                .get(&schedule.id)
+                .cloned()
+                .unwrap_or_default();
+            let last = entry.last_success.or_else(|| {
+                entry
+                    .last_run
+                    .as_ref()
+                    .filter(|r| r.outcome.is_success())
+                    .map(|r| r.at)
+            });
+            // Counted from the last success, or from when the job was switched on.
+            let since = last.or(entry.armed_at)?;
+            let allowed = match schedule.frequency {
+                crate::config::Frequency::Weekly => days.max(8),
+                _ => days,
+            };
+            (now - since > chrono::Duration::days(i64::from(allowed))).then_some((schedule, last))
+        })
+        .collect()
+}
+
+/// Sends an alert for every overdue job, at most once a day per job.
+/// Blocking (network); called by the background service.
+pub fn check_overdue(config_file: &std::path::Path, config: &Config) {
+    let settings = &config.notifications;
+    if !settings.active() || settings.overdue_days == 0 {
+        return;
+    }
+    let now = chrono::Utc::now();
+    let state = crate::state::State::load(config_file);
+    let due: Vec<_> = overdue_jobs(config, &state, now)
+        .into_iter()
+        .filter(|(schedule, _)| {
+            state
+                .schedules
+                .get(&schedule.id)
+                .and_then(|s| s.overdue_alerted)
+                .is_none_or(|at| now - at > chrono::Duration::hours(23))
+        })
+        .collect();
+    if due.is_empty() {
+        return;
+    }
+    let lang = Lang::resolve(config.language);
+    let t = lang.t();
+    let computer = platform::computer_name();
+    for (schedule, last) in &due {
+        let entry = state.schedules.get(&schedule.id);
+        let status = entry
+            .and_then(|e| e.last_run.as_ref())
+            .map(|r| lang.notify_status(r.outcome).to_string())
+            .unwrap_or_else(|| t.notify_never.to_string());
+        let last = last
+            .map(|l| lang.datetime(l.with_timezone(&chrono::Local)))
+            .unwrap_or_else(|| t.notify_never.to_string());
+        let job = crate::automatic::describe(schedule, config, lang);
+        let fill = |text: &str| {
+            text.replace("{job}", &job)
+                .replace("{computer}", &computer)
+                .replace("{days}", &settings.overdue_days.to_string())
+                .replace("{last}", &last)
+                .replace("{status}", &status)
+        };
+        let message = Message {
+            title: fill(t.notify_overdue_title),
+            body: fill(t.notify_overdue_message),
+            severity: Severity::Warning,
+            attachment: None,
+        };
+        for channel in settings.channels.iter().filter(|c| c.enabled) {
+            match send(channel, &message) {
+                Ok(()) => tracing::info!("overdue alert sent via {}", channel.label()),
+                Err(err) => tracing::warn!("overdue alert via {} failed: {err}", channel.label()),
+            }
+        }
+    }
+    crate::state::State::update(config_file, |state| {
+        for (schedule, _) in &due {
+            state
+                .schedules
+                .entry(schedule.id.clone())
+                .or_default()
+                .overdue_alerted = Some(now);
+        }
+    });
+}
+
 /// Notifications for a backup started in the window. Sent from a background
 /// thread; a backup the user cancelled is not reported.
 pub fn after_manual_backup(
@@ -616,23 +728,51 @@ pub fn check_transport(channel: &Channel) -> anyhow::Result<()> {
 }
 
 /// Error texts can contain URLs; tokens and passwords never reach the log.
+/// Every address in the text keeps only its scheme and host, in whatever
+/// form the HTTP library prints it.
 pub fn redact(text: &str, channel: &Channel) -> String {
     let mut out = text.to_string();
-    // The full address can carry a secret in its path or query.
     let url = channel.url.trim();
     if !url.is_empty() {
-        let host_end = url
-            .find("://")
-            .map(|i| i + 3)
-            .and_then(|start| url[start..].find('/').map(|i| start + i))
-            .unwrap_or(url.len());
-        out = out.replace(url, &format!("{}/***", &url[..host_end]));
+        out = out.replace(url, &shorten_url(url));
     }
+    out = shorten_urls(&out);
     for secret in [channel.token.trim(), channel.smtp_password.as_str()] {
         if !secret.is_empty() {
             out = out.replace(secret, "***");
         }
     }
+    out
+}
+
+/// `https://user:pass@host:8443/path?q#f` -> `https://host:8443/***`.
+fn shorten_url(url: &str) -> String {
+    let Some(start) = url.find("://").map(|i| i + 3) else {
+        return "***".into();
+    };
+    let rest = &url[start..];
+    let authority = &rest[..rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len())];
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{}{host}/***", &url[..start])
+}
+
+fn shorten_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let scheme = rest[..i]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || "+.-".contains(c)))
+            .map_or(0, |j| j + 1);
+        let end = rest[i..]
+            .find(|c: char| c.is_whitespace() || "\"'<>(){}`|".contains(c))
+            .map_or(rest.len(), |j| i + j);
+        out.push_str(&rest[..scheme]);
+        out.push_str(&shorten_url(&rest[scheme..end]));
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -932,8 +1072,124 @@ mod tests {
                     ..Channel::default()
                 }
             ),
-            "failed: https://api.telegram.org/bot***/send ***"
+            "failed: https://api.telegram.org/*** ***"
         );
+    }
+
+    #[test]
+    fn addresses_in_errors_lose_their_secrets() {
+        let channel = |url: &str| Channel {
+            kind: ChannelKind::Webhook,
+            url: url.into(),
+            ..Channel::default()
+        };
+        for (url, printed, expected) in [
+            (
+                "https://notify.invalid?token=DUMMY_TOKEN",
+                "https://notify.invalid/?token=DUMMY_TOKEN",
+                "https://notify.invalid/***",
+            ),
+            (
+                "https://u:DUMMY_PASS@notify.invalid/hook",
+                "https://u:DUMMY_PASS@notify.invalid/hook",
+                "https://notify.invalid/***",
+            ),
+            (
+                "https://Notify.Invalid/a/DUMMY_PATH?x=DUMMY_QUERY#DUMMY_FRAGMENT",
+                "https://notify.invalid/a/DUMMY_PATH?x=DUMMY_QUERY#DUMMY_FRAGMENT",
+                "https://notify.invalid/***",
+            ),
+            (
+                "https://notify.invalid/hook?key=DUMMY%20KEY",
+                "https://notify.invalid/hook?key=DUMMY%20KEY",
+                "https://notify.invalid/***",
+            ),
+            (
+                "http://[::1]:8080/DUMMY_PATH",
+                "http://[::1]:8080/DUMMY_PATH",
+                "http://[::1]:8080/***",
+            ),
+        ] {
+            let text = format!("https://notify.invalid: Connection refused for url ({printed}): x");
+            let out = redact(&text, &channel(url));
+            assert!(!out.contains("DUMMY"), "{url}: {out}");
+            assert!(out.contains(expected), "{url}: {out}");
+        }
+    }
+
+    #[test]
+    fn overdue_jobs_are_found() {
+        use crate::config::{Frequency, Schedule};
+        use crate::state::{ScheduleState, State};
+        let now = chrono::Utc::now();
+        let days = |n: i64| now - chrono::Duration::days(n);
+        let mut config = Config::default();
+        for (id, frequency) in [
+            ("daily", Frequency::Daily),
+            ("weekly", Frequency::Weekly),
+            ("fresh", Frequency::Daily),
+            ("off", Frequency::Daily),
+        ] {
+            config.schedules.push(Schedule {
+                id: id.into(),
+                frequency,
+                enabled: id != "off",
+                ..Schedule::default()
+            });
+        }
+        let mut state = State::default();
+        let ok = |at| AutomaticRun {
+            at,
+            outcome: AutomaticOutcome::Complete,
+            message: String::new(),
+            files: 0,
+            bytes: 0,
+            schedule: String::new(),
+        };
+        let failed = AutomaticRun {
+            outcome: AutomaticOutcome::Failed,
+            ..ok(days(0))
+        };
+        state.schedules.insert(
+            "daily".into(),
+            ScheduleState {
+                armed_at: Some(days(30)),
+                last_success: Some(days(4)),
+                last_run: Some(failed),
+                ..ScheduleState::default()
+            },
+        );
+        state.schedules.insert(
+            "weekly".into(),
+            ScheduleState {
+                armed_at: Some(days(30)),
+                last_run: Some(ok(days(5))),
+                ..ScheduleState::default()
+            },
+        );
+        state.schedules.insert(
+            "fresh".into(),
+            ScheduleState {
+                armed_at: Some(days(1)),
+                ..ScheduleState::default()
+            },
+        );
+        state.schedules.insert(
+            "off".into(),
+            ScheduleState {
+                armed_at: Some(days(30)),
+                ..ScheduleState::default()
+            },
+        );
+        let ids = |config: &Config| -> Vec<String> {
+            overdue_jobs(config, &state, now)
+                .into_iter()
+                .map(|(s, _)| s.id.clone())
+                .collect()
+        };
+        assert_eq!(ids(&config), vec!["daily".to_string()]);
+        config.notifications.overdue_days = 0;
+        assert!(ids(&config).is_empty());
     }
 
     #[test]

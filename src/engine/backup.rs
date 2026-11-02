@@ -11,13 +11,14 @@ use chrono::{Local, Utc};
 use super::crypto::VaultKey;
 use super::fsops::{self, CopyError, DestinationLock};
 use super::manifest::{
-    EncryptedSnapshot, FORMAT_VERSION, FileEntry, FileIndex, HEADER_FILE, INDEX_FILE, META_DIR,
-    SnapshotHeader, SnapshotStats, SnapshotStatus, SourceRecord,
+    self, EncryptedSnapshot, FORMAT_VERSION, FileEntry, FileIndex, HEADER_FILE, INDEX_FILE,
+    META_DIR, SnapshotHeader, SnapshotStats, SnapshotStatus, SourceRecord,
 };
 use super::plan::{BackupPlan, ItemKind};
 use super::sources::sanitize_segment;
 use super::{
     CancelToken, Phase, Progress, Reporter, safe_relative_path, snapshots, to_unix_nanos, vault,
+    verify,
 };
 use crate::config::BackupMode;
 use crate::error::{EngineError, EngineResult, IoContext};
@@ -170,6 +171,7 @@ pub fn run_backup(
         };
         let size = meta.len();
         let modified = meta.modified().map(to_unix_nanos).unwrap_or(0);
+        let mode = fsops::unix_mode(&meta);
         let unchanged_since_plan = size == item.size && modified == item.modified;
         let reuse_base = plan.mode == BackupMode::Incremental
             && item.kind == ItemKind::Unchanged
@@ -190,7 +192,17 @@ pub fn run_backup(
                     // Only an intact earlier copy may be reused: same size and
                     // time as recorded. A copy that was cut short (power failure)
                     // or changed in the backup folder is copied fresh instead.
-                    .filter(|(path, _)| base_copy_intact(path, item.size, item.modified));
+                    // A health check also reads it and compares its checksum.
+                    .filter(|(path, base)| {
+                        base_copy_intact(path, item.size, item.modified)
+                            && (!plan.health_check
+                                || healthy(
+                                    verify::file_hash(path, cancel, &mut |_| {}).ok(),
+                                    &base.sha256,
+                                    &src,
+                                    &mut warnings[part],
+                                ))
+                    });
                 match base_path {
                     Some((base_path, base)) => {
                         if plan.hardlink_unchanged && fsops::hard_link(&base_path, &dst).is_ok() {
@@ -214,6 +226,8 @@ pub fn run_backup(
                                 dst.display()
                             );
                         }
+                        // As readable as the original, never more.
+                        fsops::set_mode(&dst, mode);
                         fsops::set_readonly(&dst);
                         stats.copied_files += 1;
                         stats.copied_bytes += size;
@@ -223,9 +237,17 @@ pub fn run_backup(
             }
             (true, Some(key), _) => {
                 let existing = item.blob.as_ref().filter(|b| {
+                    let path = vault::blob_path(&plan.destination, &b.blob);
                     reuse_base
                         && b.encrypted
-                        && vault::blob_intact(&vault::blob_path(&plan.destination, &b.blob), size)
+                        && vault::blob_intact(&path, size)
+                        && (!plan.health_check
+                            || healthy(
+                                verify::decrypted_hash(key, &path, cancel, &mut |_| {}).ok(),
+                                &b.sha256,
+                                &src,
+                                &mut warnings[part],
+                            ))
                 });
                 match existing {
                     Some(base) => {
@@ -268,6 +290,7 @@ pub fn run_backup(
                     size,
                     modified,
                     sha256,
+                    mode,
                     blob,
                 });
                 parts[part].stats.files += 1;
@@ -340,11 +363,14 @@ pub fn run_backup(
         } else {
             source_records.clone()
         },
+        plain_digest: None,
+        health_check: plan.health_check && !cancelled,
         known_paths: known_paths.clone(),
         stats: data.stats.clone(),
     };
 
     let mut plain_header = None;
+    let mut plain_digest = None;
     if let Some(snapshot_dir) = &plain_dir {
         let header = make_header(false, &plain_data, plan.base.as_ref().map(|b| b.id.clone()));
         let index = FileIndex {
@@ -354,6 +380,7 @@ pub fn run_backup(
         };
         // The index is written first and the header last: a folder without a
         // header is recognisable as an unfinished backup.
+        plain_digest = Some(manifest::plain_digest(&header, &index));
         let meta = snapshot_dir.join(META_DIR);
         let index_path = meta.join(INDEX_FILE);
         fsops::write_json_atomic(&index_path, &index).at("could not write", &index_path)?;
@@ -364,11 +391,12 @@ pub fn run_backup(
 
     let mut encrypted_header = None;
     if let Some(key) = key {
-        let header = make_header(
+        let mut header = make_header(
             true,
             &encrypted_data,
             plan.encrypted_base.as_ref().map(|b| b.id.clone()),
         );
+        header.plain_digest = plain_digest;
         let sealed = serde_json::to_vec(&EncryptedSnapshot {
             header: header.clone(),
             index: FileIndex {
@@ -460,6 +488,24 @@ fn new_snapshot_id(plan: &BackupPlan) -> EngineResult<String> {
         "could not find a free backup name",
         std::io::Error::from(std::io::ErrorKind::AlreadyExists),
     ))
+}
+
+/// Health check of one stored copy: a damaged one is noted and stored again.
+fn healthy(
+    actual: Option<String>,
+    expected: &str,
+    src: &std::path::Path,
+    warnings: &mut Vec<String>,
+) -> bool {
+    let ok = actual.is_some_and(|hash| hash.eq_ignore_ascii_case(expected));
+    if !ok {
+        tracing::warn!("health check: damaged stored copy of {}", src.display());
+        warnings.push(format!(
+            "{}: the stored copy was damaged and has been stored again",
+            src.display()
+        ));
+    }
+    ok
 }
 
 /// Whether a file of an earlier backup still has the size and modification

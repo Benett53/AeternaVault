@@ -736,8 +736,9 @@ fn test_vault(destination: &Path, passphrase: &str) -> VaultKey {
     .key
 }
 
-/// Audit F03: the readable header of a partly encrypted backup must not
-/// decide where the encrypted files go.
+/// Audit F03 / R01: the readable header of a partly encrypted backup is
+/// checked against the encrypted one; an edited header stops the restore
+/// before anything is written.
 #[test]
 fn edited_plain_header_cannot_redirect_encrypted_files() {
     let (tmp, source, mut config) = setup();
@@ -747,6 +748,12 @@ fn edited_plain_header_cannot_redirect_encrypted_files() {
     config.sources[0].encrypt_paths = vec!["photos".into()];
     let report = run(&plan(&config, Some(&key)), Some(&key));
     assert!(report.header.split);
+
+    // Unchanged, the backup restores and verifies.
+    fs::remove_dir_all(source.join("photos")).unwrap();
+    let good = restore_plan(&config.destination, RestoreTarget::Original, Some(&key));
+    restore::run_restore(&good, Some(&key), &CancelToken::default(), &mut quiet()).unwrap();
+    assert!(source.join("photos/summer.jpg").is_file());
 
     // Someone with access to the storage points the folder elsewhere.
     let evil = tmp.path().join("Evil");
@@ -759,16 +766,139 @@ fn edited_plain_header_cannot_redirect_encrypted_files() {
     }
     fs::write(&header_file, serde_json::to_string(&header).unwrap()).unwrap();
 
-    fs::remove_dir_all(source.join("photos")).unwrap();
-    let plan = restore_plan(&config.destination, RestoreTarget::Original, Some(&key));
-    restore::run_restore(&plan, Some(&key), &CancelToken::default(), &mut quiet()).unwrap();
-    assert!(
-        source.join("photos/summer.jpg").is_file(),
-        "encrypted file back in its own place"
+    let latest = snapshots::find(&config.destination, "latest", COMPUTER, Some(&key)).unwrap();
+    let options = RestoreOptions {
+        target: RestoreTarget::Original,
+        conflict: ConflictPolicy::ReplaceChanged,
+        verify: true,
+        skip: HashSet::new(),
+    };
+    let refused = plan::plan_restore(
+        &latest,
+        options,
+        Some(&key),
+        &CancelToken::default(),
+        &mut quiet(),
     );
     assert!(
-        !evil.join("photos").exists(),
-        "nothing encrypted written to the edited path"
+        matches!(refused, Err(crate::error::EngineError::Manifest { .. })),
+        "{refused:?}"
+    );
+    let check = super::verify::verify(
+        &latest,
+        Some(&key),
+        true,
+        &CancelToken::default(),
+        &mut quiet(),
+    );
+    assert!(check.is_err(), "verify reports the edited part");
+    assert!(!evil.exists(), "nothing written to the edited path");
+}
+
+/// Audit R01: readable files placed next to a fully encrypted backup are
+/// never restored.
+#[test]
+fn readable_part_added_to_an_encrypted_backup_is_refused() {
+    use super::manifest::{FileEntry, FileIndex, SourceRecord};
+    let (tmp, _source, mut config) = setup();
+    let key = test_vault(&config.destination, "secret words");
+    config.encryption.enabled = true;
+    let report = run(&plan(&config, Some(&key)), Some(&key));
+    assert!(!report.header.split);
+
+    // A readable header with the same id, a folder of its own and one file.
+    let evil = tmp.path().join("Evil");
+    let mut header = report.header.clone();
+    header.encrypted = false;
+    header.split = true;
+    header.sources = vec![SourceRecord {
+        key: "Evil".into(),
+        name: "Evil".into(),
+        path: evil.clone(),
+        portable: None,
+    }];
+    let content = b"planted";
+    write(&report.snapshot_dir.join("Evil/planted.txt"), "planted");
+    let index = FileIndex {
+        format: header.format,
+        files: vec![FileEntry {
+            mode: None,
+            source: "Evil".into(),
+            path: "planted.txt".into(),
+            size: content.len() as u64,
+            modified: 0,
+            sha256: super::format_sha256(&<sha2::Sha256 as sha2::Digest>::digest(content)),
+            blob: format!("{}/Evil/planted.txt", report.header.id),
+        }],
+        warnings: Vec::new(),
+    };
+    let meta = report.snapshot_dir.join(META_DIR);
+    fs::write(meta.join("files.json"), serde_json::to_vec(&index).unwrap()).unwrap();
+    fs::write(
+        meta.join("snapshot.json"),
+        serde_json::to_vec(&header).unwrap(),
+    )
+    .unwrap();
+
+    let latest = snapshots::find(&config.destination, "latest", COMPUTER, Some(&key)).unwrap();
+    assert!(latest.is_split(), "the planted part is seen");
+    let options = RestoreOptions {
+        target: RestoreTarget::Original,
+        conflict: ConflictPolicy::ReplaceChanged,
+        verify: true,
+        skip: HashSet::new(),
+    };
+    let refused = plan::plan_restore(
+        &latest,
+        options,
+        Some(&key),
+        &CancelToken::default(),
+        &mut quiet(),
+    );
+    assert!(
+        matches!(refused, Err(crate::error::EngineError::Manifest { .. })),
+        "{refused:?}"
+    );
+    assert!(!evil.exists(), "nothing planted");
+}
+
+/// Audit R06: on Linux, `A.txt` and `a.txt` are two files, also in an
+/// incremental backup.
+#[cfg(unix)]
+#[test]
+fn names_that_differ_only_in_case_stay_apart() {
+    let (tmp, source, mut config) = setup();
+    write(&source.join("A.txt"), "AAAA");
+    write(&source.join("a.txt"), "BBBB");
+    let time = super::to_unix_nanos(
+        fs::metadata(source.join("A.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+    );
+    super::fsops::set_modified(&source.join("a.txt"), time).unwrap();
+    config.mode = BackupMode::Full;
+    run(&plan(&config, None), None);
+    config.mode = BackupMode::Incremental;
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = plan(&config, None);
+    assert_eq!(second.summary.count(ItemKind::Unchanged), 4);
+    run(&second, None);
+
+    let target = tmp.path().join("Restored");
+    let plan = restore_plan(
+        &config.destination,
+        RestoreTarget::Folder(target.clone()),
+        None,
+    );
+    restore::run_restore(&plan, None, &CancelToken::default(), &mut quiet()).unwrap();
+    assert_eq!(
+        fs::read_to_string(target.join("Documents/A.txt")).unwrap(),
+        "AAAA"
+    );
+    assert_eq!(
+        fs::read_to_string(target.join("Documents/a.txt")).unwrap(),
+        "BBBB"
     );
 }
 
@@ -846,7 +976,6 @@ fn implausible_key_settings_are_refused() {
 }
 
 /// Audit F04: nothing is written through a link inside a chosen folder.
-#[cfg(unix)]
 #[test]
 fn restore_into_a_folder_does_not_follow_links() {
     let (tmp, _source, config) = setup();
@@ -855,7 +984,7 @@ fn restore_into_a_folder_does_not_follow_links() {
     let outside = tmp.path().join("Outside");
     fs::create_dir_all(&target).unwrap();
     fs::create_dir_all(&outside).unwrap();
-    std::os::unix::fs::symlink(&outside, target.join("Documents")).unwrap();
+    make_link(&outside, &target.join("Documents"));
     let plan = restore_plan(&config.destination, RestoreTarget::Folder(target), None);
     let report = restore::run_restore(&plan, None, &CancelToken::default(), &mut quiet()).unwrap();
     assert!(report.failed > 0);
@@ -864,4 +993,196 @@ fn restore_into_a_folder_does_not_follow_links() {
         0,
         "nothing written outside"
     );
+}
+
+/// Audit R04: an incremental backup with a health check reads the encrypted
+/// content it reuses and stores a damaged blob again.
+#[test]
+fn health_check_repairs_damaged_content_in_an_incremental_backup() {
+    let (_tmp, _source, mut config) = setup();
+    let key = test_vault(&config.destination, "secret");
+    config.encryption.enabled = true;
+    config.mode = BackupMode::Incremental;
+    run(&plan(&config, Some(&key)), Some(&key));
+    for blob in list_all_files(&vault::vault_dir(&config.destination).join(vault::BLOB_DIR)) {
+        let mut bytes = fs::read(&blob).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x55;
+        fs::write(&blob, bytes).unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let mut second = plan(&config, Some(&key));
+    assert!(!second.health_check, "the first backup read everything");
+    second.health_check = true;
+    let report = run(&second, Some(&key));
+    assert!(report.header.health_check);
+    assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+    let newest = snapshots::list(&config.destination, Some(&key))
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == report.header.id)
+        .unwrap();
+    let check = super::verify::verify(
+        &newest,
+        Some(&key),
+        true,
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert!(check.is_ok(), "{check:?}");
+    // The next backup does not need another health check.
+    assert!(!plan(&config, Some(&key)).health_check);
+}
+
+/// Audit R04: the same for a plain copy that changed without changing its
+/// size or time.
+#[test]
+fn health_check_replaces_a_silently_damaged_plain_copy() {
+    let (_tmp, _source, mut config) = setup();
+    config.mode = BackupMode::Incremental;
+    let first = run(&plan(&config, None), None);
+    let copy = first.snapshot_dir.join("Documents/letter.txt");
+    let modified = super::to_unix_nanos(fs::metadata(&copy).unwrap().modified().unwrap());
+    let mut permissions = fs::metadata(&copy).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&copy, permissions).unwrap();
+    fs::write(&copy, "Xear archive,").unwrap();
+    super::fsops::set_modified(&copy, modified).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let mut second = plan(&config, None);
+    second.health_check = true;
+    let report = run(&second, None);
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert_eq!(
+        fs::read_to_string(report.snapshot_dir.join("Documents/letter.txt")).unwrap(),
+        "Dear archive,"
+    );
+}
+
+/// A link (Linux) or junction (Windows) to `target` at `link`.
+fn make_link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+}
+
+/// Audit R02: restoring to the original place does not write through a link
+/// that was put inside the backed-up folder; the folder itself may be a link.
+#[test]
+fn restore_to_the_original_place_does_not_follow_links() {
+    let (tmp, source, config) = setup();
+    run(&plan(&config, None), None);
+    let outside = tmp.path().join("Outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::remove_dir_all(source.join("photos")).unwrap();
+    make_link(&outside, &source.join("photos"));
+    fs::remove_file(source.join("letter.txt")).unwrap();
+
+    let plan = restore_plan(&config.destination, RestoreTarget::Original, None);
+    let report = restore::run_restore(&plan, None, &CancelToken::default(), &mut quiet()).unwrap();
+    assert_eq!(report.failed, 1, "{:?}", report.warnings);
+    assert_eq!(report.restored_files, 1);
+    assert!(source.join("letter.txt").is_file());
+    assert_eq!(
+        fs::read_dir(&outside).unwrap().count(),
+        0,
+        "nothing written outside"
+    );
+}
+
+/// Audit R03: on Linux, copies are never more readable than the original.
+#[cfg(unix)]
+#[test]
+fn copies_keep_private_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let (tmp, source, config) = setup();
+    fs::set_permissions(source.join("letter.txt"), fs::Permissions::from_mode(0o600)).unwrap();
+    write(&source.join("tool.sh"), "#!/bin/sh");
+    fs::set_permissions(source.join("tool.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    let report = run(&plan(&config, None), None);
+    assert_eq!(
+        mode(&report.snapshot_dir.join("Documents/letter.txt")),
+        0o400
+    );
+    assert_eq!(mode(&report.snapshot_dir.join("Documents/tool.sh")), 0o555);
+
+    let target = tmp.path().join("Restored");
+    let plan = restore_plan(
+        &config.destination,
+        RestoreTarget::Folder(target.clone()),
+        None,
+    );
+    restore::run_restore(&plan, None, &CancelToken::default(), &mut quiet()).unwrap();
+    assert_eq!(mode(&target.join("Documents/letter.txt")), 0o600);
+    assert_eq!(mode(&target.join("Documents/tool.sh")), 0o755);
+    assert_eq!(mode(&target.join("Documents")), 0o700);
+}
+
+/// Audit F06: a backup is only removed after a move when every file at the
+/// new place matched; a damaged copy already there keeps it where it was.
+#[test]
+fn move_onto_damaged_content_keeps_the_backup() {
+    let (tmp, _source, mut config) = setup();
+    let key = test_vault(&config.destination, "secret");
+    config.encryption.enabled = true;
+    let other = tmp.path().join("Other place");
+    let first = run(&plan(&config, Some(&key)), Some(&key));
+    let listed = snapshots::list(&config.destination, Some(&key)).unwrap();
+    let snapshot = listed.iter().find(|s| s.id == first.header.id).unwrap();
+    super::manage::transfer(
+        snapshot,
+        &other,
+        Some(&key),
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+
+    // The same content once more, while the copy at the new place is damaged.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = run(&plan(&config, Some(&key)), Some(&key));
+    for blob in list_all_files(&vault::vault_dir(&other).join(vault::BLOB_DIR)) {
+        let mut bytes = fs::read(&blob).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x55;
+        fs::write(&blob, bytes).unwrap();
+    }
+    let listed = snapshots::list(&config.destination, Some(&key)).unwrap();
+    let snapshot = listed.iter().find(|s| s.id == second.header.id).unwrap();
+    let moved = super::manage::transfer(
+        snapshot,
+        &other,
+        Some(&key),
+        &CancelToken::default(),
+        &mut quiet(),
+    );
+    assert!(moved.is_err());
+    let still_here = snapshots::list(&config.destination, Some(&key)).unwrap();
+    let kept = still_here
+        .iter()
+        .find(|s| s.id == second.header.id)
+        .unwrap();
+    let check = super::verify::verify(
+        kept,
+        Some(&key),
+        true,
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert!(check.is_ok(), "the original stays complete: {check:?}");
 }

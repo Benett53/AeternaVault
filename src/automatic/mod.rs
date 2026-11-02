@@ -313,7 +313,11 @@ pub fn run_job(
             state.last_automatic = Some(run.clone());
         }
         if let Some(id) = schedule_id {
-            state.schedules.entry(id).or_default().last_run = Some(run.clone());
+            let entry = state.schedules.entry(id).or_default();
+            entry.last_run = Some(run.clone());
+            if run.outcome.is_success() {
+                entry.last_success = Some(run.at);
+            }
         }
     });
     if record {
@@ -684,5 +688,54 @@ mod before_command_tests {
         let err = super::run_before_command(failing, &cancel).unwrap_err();
         assert!(err.contains("broken"), "{err}");
         assert!(err.contains("failed"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use crate::engine::crypto::{Cipher, KdfParams};
+
+    fn new_vault(destination: &std::path::Path) -> VaultKey {
+        let options = vault::VaultOptions {
+            cipher: Cipher::XChaCha20Poly1305,
+            kdf: KdfParams::TEST,
+        };
+        vault::create_with(destination, "other words", options, KdfParams::TEST)
+            .unwrap()
+            .key
+    }
+
+    /// Audit F05: a job with its own destination never uses the key of another
+    /// vault, only the one remembered for its destination.
+    #[test]
+    fn each_destination_gets_its_own_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = AppPaths {
+            config_file: tmp.path().join("config.toml"),
+            log_dir: tmp.path().join("logs"),
+            portable: true,
+        };
+        let a = new_vault(&tmp.path().join("A"));
+        let b = new_vault(&tmp.path().join("B"));
+        let config = Config {
+            destination: tmp.path().join("B"),
+            ..Config::default()
+        };
+        let fingerprint = |key: Option<VaultKey>| key.map(|k| k.fingerprint());
+        assert_eq!(
+            fingerprint(key_for_destination(&paths, &config, Some(a.clone()))),
+            None
+        );
+        assert_eq!(
+            fingerprint(key_for_destination(&paths, &config, Some(b.clone()))),
+            Some(b.fingerprint())
+        );
+        let header = vault::read_header(&config.destination).unwrap();
+        vault::remember_key(&state::key_dir(&paths.config_file), &header, &b).unwrap();
+        assert_eq!(
+            fingerprint(key_for_destination(&paths, &config, Some(a))),
+            Some(b.fingerprint())
+        );
     }
 }

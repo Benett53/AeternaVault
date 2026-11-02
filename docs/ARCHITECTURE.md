@@ -57,12 +57,15 @@ Every backup and restore is first planned by read-only code (`sources`, `scan`, 
   .aeternavault/                    only with encryption (see ENCRYPTION.md)
 ```
 
-Each file is written as `<name>.aeterna-partial` and renamed once it is complete. The header records whether a backup completed, was cancelled or failed; only completed backups serve as the base of the next incremental one.
+Each file is written under a new, unpredictable name (`<name>.<random>.aeterna-partial`) and renamed once it is complete. The header records whether a backup completed, was cancelled or failed; only completed backups serve as the base of the next incremental one.
 
 ## Integrity
 
-- Every file is written as `<name>.aeterna-partial`, flushed to the disk (`advanced.flush_to_disk`), checked against its SHA-256 where known, and only then renamed.
+- Every file is written under a new random name (created exclusively, Linux 0600), flushed to the disk (`advanced.flush_to_disk`), checked against its SHA-256 where known, and only then renamed.
 - An incremental backup reuses an earlier copy only if its size and modification time match the index (plain), or its size matches the exact encrypted size (encrypted). Anything else is copied again.
+- Health check (`advanced.health_check_days`, default 30): once in that period an incremental backup also reads every copy it reuses and compares its checksum (encrypted: decrypts it, which checks the authentication tags). A damaged copy is stored again from the original. A full backup counts as a health check.
+- Retention never removes the newest backup in which every file was backed up: a newer backup with unreadable files does not replace it. Jobs apply retention only after a successful backup and, with checking on, a passed check.
+- On Linux, copies get the permission bits of the original (backups without write bits), new folders are 0700. Restoring never writes through a link below the target folder.
 - Backed-up files are read-only, because hard-linked files share their data between backups.
 - `verify` reads every file again and compares it with its checksum; jobs can do this after each backup.
 

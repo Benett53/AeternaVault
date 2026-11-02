@@ -262,6 +262,13 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             .on_hover_text(t.tip_hardlinks);
         ui.checkbox(&mut app.config.advanced.flush_to_disk, t.adv_flush)
             .on_hover_text(t.tip_flush);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(t.adv_health_check)
+                .on_hover_text(t.tip_health_check);
+            ui.add(egui::DragValue::new(&mut app.config.advanced.health_check_days).range(0..=365))
+                .on_hover_text(t.tip_health_check);
+            ui.label(t.adv_health_check_days);
+        });
         ui.checkbox(&mut app.config.advanced.confirm_before_start, t.adv_confirm)
             .on_hover_text(t.tip_confirm);
         ui.checkbox(
