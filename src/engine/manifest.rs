@@ -145,7 +145,25 @@ pub struct FileEntry {
     /// * plain: relative to the destination, e.g. `2026-09-12 10-10/Documents/a.txt`
     ///   (may point into an older backup on file systems without hard links),
     /// * encrypted: the blob id.
+    ///
+    /// Empty for a symbolic link.
     pub blob: String,
+    /// Symbolic link (Linux): the target exactly as the link names it. A link
+    /// exists only as this entry; nothing is stored for it in the backup
+    /// folder or the vault. `size` is 0 and `sha256` is [`link_digest`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
+impl FileEntry {
+    pub fn is_link(&self) -> bool {
+        self.link.is_some()
+    }
+}
+
+/// The `sha256` of a link entry: the checksum of its target text.
+pub fn link_digest(target: &str) -> String {
+    super::format_sha256(&Sha256::digest(target.as_bytes()))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -163,9 +181,9 @@ pub struct EncryptedSnapshot {
 }
 
 /// What decides where the files of a readable part go and what they contain:
-/// its folders and, per file, name, size, time, permissions and SHA-256. Where a plain
-/// file is stored (`blob`) is left out, as it changes when older backups are
-/// deleted.
+/// its folders and, per file, name, size, time, permissions and SHA-256, and
+/// the target of every link. Where a plain file is stored (`blob`) is left
+/// out, as it changes when older backups are deleted.
 pub fn plain_digest(header: &SnapshotHeader, index: &FileIndex) -> String {
     let sources: Vec<_> = header
         .sources
@@ -177,7 +195,19 @@ pub fn plain_digest(header: &SnapshotHeader, index: &FileIndex) -> String {
         .iter()
         .map(|f| (&f.source, &f.path, f.size, f.modified, &f.sha256, f.mode))
         .collect();
-    let bytes = serde_json::to_vec(&(&header.id, sources, files)).unwrap_or_default();
+    // Links are appended only if there are any, so that backups without
+    // links keep the digest that earlier versions computed.
+    let links: Vec<_> = index
+        .files
+        .iter()
+        .filter_map(|f| f.link.as_ref().map(|target| (&f.source, &f.path, target)))
+        .collect();
+    let bytes = if links.is_empty() {
+        serde_json::to_vec(&(&header.id, sources, files))
+    } else {
+        serde_json::to_vec(&(&header.id, sources, files, links))
+    }
+    .unwrap_or_default();
     super::format_sha256(&Sha256::digest(bytes))
 }
 

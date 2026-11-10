@@ -320,6 +320,31 @@ pub fn set_modified(path: &Path, modified: i64) -> io::Result<()> {
     file.set_times(FileTimes::new().set_modified(from_unix_nanos(modified)))
 }
 
+/// Creates the symbolic link `dst` that names `link_target` (Linux). A file or
+/// link at `dst` is replaced, a folder never. The link is made under a new
+/// name and renamed into place, so nothing at `dst` is followed.
+pub fn write_link(dst: &Path, link_target: &str) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        if let Some(parent) = dst.parent() {
+            create_dir_all(parent)?;
+        }
+        if fs::symlink_metadata(dst).is_ok_and(|meta| meta.is_dir()) {
+            return Err(io::Error::other("a folder with this name exists"));
+        }
+        let partial = partial_path(dst);
+        std::os::unix::fs::symlink(link_target, &partial)?;
+        fs::rename(&partial, dst).inspect_err(|_| {
+            let _ = fs::remove_file(&partial);
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dst, link_target);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
 pub fn hard_link(existing: &Path, new: &Path) -> io::Result<()> {
     if let Some(parent) = new.parent() {
         create_dir_all(parent)?;

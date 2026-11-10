@@ -290,7 +290,23 @@ def main() -> None:
         sys.exit(f"No encrypted backup named {wanted}.")
     name, snapshot = chosen
     failed = 0
-    for entry in snapshot["index"]["files"]:
+    links = []
+    entries = snapshot["index"]["files"]
+    # Symbolic links have no content; they are made after all files, so that
+    # no file is written through a link from the index.
+    for entry in (e for e in entries if e.get("link")):
+        output = safe_join(target, entry["source"], entry["path"])
+        partial = output.with_name(f"{output.name}.{os.urandom(6).hex()}.partial")
+        try:
+            if os.name == "nt":
+                raise ValueError("symbolic links are restored only on Linux")
+            if hashlib.sha256(entry["link"].encode("utf-8")).hexdigest() != entry["sha256"].lower():
+                raise ValueError("checksum mismatch")
+            links.append((entry, output, partial))
+        except Exception as error:
+            failed += 1
+            print(f"could not restore {entry['source']}/{entry['path']}: {error}", file=sys.stderr)
+    for entry in (e for e in entries if not e.get("link")):
         blob = entry["blob"]
         source = vault_dir / "blobs" / blob[:2] / f"{blob}.avb"
         output = safe_join(target, entry["source"], entry["path"])
@@ -315,7 +331,22 @@ def main() -> None:
             if created:
                 partial.unlink(missing_ok=True)
             print(f"could not restore {entry['source']}/{entry['path']}: {error}", file=sys.stderr)
-    total = len(snapshot["index"]["files"])
+    for entry, output, partial in links:
+        try:
+            no_links_below(target, output.parent)
+            output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if output.is_dir() and not output.is_symlink():
+                raise ValueError("a folder with this name exists")
+            os.symlink(entry["link"], partial)
+            try:
+                os.replace(partial, output)
+            except OSError:
+                partial.unlink(missing_ok=True)
+                raise
+        except Exception as error:
+            failed += 1
+            print(f"could not restore {entry['source']}/{entry['path']}: {error}", file=sys.stderr)
+    total = len(entries)
     print(f"{name}: {total - failed} of {total} files restored to {target}")
     sys.exit(1 if failed else 0)
 

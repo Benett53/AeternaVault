@@ -1,14 +1,15 @@
 //! Executes a confirmed [`RestorePlan`].
 //!
 //! Only items marked `New` or `Changed` in the plan are written. Nothing is
-//! ever deleted at the target.
+//! ever deleted at the target. Symbolic links are created after all files, so
+//! no file of a restore is written through a link that the restore made.
 
 use std::time::{Duration, Instant};
 
 use super::crypto::VaultKey;
 use super::fsops::{self, CopyError};
 use super::plan::{ItemKind, RestorePlan};
-use super::{CancelToken, Phase, Progress, Reporter, safe_relative_path, vault};
+use super::{CancelToken, Phase, Progress, Reporter, manifest, safe_relative_path, vault};
 use crate::config::ConflictPolicy;
 use crate::error::{EngineError, EngineResult};
 
@@ -59,11 +60,12 @@ pub fn run_restore(
         "restore started"
     );
 
-    for item in plan
-        .items
-        .iter()
-        .filter(|i| matches!(i.kind, ItemKind::New | ItemKind::Changed))
-    {
+    let writes = |links: bool| {
+        plan.items.iter().filter(move |i| {
+            matches!(i.kind, ItemKind::New | ItemKind::Changed) && i.link.is_some() == links
+        })
+    };
+    for item in writes(false).chain(writes(true)) {
         if cancel.is_cancelled() {
             report.cancelled = true;
             break;
@@ -90,7 +92,13 @@ pub fn run_restore(
             crate::engine::plan::RestoreTarget::Folder(root) => root,
             crate::engine::plan::RestoreTarget::Original => &plan.sources[item.source].root,
         };
-        if let Err(err) = fsops::ensure_no_links(root, &target) {
+        // A link is itself replaced, never followed: for it the check starts
+        // at its folder.
+        let checked = match &item.link {
+            Some(_) => target.parent().unwrap_or(&target),
+            None => &target,
+        };
+        if let Err(err) = fsops::ensure_no_links(root, checked) {
             tracing::warn!("not restored: {err}");
             report.warnings.push(err.to_string());
             report.failed += 1;
@@ -101,10 +109,33 @@ pub fn run_restore(
         // The target may have appeared since the preview; respect "keep existing".
         if item.kind == ItemKind::New
             && plan.options.conflict == ConflictPolicy::KeepExisting
-            && target.exists()
+            && (target.exists() || item.link.is_some() && target.symlink_metadata().is_ok())
         {
             report.skipped += 1;
             progress.files_done += 1;
+            continue;
+        }
+
+        if let Some(link) = &item.link {
+            // The index entry must be consistent, like the checksum of a file.
+            let result = if blob
+                .sha256
+                .eq_ignore_ascii_case(&manifest::link_digest(link))
+            {
+                fsops::write_link(&target, link)
+            } else {
+                Err(std::io::Error::other("invalid entry in the backup index"))
+            };
+            match result {
+                Ok(()) => report.restored_files += 1,
+                Err(err) => {
+                    tracing::warn!("could not restore {}: {err}", target.display());
+                    report.warnings.push(format!("{}: {err}", target.display()));
+                    report.failed += 1;
+                }
+            }
+            progress.files_done += 1;
+            reporter.maybe(&progress);
             continue;
         }
 

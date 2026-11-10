@@ -128,7 +128,7 @@ pub fn delete(
         let mut index = part.load_index(None)?;
         let mut changed = false;
         for entry in &mut index.files {
-            if !prefixes.iter().any(|p| entry.blob.starts_with(p.as_str())) {
+            if entry.is_link() || !prefixes.iter().any(|p| entry.blob.starts_with(p.as_str())) {
                 continue;
             }
             if cancel.is_cancelled() {
@@ -232,7 +232,8 @@ fn prune_blobs(
                 part.id
             )
         })?;
-        used.extend(index.files.into_iter().map(|f| f.blob));
+        let stored = index.files.into_iter().filter(|f| !f.is_link());
+        used.extend(stored.map(|f| f.blob));
     }
     let blobs = vault::vault_dir(destination).join(vault::BLOB_DIR);
     let (mut count, mut bytes) = (0, 0);
@@ -504,6 +505,12 @@ fn copy_parts(
                     if cancel.is_cancelled() {
                         return Err(EngineError::Cancelled);
                     }
+                    // A link is only its entry in the index.
+                    if entry.is_link() {
+                        progress.files_done += 1;
+                        report.files += 1;
+                        continue;
+                    }
                     let own = own_blob(part, &entry.source, &entry.path);
                     let (Some(src_rel), Some(dst_rel)) =
                         (safe_relative_path(&entry.blob), safe_relative_path(&own))
@@ -571,7 +578,7 @@ fn copy_parts(
                     progress.files_done += 1;
                     report.files += 1;
                     report.bytes += entry.size;
-                    if !copied.insert(entry.blob.as_str()) {
+                    if entry.is_link() || !copied.insert(entry.blob.as_str()) {
                         continue;
                     }
                     let dst = vault::blob_path(target, &entry.blob);

@@ -158,6 +158,45 @@ pub fn run_backup(
         let part = if item.encrypted { ENCRYPTED } else { PLAIN };
         let stats = &mut parts[part].stats;
 
+        // A link is stored as an entry in the index only, with the target it
+        // names now. It is never followed.
+        if item.link.is_some() {
+            let link = std::fs::symlink_metadata(&src).and_then(|meta| {
+                let target = std::fs::read_link(&src)?;
+                let target = target.to_str().filter(|t| !t.is_empty()).ok_or_else(|| {
+                    std::io::Error::other("the target of the link cannot be stored")
+                })?;
+                Ok((target.to_string(), meta))
+            });
+            match link {
+                Ok((target, meta)) => {
+                    if item.kind == ItemKind::Unchanged && item.link.as_ref() == Some(&target) {
+                        stats.referenced_files += 1;
+                    } else {
+                        stats.copied_files += 1;
+                    }
+                    stats.files += 1;
+                    parts[part].entries.push(FileEntry {
+                        source: source.key.clone(),
+                        path: item.rel.clone(),
+                        size: 0,
+                        modified: meta.modified().map(to_unix_nanos).unwrap_or(0),
+                        sha256: manifest::link_digest(&target),
+                        mode: None,
+                        blob: String::new(),
+                        link: Some(target),
+                    });
+                }
+                Err(err) => {
+                    warnings[part].push(format!("{}: {err}", src.display()));
+                    stats.failed += 1;
+                }
+            }
+            progress.files_done += 1;
+            reporter.maybe(&progress);
+            continue;
+        }
+
         // Re-check the file: it may have changed since the preview.
         let read_path = reader.read_path(&src);
         let meta = match std::fs::metadata(&read_path) {
@@ -292,6 +331,7 @@ pub fn run_backup(
                     sha256,
                     mode,
                     blob,
+                    link: None,
                 });
                 parts[part].stats.files += 1;
                 parts[part].stats.bytes += size;

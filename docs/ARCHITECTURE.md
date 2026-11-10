@@ -53,11 +53,16 @@ Every backup and restore is first planned by read-only code (`sources`, `scan`, 
   2026-09-24 20-00/                 one folder per backup
     Documents/…                     plain copies (unchanged files are hard links)
     .aeternavault/snapshot.json     header: date, sources, status, statistics
-    .aeternavault/files.json        index: path, size, time, SHA-256 per file
+    .aeternavault/files.json        index: path, size, time, SHA-256 per file;
+                                    symbolic links (Linux) with their target
   .aeternavault/                    only with encryption (see ENCRYPTION.md)
 ```
 
 Each file is written under a new, unpredictable name (`<name>.<random>.aeterna-partial`) and renamed once it is complete. The header records whether a backup completed, was cancelled or failed; only completed backups serve as the base of the next incremental one.
+
+## Symbolic links
+
+Links and junctions are never followed. On Linux a symbolic link is backed up as a link: an index entry with the target it names (`link`), relative or absolute, existing or not. Nothing is created for it in the backup folder, which may be on a file system without links, so links are not visible when browsing a backup. A restore creates the links after all files; a link replaces a file or another link of the same name under the usual conflict rule, never a folder. On Windows, links and junctions in a source are listed as skipped, and link entries of a backup made on Linux are skipped when restoring.
 
 ## Integrity
 

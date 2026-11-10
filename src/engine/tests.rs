@@ -829,6 +829,7 @@ fn readable_part_added_to_an_encrypted_backup_is_refused() {
             modified: 0,
             sha256: super::format_sha256(&<sha2::Sha256 as sha2::Digest>::digest(content)),
             blob: format!("{}/Evil/planted.txt", report.header.id),
+            link: None,
         }],
         warnings: Vec::new(),
     };
@@ -1185,4 +1186,340 @@ fn move_onto_damaged_content_keeps_the_backup() {
     )
     .unwrap();
     assert!(check.is_ok(), "the original stays complete: {check:?}");
+}
+
+/// Adds every kind of symbolic link to the folder made by `setup`: relative,
+/// absolute, dangling, to a folder, and one inside a sub-folder.
+#[cfg(unix)]
+fn add_links(tmp: &Path, source: &Path) {
+    use std::os::unix::fs::symlink;
+    let elsewhere = tmp.join("Elsewhere");
+    write(&elsewhere.join("far.txt"), "far away");
+    symlink("letter.txt", source.join("relative.lnk")).unwrap();
+    symlink(elsewhere.join("far.txt"), source.join("absolute.lnk")).unwrap();
+    symlink("nowhere/gone.txt", source.join("dangling.lnk")).unwrap();
+    symlink("photos", source.join("folder.lnk")).unwrap();
+    symlink("../letter.txt", source.join("photos/up.lnk")).unwrap();
+}
+
+/// Every symbolic link below `root` with the target it names.
+#[cfg(unix)]
+fn link_targets(root: &Path) -> std::collections::BTreeMap<String, String> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.path_is_symlink())
+        .map(|e| {
+            let rel = e.path().strip_prefix(root).unwrap();
+            let target = fs::read_link(e.path()).unwrap();
+            (
+                rel.to_string_lossy().into_owned(),
+                target.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn restore_all(plan: &RestorePlan, key: Option<&VaultKey>) -> restore::RestoreReport {
+    restore::run_restore(plan, key, &CancelToken::default(), &mut quiet()).unwrap()
+}
+
+/// Links are backed up as links: only an entry in the index, never followed,
+/// and restored with the target they named.
+#[cfg(unix)]
+#[test]
+fn links_are_backed_up_and_restored_as_links() {
+    use super::{manage, verify};
+    use std::os::unix::fs::symlink;
+    let (tmp, source, config) = setup();
+    add_links(tmp.path(), &source);
+    assert_eq!(link_targets(&source).len(), 5);
+
+    let first = plan(&config, None);
+    assert_eq!(first.summary.count(ItemKind::Skipped), 0);
+    assert_eq!(first.copy_totals().0, 2, "nothing is copied for a link");
+    let report = run(&first, None);
+    assert_eq!(report.header.stats.files, 7);
+    assert_eq!(report.header.stats.failed, 0);
+    // In the backup folder a link is neither a link nor a file, and the
+    // folder it names is not copied a second time.
+    assert!(link_targets(&config.destination).is_empty());
+    let stored = list_all_files(&report.snapshot_dir.join("Documents"));
+    assert_eq!(stored.len(), 2, "{stored:?}");
+
+    // Unchanged while a link names the same target.
+    let second = plan(&config, None);
+    assert_eq!(second.summary.count(ItemKind::Unchanged), 7);
+    fs::remove_file(source.join("relative.lnk")).unwrap();
+    symlink("photos/summer.jpg", source.join("relative.lnk")).unwrap();
+    let third = plan(&config, None);
+    assert_eq!(third.summary.count(ItemKind::Changed), 1);
+    assert_eq!(third.summary.count(ItemKind::Unchanged), 6);
+    let report = run(&third, None);
+    assert_eq!(report.header.stats.files, 7);
+    assert_eq!(report.header.stats.copied_files, 1);
+    assert_eq!(report.header.stats.referenced_files, 4);
+    assert_eq!(report.header.stats.linked_files, 2);
+
+    let latest = snapshots::find(&config.destination, "latest", COMPUTER, None).unwrap();
+    let check = verify::verify(&latest, None, true, &CancelToken::default(), &mut quiet()).unwrap();
+    assert!(check.is_ok() && check.files == 7, "{check:?}");
+    // Browsing lists what can be opened or copied.
+    assert_eq!(snapshots::contents(&latest, None).unwrap().len(), 2);
+
+    // Into an empty folder.
+    let target = tmp.path().join("Restored");
+    let restored = target.join("Documents");
+    let into = || {
+        restore_plan(
+            &config.destination,
+            RestoreTarget::Folder(target.clone()),
+            None,
+        )
+    };
+    let plan1 = into();
+    assert_eq!(plan1.summary.count(ItemKind::New), 7);
+    let done = restore_all(&plan1, None);
+    assert_eq!((done.restored_files, done.failed), (7, 0), "{done:?}");
+    assert_eq!(link_targets(&restored), link_targets(&source));
+    assert_eq!(
+        fs::read_to_string(restored.join("relative.lnk")).unwrap(),
+        "not really a jpeg"
+    );
+    assert_eq!(list_all_files(&restored).len(), 2);
+
+    // Again: nothing to do.
+    let plan2 = into();
+    assert_eq!(plan2.summary.count(ItemKind::Unchanged), 7);
+    assert_eq!(plan2.write_totals(), (0, 0));
+
+    // Onto a folder in use: another link, a file and a folder in the way.
+    fs::remove_file(restored.join("relative.lnk")).unwrap();
+    symlink("letter.txt", restored.join("relative.lnk")).unwrap();
+    fs::remove_file(restored.join("absolute.lnk")).unwrap();
+    write(&restored.join("absolute.lnk"), "a file in the way");
+    fs::remove_file(restored.join("dangling.lnk")).unwrap();
+    write(&restored.join("dangling.lnk/kept.txt"), "kept");
+
+    let keep = plan::plan_restore(
+        &latest,
+        RestoreOptions {
+            target: RestoreTarget::Folder(target.clone()),
+            conflict: ConflictPolicy::KeepExisting,
+            verify: true,
+            skip: HashSet::new(),
+        },
+        None,
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert_eq!(keep.summary.count(ItemKind::Skipped), 3);
+    assert_eq!(keep.write_totals().0, 0);
+
+    let plan3 = into();
+    assert_eq!(plan3.summary.count(ItemKind::Changed), 2);
+    assert_eq!(plan3.summary.count(ItemKind::Skipped), 1);
+    assert_eq!(plan3.summary.count(ItemKind::Unchanged), 4);
+    let done = restore_all(&plan3, None);
+    assert_eq!((done.restored_files, done.failed), (2, 0), "{done:?}");
+    assert!(
+        restored.join("dangling.lnk/kept.txt").is_file(),
+        "a folder is never replaced"
+    );
+    let mut expected = link_targets(&source);
+    expected.remove("dangling.lnk");
+    assert_eq!(link_targets(&restored), expected);
+    assert_eq!(
+        fs::read_to_string(restored.join("letter.txt")).unwrap(),
+        "Dear archive,",
+        "the file the replaced link named is untouched"
+    );
+
+    // A moved backup keeps its links.
+    let other = tmp.path().join("Other place");
+    manage::transfer(&latest, &other, None, &CancelToken::default(), &mut quiet()).unwrap();
+    let moved = snapshots::find(&other, "latest", COMPUTER, None).unwrap();
+    let check = verify::verify(&moved, None, true, &CancelToken::default(), &mut quiet()).unwrap();
+    assert!(check.is_ok() && check.files == 7, "{check:?}");
+    assert!(link_targets(&other).is_empty());
+}
+
+/// In an encrypted backup, links and their targets are in the encrypted index
+/// only.
+#[cfg(unix)]
+#[test]
+fn links_in_an_encrypted_backup_stay_in_the_encrypted_index() {
+    use super::{manage, verify};
+    let (tmp, source, mut config) = setup();
+    add_links(tmp.path(), &source);
+    let key = test_vault(&config.destination, "secret words");
+    config.encryption.enabled = true;
+
+    let report = run(&plan(&config, Some(&key)), Some(&key));
+    assert!(report.header.encrypted);
+    assert_eq!(report.header.stats.files, 7);
+    assert_eq!(report.header.stats.copied_files, 7);
+    assert!(link_targets(&config.destination).is_empty());
+    for file in list_all_files(&config.destination) {
+        let name = file.to_string_lossy().into_owned();
+        let content = String::from_utf8_lossy(&fs::read(&file).unwrap()).into_owned();
+        for secret in ["dangling", "nowhere", "Elsewhere", ".lnk"] {
+            assert!(!name.contains(secret), "{name}");
+            assert!(!content.contains(secret), "{name} names {secret}");
+        }
+    }
+    let blobs = config.destination.join(META_DIR).join("blobs");
+    assert_eq!(list_all_files(&blobs).len(), 2, "no content for links");
+
+    let second = plan(&config, Some(&key));
+    assert_eq!(second.summary.count(ItemKind::Unchanged), 7);
+    let report = run(&second, Some(&key));
+    assert_eq!(report.header.stats.referenced_files, 7);
+
+    let latest = snapshots::find(&config.destination, "latest", COMPUTER, Some(&key)).unwrap();
+    let cancel = CancelToken::default();
+    let check = verify::verify(&latest, Some(&key), true, &cancel, &mut quiet()).unwrap();
+    assert!(check.is_ok() && check.files == 7, "{check:?}");
+
+    let target = tmp.path().join("Restored");
+    let restore = restore_plan(
+        &config.destination,
+        RestoreTarget::Folder(target.clone()),
+        Some(&key),
+    );
+    let done = restore_all(&restore, Some(&key));
+    assert_eq!((done.restored_files, done.failed), (7, 0), "{done:?}");
+    assert_eq!(
+        link_targets(&target.join("Documents")),
+        link_targets(&source)
+    );
+    // Onto the same folder again: nothing to do.
+    let again = restore_plan(
+        &config.destination,
+        RestoreTarget::Folder(target.clone()),
+        Some(&key),
+    );
+    assert_eq!(again.summary.count(ItemKind::Unchanged), 7);
+
+    // Moving and deleting leave link entries alone.
+    let other = tmp.path().join("Other place");
+    manage::transfer(&latest, &other, Some(&key), &cancel, &mut quiet()).unwrap();
+    let moved = snapshots::find(&other, "latest", COMPUTER, Some(&key)).unwrap();
+    let check = verify::verify(&moved, Some(&key), true, &cancel, &mut quiet()).unwrap();
+    assert!(check.is_ok() && check.files == 7, "{check:?}");
+    let left = snapshots::find(&config.destination, "latest", COMPUTER, Some(&key)).unwrap();
+    let check = verify::verify(&left, Some(&key), true, &cancel, &mut quiet()).unwrap();
+    assert!(check.is_ok() && check.files == 7, "{check:?}");
+}
+
+/// A link in the readable part of a partly encrypted backup is covered by the
+/// checksum in the encrypted header: its target cannot be edited.
+#[cfg(unix)]
+#[test]
+fn link_in_the_readable_part_cannot_be_redirected() {
+    use super::manifest::{self, link_digest};
+    let (tmp, source, mut config) = setup();
+    add_links(tmp.path(), &source);
+    let key = test_vault(&config.destination, "secret words");
+    config.encryption.enabled = true;
+    config.encryption.scope = crate::config::EncryptionScope::Selected;
+    config.sources[0].encrypt_paths = vec!["photos".into()];
+
+    let report = run(&plan(&config, Some(&key)), Some(&key));
+    assert!(report.header.split);
+    assert_eq!(report.header.stats.files, 5, "a file and four links");
+    assert_eq!(report.encrypted_part.as_ref().unwrap().stats.files, 2);
+
+    let target = tmp.path().join("Restored");
+    let restore = restore_plan(
+        &config.destination,
+        RestoreTarget::Folder(target.clone()),
+        Some(&key),
+    );
+    let done = restore_all(&restore, Some(&key));
+    assert_eq!((done.restored_files, done.failed), (7, 0), "{done:?}");
+    assert_eq!(
+        link_targets(&target.join("Documents")),
+        link_targets(&source)
+    );
+
+    let meta = report.snapshot_dir.join(META_DIR);
+    let mut index = manifest::read_index(&meta).unwrap();
+    let entry = index
+        .files
+        .iter_mut()
+        .find(|f| f.path == "relative.lnk")
+        .unwrap();
+    entry.link = Some("/etc/passwd".into());
+    entry.sha256 = link_digest("/etc/passwd");
+    fs::write(meta.join("files.json"), serde_json::to_vec(&index).unwrap()).unwrap();
+
+    let latest = snapshots::find(&config.destination, "latest", COMPUTER, Some(&key)).unwrap();
+    let options = RestoreOptions {
+        target: RestoreTarget::Folder(tmp.path().join("Second")),
+        conflict: ConflictPolicy::ReplaceChanged,
+        verify: true,
+        skip: HashSet::new(),
+    };
+    let refused = plan::plan_restore(
+        &latest,
+        options,
+        Some(&key),
+        &CancelToken::default(),
+        &mut quiet(),
+    );
+    assert!(refused.is_err(), "an edited link target is refused");
+}
+
+/// An edited index that names a link and a file below it: the file goes into
+/// a real folder and the link is not made. An entry whose checksum does not
+/// belong to its target is not restored either.
+#[cfg(unix)]
+#[test]
+fn edited_index_cannot_write_through_a_link_it_names() {
+    use super::manifest::{self, FileEntry, link_digest};
+    use super::verify;
+    let (tmp, _source, config) = setup();
+    let report = run(&plan(&config, None), None);
+    let outside = tmp.path().join("Outside");
+    fs::create_dir_all(&outside).unwrap();
+    let outside_text = outside.to_string_lossy().into_owned();
+
+    let meta = report.snapshot_dir.join(META_DIR);
+    let mut index = manifest::read_index(&meta).unwrap();
+    let link = |path: &str, sha256: String| FileEntry {
+        source: "Documents".into(),
+        path: path.into(),
+        size: 0,
+        modified: 0,
+        sha256,
+        mode: None,
+        blob: String::new(),
+        link: Some(outside_text.clone()),
+    };
+    index
+        .files
+        .insert(0, link("photos", link_digest(&outside_text)));
+    index
+        .files
+        .push(link("other.lnk", link_digest("something else")));
+    fs::write(meta.join("files.json"), serde_json::to_vec(&index).unwrap()).unwrap();
+
+    let target = tmp.path().join("Restored");
+    let restore = restore_plan(
+        &config.destination,
+        RestoreTarget::Folder(target.clone()),
+        None,
+    );
+    let done = restore_all(&restore, None);
+    assert_eq!((done.restored_files, done.failed), (2, 2), "{done:?}");
+    assert!(target.join("Documents/photos/summer.jpg").is_file());
+    assert!(link_targets(&target).is_empty());
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+
+    let latest = snapshots::find(&config.destination, "latest", COMPUTER, None).unwrap();
+    let check = verify::verify(&latest, None, true, &CancelToken::default(), &mut quiet()).unwrap();
+    assert_eq!(check.damaged, vec!["Documents/other.lnk".to_string()]);
 }

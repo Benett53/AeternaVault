@@ -1239,6 +1239,7 @@ impl Lang {
             Note::TargetIsFolder => t.note_target_is_folder.to_string(),
             Note::BackupFileMissing => t.note_backup_file_missing.to_string(),
             Note::UnsafePath => t.note_unsafe_path.to_string(),
+            Note::LinkNotRestored => t.note_link_not_restored.to_string(),
         }
     }
 
@@ -1443,6 +1444,7 @@ pub struct Tr {
     pub note_target_is_folder: &'static str,
     pub note_backup_file_missing: &'static str,
     pub note_unsafe_path: &'static str,
+    pub note_link_not_restored: &'static str,
 
     pub confirm_backup_title: &'static str,
     pub confirm_restore_title: &'static str,
@@ -1904,7 +1906,7 @@ pub static EN: Tr = Tr {
     kind_replace: "Replace",
     kind_identical: "Already identical",
 
-    note_link: "link or junction, not followed",
+    note_link: "link or junction, not backed up",
     note_online_only: "online-only file, not stored on this computer",
     note_inside_destination: "this is the backup destination",
     note_source_missing: "folder not found",
@@ -1914,6 +1916,7 @@ pub static EN: Tr = Tr {
     note_target_is_folder: "a folder with this name exists",
     note_backup_file_missing: "missing in the backup",
     note_unsafe_path: "invalid path in the backup index",
+    note_link_not_restored: "symbolic link, restored only on Linux",
 
     confirm_backup_title: "Start the backup?",
     confirm_restore_title: "Start the restore?",
@@ -2392,7 +2395,7 @@ pub static DE: Tr = Tr {
     kind_replace: "Ersetzen",
     kind_identical: "Bereits identisch",
 
-    note_link: "Verknüpfung, wird nicht verfolgt",
+    note_link: "Verknüpfung, wird nicht gesichert",
     note_online_only: "nur online verfügbar, nicht auf diesem Computer gespeichert",
     note_inside_destination: "dies ist das Sicherungsziel",
     note_source_missing: "Ordner nicht gefunden",
@@ -2402,6 +2405,7 @@ pub static DE: Tr = Tr {
     note_target_is_folder: "ein Ordner mit diesem Namen existiert",
     note_backup_file_missing: "fehlt in der Sicherung",
     note_unsafe_path: "ungültiger Pfad im Sicherungsindex",
+    note_link_not_restored: "symbolische Verknüpfung, wird nur unter Linux wiederhergestellt",
 
     confirm_backup_title: "Sicherung starten?",
     confirm_restore_title: "Wiederherstellung starten?",

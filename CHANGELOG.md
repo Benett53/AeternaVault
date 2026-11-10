@@ -4,6 +4,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ## [Unreleased]
 
+### Added
+
+- Linux: symbolic links in backed-up folders are backed up as links and restored as links. The target is stored as the link names it (relative, absolute, also if it does not exist); links are never followed. Before, links were left out. A link is only an entry in the backup index, in encrypted backups in the encrypted index. Version 0.9.0 and older skip these entries when restoring such a backup and report them as missing when checking it. On Windows, links and junctions are still skipped.
+
 ### Fixed
 
 - Linux: with MangoHud or vkBasalt enabled for the whole session, the overlay was drawn inside the AeternaVault window and kept it redrawing, about 4 % CPU while idle. Both are now switched off for the window.

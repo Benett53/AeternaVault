@@ -2,7 +2,8 @@
 //!
 //! Every stored file is read again: plain files are hashed and compared with
 //! the SHA-256 in the index; encrypted blobs are decrypted into nothing, which
-//! also checks their authentication tags.
+//! also checks their authentication tags. A link has no stored copy; its
+//! entry is compared with the checksum of the target it names.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read};
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 
 use super::crypto::VaultKey;
+use super::manifest::link_digest;
 use super::snapshots::SnapshotInfo;
 use super::{CancelToken, Phase, Progress, Reporter, format_sha256, safe_relative_path, vault};
 use crate::error::{EngineError, EngineResult};
@@ -88,6 +90,14 @@ pub fn verify(
             progress.current = label.clone();
             progress.files_done += 1;
             report.files += 1;
+
+            if let Some(link) = &entry.link {
+                if !entry.sha256.eq_ignore_ascii_case(&link_digest(link)) {
+                    tracing::warn!("damaged in backup {}: {label}", snapshot.qualified_id());
+                    report.damaged.push(label);
+                }
+                continue;
+            }
 
             let path: Option<PathBuf> = match part.blob_root() {
                 Some(root) => safe_relative_path(&entry.blob).map(|rel| root.join(rel)),

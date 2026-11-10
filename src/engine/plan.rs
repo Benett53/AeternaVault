@@ -62,6 +62,8 @@ pub enum Note {
     TargetIsFolder,
     BackupFileMissing,
     UnsafePath,
+    /// Restore: a symbolic link, on a system where links are not restored.
+    LinkNotRestored,
 }
 
 impl From<SkipReason> for Note {
@@ -100,6 +102,8 @@ pub struct PlanItem {
     pub encrypted: bool,
     /// Restore: Linux permission bits of the original.
     pub mode: Option<u32>,
+    /// A symbolic link: its target. Nothing is copied for it.
+    pub link: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +177,8 @@ impl BackupPlan {
     /// Whether an item's content is copied (as opposed to linked/referenced).
     pub fn copies(&self, item: &PlanItem) -> bool {
         match item.kind {
+            // A link is only an entry in the index.
+            _ if item.link.is_some() => false,
             ItemKind::New | ItemKind::Changed => true,
             ItemKind::Unchanged => self.mode == BackupMode::Full || item.blob.is_none(),
             ItemKind::Removed | ItemKind::Skipped => false,
@@ -347,16 +353,21 @@ pub fn plan_backup(
             let part = usize::from(encrypted);
             let same_part = previous[part].and_then(|m| m.get(&lower));
             let any_part = same_part.or_else(|| previous[1 - part].and_then(|m| m.get(&lower)));
-            let kind = match any_part {
-                None => ItemKind::New,
-                Some(e) if e.size == file.size && e.modified == file.modified => {
+            let kind = match (any_part, &file.link) {
+                (None, _) => ItemKind::New,
+                // A link is unchanged while it names the same target.
+                (Some(e), Some(target)) if e.link.as_ref() == Some(target) => ItemKind::Unchanged,
+                (Some(e), None)
+                    if !e.is_link() && e.size == file.size && e.modified == file.modified =>
+                {
                     ItemKind::Unchanged
                 }
-                Some(_) => ItemKind::Changed,
+                (Some(_), _) => ItemKind::Changed,
             };
             // Content can only be reused from the part it is stored in now.
+            // A link has no content.
             let blob = same_part
-                .filter(|_| kind == ItemKind::Unchanged)
+                .filter(|_| kind == ItemKind::Unchanged && file.link.is_none())
                 .map(|e| BlobRef {
                     blob: e.blob.clone(),
                     sha256: e.sha256.clone(),
@@ -381,6 +392,7 @@ pub fn plan_backup(
                     blob,
                     encrypted,
                     mode: None,
+                    link: file.link,
                 },
             );
         }
@@ -408,6 +420,7 @@ pub fn plan_backup(
                     blob: None,
                     encrypted: false,
                     mode: None,
+                    link: None,
                 },
             );
         }
@@ -435,6 +448,7 @@ pub fn plan_backup(
                     blob: None,
                     encrypted: false,
                     mode: None,
+                    link: None,
                 },
             );
         }
@@ -510,7 +524,7 @@ pub struct RestorePlan {
 }
 
 impl RestorePlan {
-    /// (files, bytes) that will be written.
+    /// (files and links, bytes) that will be written.
     pub fn write_totals(&self) -> (u64, u64) {
         self.items
             .iter()
@@ -656,6 +670,7 @@ pub fn plan_restore(
             }),
             encrypted: part.is_encrypted(),
             mode: entry.mode,
+            link: entry.link.clone(),
         };
 
         let Some(rel) = safe_relative_path(&entry.path) else {
@@ -664,6 +679,16 @@ pub fn plan_restore(
             push(&mut plan.items, &mut plan.summary, item);
             continue;
         };
+        if let Some(link) = &entry.link {
+            plan_link(
+                &mut item,
+                link,
+                &planned.root.join(&rel),
+                plan.options.conflict,
+            );
+            push(&mut plan.items, &mut plan.summary, item);
+            continue;
+        }
         let blob_path = match part.blob_root() {
             Some(root) => safe_relative_path(&entry.blob).map(|b| root.join(b)),
             None => entry
@@ -719,6 +744,37 @@ pub fn plan_restore(
     progress.phase = Phase::Finishing;
     reporter.now(&progress);
     Ok(plan)
+}
+
+/// What restoring a link will do. A link at the target that names the same
+/// target is unchanged; a folder is never replaced.
+fn plan_link(item: &mut PlanItem, link: &str, target: &Path, conflict: ConflictPolicy) {
+    if !cfg!(unix) {
+        item.kind = ItemKind::Skipped;
+        item.note = Some(Note::LinkNotRestored);
+        return;
+    }
+    match std::fs::symlink_metadata(target) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => item.kind = ItemKind::New,
+        Err(err) => {
+            item.kind = ItemKind::Skipped;
+            item.note = Some(Note::NoAccess(err.to_string()));
+        }
+        Ok(meta) if meta.is_dir() => {
+            item.kind = ItemKind::Skipped;
+            item.note = Some(Note::TargetIsFolder);
+        }
+        Ok(meta) => {
+            let same = meta.file_type().is_symlink()
+                && std::fs::read_link(target).is_ok_and(|t| t.to_str() == Some(link));
+            if same {
+                item.kind = ItemKind::Unchanged;
+            } else {
+                let existing_modified = meta.modified().map(to_unix_nanos).unwrap_or(0);
+                apply_conflict_policy(item, conflict, existing_modified > item.modified);
+            }
+        }
+    }
 }
 
 fn apply_conflict_policy(item: &mut PlanItem, policy: ConflictPolicy, existing_is_newer: bool) {

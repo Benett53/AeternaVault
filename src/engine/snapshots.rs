@@ -163,7 +163,9 @@ impl StoredFile {
     }
 }
 
-/// All files of a backup (every part), sorted by path.
+/// All files of a backup (every part), sorted by path. Links are left out:
+/// nothing is stored for them that could be opened or copied; they come back
+/// with a restore.
 pub fn contents(snapshot: &SnapshotInfo, key: Option<&VaultKey>) -> EngineResult<Vec<StoredFile>> {
     if snapshot.needs_unlock() {
         return Err(EngineError::Locked);
@@ -171,7 +173,8 @@ pub fn contents(snapshot: &SnapshotInfo, key: Option<&VaultKey>) -> EngineResult
     let mut files = Vec::new();
     for part in snapshot.parts() {
         let index = part.load_index(key)?;
-        files.extend(index.files.into_iter().map(|f| StoredFile {
+        let stored = index.files.into_iter().filter(|f| !f.is_link());
+        files.extend(stored.map(|f| StoredFile {
             source: f.source,
             path: f.path,
             size: f.size,

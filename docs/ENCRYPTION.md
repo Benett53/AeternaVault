@@ -226,7 +226,9 @@ One stream per backup; its plaintext is UTF-8 JSON:
     "format": 3,
     "files": [
       { "source": "Documents", "path": "Letters/2026/a.txt", "size": 13, "modified": 1757872800000000000,
-        "sha256": "<hex of the plaintext>", "mode": 420, "blob": "<blob id>" }
+        "sha256": "<hex of the plaintext>", "mode": 420, "blob": "<blob id>" },
+      { "source": "Documents", "path": "current", "size": 0, "modified": 1757872800000000000,
+        "sha256": "<hex of the target text>", "blob": "", "link": "Letters/2026" }
     ],
     "warnings": []
   }
@@ -238,6 +240,13 @@ One stream per backup; its plaintext is UTF-8 JSON:
 - `modified` is nanoseconds since 1970-01-01 UTC.
 - `mode` (optional, Linux) is the permission bits of the original; only the
   read, write and execute bits are restored.
+- `link` (optional, Linux): the entry is a symbolic link and `link` is the
+  target exactly as the link names it. A link is never followed and has no
+  blob: `blob` is empty, `size` is 0 and `sha256` is the SHA-256 of the target
+  text (UTF-8). A link whose target is not valid UTF-8 is not backed up.
+  The format number is unchanged. Version 0.9.0 and older do not know `link`:
+  they leave these entries out when restoring and report them as missing when
+  checking.
 - `health_check` (optional): every reused stored content was read and checked
   during this backup.
 - A restore must reject paths containing `..`, drive letters or absolute paths.
@@ -268,7 +277,9 @@ header therefore decides:
 - `plain_digest` (since 0.9.0) is SHA-256 over the JSON array
   `[id, [[key, path, portable], …], [[source, path, size, modified, sha256, mode], …]]`
   of the readable header and index. A mismatch is refused. `blob` is left out,
-  because it changes when older plain backups are deleted.
+  because it changes when older plain backups are deleted. If the readable
+  index has link entries, a fourth element `[[source, path, link], …]` (links
+  only, in index order) is appended to the array.
 - Without `plain_digest` (0.8.1 and older), every folder of the readable header
   must be listed identically in the encrypted header.
 
@@ -298,6 +309,10 @@ A refused readable part stops a restore or check before anything is written.
    authentication or checksum failure leaves the target untouched and is
    reported. Nothing is written through a symbolic link or junction below the
    target folder.
+4. Linux: create the symbolic links of the index after all files, each under
+   a new name that is renamed into place. An entry whose `sha256` does not
+   match its target is not restored. A link replaces a file or link of the
+   same name, never a folder.
 
 ## Threat model in short
 

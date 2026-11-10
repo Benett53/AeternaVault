@@ -3,7 +3,8 @@
 //! Decisions made here:
 //! * Symbolic links and junctions are never followed. They cause loops and
 //!   duplicates (older profiles contain junctions such as `My Music` inside
-//!   `Documents`). They are listed as skipped so nothing disappears silently.
+//!   `Documents`). On Linux a link is collected as a link, with the target it
+//!   names; on Windows it is listed as skipped so nothing disappears silently.
 //! * Cloud placeholders (OneDrive "online-only" files) are skipped by default,
 //!   because reading them would download them.
 //! * The destination folder is skipped if it lies inside a source.
@@ -29,6 +30,8 @@ pub struct ScannedFile {
     pub rel: String,
     pub size: u64,
     pub modified: i64,
+    /// A symbolic link: the target as the link names it. `size` is 0.
+    pub link: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,10 +164,7 @@ pub fn scan_source(
                     Ok(meta) if meta.is_file() => {
                         consider_file(root, &path, meta, options, progress, reporter, &mut result)
                     }
-                    Ok(_) => result.skipped.push(SkippedEntry {
-                        path,
-                        reason: SkipReason::Link,
-                    }),
+                    Ok(meta) => consider_link(root, &path, &meta, options, progress, &mut result),
                     // Selected items that do not exist (yet) are simply not there.
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                     Err(err) => result.skipped.push(SkippedEntry {
@@ -221,10 +221,13 @@ fn walk(
 
         if file_type.is_symlink() {
             if options.selection.is_included(&rel) {
-                result.skipped.push(SkippedEntry {
-                    path: path.to_path_buf(),
-                    reason: SkipReason::Link,
-                });
+                match entry.metadata() {
+                    Ok(meta) => consider_link(root, path, &meta, options, progress, result),
+                    Err(err) => result.skipped.push(SkippedEntry {
+                        path: path.to_path_buf(),
+                        reason: SkipReason::NoAccess(err.to_string()),
+                    }),
+                }
             }
             continue;
         }
@@ -295,6 +298,7 @@ fn consider_file(
         rel,
         size: meta.len(),
         modified,
+        link: None,
     });
 
     progress.phase = Phase::Scanning;
@@ -303,6 +307,57 @@ fn consider_file(
     if progress.files_done.is_multiple_of(64) {
         progress.current = path.display().to_string();
         reporter.maybe(progress);
+    }
+}
+
+/// A symbolic link, junction or other entry that is neither a file nor a
+/// folder. It is never followed. On Linux a symbolic link is collected with
+/// its target; everything else is listed as skipped.
+fn consider_link(
+    root: &Path,
+    path: &Path,
+    meta: &std::fs::Metadata,
+    options: &ScanOptions<'_>,
+    progress: &mut Progress,
+    result: &mut ScanResult,
+) {
+    let skip = |result: &mut ScanResult, reason| {
+        result.skipped.push(SkippedEntry {
+            path: path.to_path_buf(),
+            reason,
+        })
+    };
+    if !cfg!(unix) || !meta.file_type().is_symlink() {
+        return skip(result, SkipReason::Link);
+    }
+    let Ok(rel_path) = path.strip_prefix(root) else {
+        return;
+    };
+    let rel = rel_to_string(rel_path);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if options.excludes.is_excluded(&name, &rel) {
+        result.excluded += 1;
+        return;
+    }
+    match std::fs::read_link(path) {
+        Ok(target) => match target.to_str() {
+            Some(target) if !target.is_empty() => {
+                result.files.push(ScannedFile {
+                    rel,
+                    size: 0,
+                    modified: meta.modified().map(to_unix_nanos).unwrap_or(0),
+                    link: Some(target.to_string()),
+                });
+                progress.phase = Phase::Scanning;
+                progress.files_done += 1;
+            }
+            // A target that is not valid text cannot be stored in the index.
+            _ => skip(result, SkipReason::Link),
+        },
+        Err(err) => skip(result, SkipReason::NoAccess(err.to_string())),
     }
 }
 
