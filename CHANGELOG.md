@@ -2,6 +2,12 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Linux: with MangoHud or vkBasalt enabled for the whole session, the overlay was drawn inside the AeternaVault window and kept it redrawing, about 4 % CPU while idle. Both are now switched off for the window.
+
 ## [0.9.0] - 2026-11-02
 
 ### Added

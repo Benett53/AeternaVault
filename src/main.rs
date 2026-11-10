@@ -50,6 +50,17 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Overlays such as MangoHud hook every Vulkan application when they are
+    // enabled for the whole session. Over a backup tool the overlay is noise,
+    // and it redraws all the time, which costs CPU in a window that otherwise
+    // only draws on input.
+    #[cfg(target_os = "linux")]
+    // SAFETY: nothing else runs yet, so no other thread reads the environment.
+    unsafe {
+        std::env::set_var("DISABLE_MANGOHUD", "1");
+        std::env::set_var("DISABLE_VKBASALT", "1");
+    }
+
     let args = Args::parse();
     if args.quit {
         return if platform::instance::quit_all(std::time::Duration::from_secs(30)) {
