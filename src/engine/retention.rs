@@ -5,6 +5,11 @@
 //! newest backup of each of the last days, weeks and months. Only backups of
 //! the given computer are considered, and only those whose details are known —
 //! a locked encrypted backup is never removed.
+//!
+//! The rules count all backups of a computer at one destination together.
+//! Jobs can back up different folders there, so two safeguards apply whatever
+//! the rules say: the newest backup in which every file was backed up stays,
+//! and so does the newest backup of every folder.
 
 use std::collections::HashSet;
 
@@ -43,6 +48,13 @@ pub fn to_remove(snapshots: &[SnapshotInfo], policy: &Retention, computer: &str)
     if let Some(complete) = usable.iter().find(|s| is_complete(s)) {
         keep.insert(complete.qualified_id());
     }
+    // Backups of one job must not push out the only backup of a folder that
+    // another job backs up less often: the newest backup of every folder
+    // stays, and the newest one of it without unreadable files.
+    keep.extend(newest_per_folder(usable.iter().copied()));
+    keep.extend(newest_per_folder(
+        usable.iter().copied().filter(|s| is_complete(s)),
+    ));
 
     own.into_iter()
         .filter(|s| !keep.contains(&s.qualified_id()))
@@ -55,6 +67,32 @@ pub fn to_remove(snapshots: &[SnapshotInfo], policy: &Retention, computer: &str)
         .filter(|s| !s.needs_unlock())
         .map(SnapshotInfo::qualified_id)
         .collect()
+}
+
+/// Of `backups` (newest first): for every backed-up folder, the first backup
+/// that contains it.
+fn newest_per_folder<'a>(backups: impl Iterator<Item = &'a SnapshotInfo>) -> HashSet<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut newest = HashSet::new();
+    for snapshot in backups {
+        let folders = snapshot
+            .parts()
+            .filter_map(|p| p.header.as_ref())
+            .flat_map(|h| h.sources.iter());
+        let mut first = false;
+        for folder in folders {
+            let path = folder.path.to_string_lossy();
+            first |= seen.insert(if cfg!(windows) {
+                path.to_lowercase()
+            } else {
+                path.into_owned()
+            });
+        }
+        if first {
+            newest.insert(snapshot.qualified_id());
+        }
+    }
+    newest
 }
 
 /// Whether every part of a backup finished without failed files.
@@ -306,5 +344,42 @@ mod tests {
             snapshot(2, 2, SnapshotStatus::Failed),
         ];
         assert!(to_remove(&all, &Retention::default(), "PC").is_empty());
+    }
+
+    fn with_folder(mut snapshot: SnapshotInfo, folder: &str) -> SnapshotInfo {
+        let header = snapshot.header.as_mut().unwrap();
+        header.sources = vec![crate::engine::manifest::SourceRecord {
+            key: folder.into(),
+            name: folder.into(),
+            path: PathBuf::from("/data").join(folder),
+            portable: None,
+        }];
+        snapshot
+    }
+
+    /// Jobs can back up different folders into the same destination. The
+    /// newer backups of one job must not push out the only backup of a
+    /// folder that another job backs up less often.
+    #[test]
+    fn the_newest_backup_of_every_folder_stays() {
+        let all = vec![
+            with_folder(snapshot(1, 0, SnapshotStatus::Complete), "Documents"),
+            with_folder(snapshot(2, 1, SnapshotStatus::Complete), "Documents"),
+            with_folder(snapshot(3, 2, SnapshotStatus::Complete), "Database"),
+            with_folder(snapshot(4, 3, SnapshotStatus::Complete), "Documents"),
+            with_folder(snapshot(5, 9, SnapshotStatus::Complete), "Database"),
+        ];
+        let strict = Retention {
+            enabled: true,
+            keep_last: 1,
+            keep_daily: 0,
+            keep_weekly: 0,
+            keep_monthly: 0,
+        };
+        let removed = to_remove(&all, &strict, "PC");
+        assert_eq!(
+            removed,
+            vec!["s002".to_string(), "s004".to_string(), "s005".to_string()]
+        );
     }
 }

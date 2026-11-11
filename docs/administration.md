@@ -29,6 +29,7 @@ aeternavault-cli system background on
 
 - **Command before the backup** (`--before`): runs and is waited for; if it fails, the backup does not run and a problem is reported. Use it for database dumps (`pg_dump`, `mysqldump`) or to stop and start services. The password of `pg_dump` belongs in `%APPDATA%\postgresql\pgpass.conf`, not on the command line.
 - **Destination per job** (`--destination`): e.g. a daily job to a local disk and a weekly job to a NAS. Encrypted backups need encryption set up at each destination. The Backups tab shows the general destination; others are listed with `aeternavault-cli list --destination <folder>`.
+- **Retention with several jobs**: the rules count all backups of a computer at one destination together, not per job. The newest backup of every folder is always kept, but older backups of a job that runs rarely give way to those of a job that runs often. Give jobs with different folders their own destination if each should keep its own history.
 - **Names**: a job's backups carry the job's name; any backup can be renamed (`aeternavault-cli rename latest "Before migration"`).
 
 ## Monitoring
