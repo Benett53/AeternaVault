@@ -1578,3 +1578,26 @@ fn missing_content_counts_as_failed_on_restore() {
     assert!(result.warnings.iter().any(|w| w.contains("letter.txt")));
     assert!(!target.join("Documents/letter.txt").exists());
 }
+
+/// Backups of the same minute are numbered `-2`, `-3` …; digits in the
+/// computer name must not change their order.
+#[test]
+fn backups_of_one_minute_are_listed_in_the_order_they_were_made() {
+    let tmp = tempfile::tempdir().unwrap();
+    let names = [
+        "2026-11-11 13-14 (PC7)",
+        "2026-11-11 13-15 (PC7)",
+        "2026-11-11 13-15-2 (PC7)",
+        "2026-11-11 13-15-10 (PC7)",
+    ];
+    for name in names {
+        fs::create_dir_all(tmp.path().join(name).join(META_DIR)).unwrap();
+    }
+    let listed: Vec<String> = snapshots::list(tmp.path(), None)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    let newest_first: Vec<&str> = names.iter().rev().copied().collect();
+    assert_eq!(listed, newest_first);
+}

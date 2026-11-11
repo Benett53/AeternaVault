@@ -132,14 +132,28 @@ impl SnapshotInfo {
         }
     }
 
+    /// Orders backups by the time in their name (`2026-09-14 14-32`) and,
+    /// within a minute, by their number (`-2`, `-3` …). The computer name
+    /// behind it is not part of the order, whatever digits it contains.
     fn sort_key(&self) -> String {
-        let digits: String = self
+        let stamp: String = self
             .id
             .chars()
+            .take(16)
             .filter(char::is_ascii_digit)
-            .take(14)
             .collect();
-        format!("{digits:0<14}")
+        let number = self
+            .id
+            .get(16..)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .map(|rest| {
+                rest.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+            })
+            .and_then(|digits| digits.parse::<u32>().ok())
+            .unwrap_or(1);
+        format!("{stamp}{number:010}")
     }
 }
 

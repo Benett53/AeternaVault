@@ -12,6 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 - Linux: a named pipe in a backed-up folder (for example `~/.steam/steam.pipe`) made the backup wait forever, because opening a pipe waits for a writer. Pipes, sockets and device files are now listed as skipped and never opened.
 - Retention: with several jobs backing up different folders into the same destination, the backups of the job that runs more often pushed out every backup of the other one, leaving a folder without any backup. The newest backup of every folder is now always kept.
+- Backups made within the same minute were listed in the wrong order when the destination is shared by several computers and the computer name contains a digit; `latest` then meant the first backup of that minute.
 - Notifications for a job with its own destination named the general destination and its free space, and the low-space warning watched the wrong drive. They now refer to the job's destination.
 - `aeternavault-cli backup --job` for a job with its own encrypted destination asked for the passphrase of the general destination and then failed. It now unlocks the job's destination.
 - Restore: files whose content is missing in the backup, or whose index entry is invalid, were counted as "left as they were", and `aeternavault-cli restore` ended with exit code 0. They now count as failed, are named in the report, and the exit code is 2.
