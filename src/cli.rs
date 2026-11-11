@@ -2368,7 +2368,8 @@ fn new_passphrase(ctx: &mut Ctx) -> anyhow::Result<String> {
 
 fn write_recovery_file(file: &Path, key: &str, destination: &Path) -> anyhow::Result<()> {
     let text = Lang::En.recovery_file_text(key, "", &destination.display().to_string());
-    std::fs::write(file, text.replace('\n', "\r\n"))
+    // On Linux readable by its owner only, like the remembered key.
+    platform::write_private_file(file, text.replace('\n', "\r\n").as_bytes())
         .with_context(|| format!("could not write {}", file.display()))
 }
 

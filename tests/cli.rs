@@ -193,8 +193,26 @@ fn encrypted_backups_need_the_passphrase_to_read() {
     let env = Env::new();
     add_documents(&env);
     let passphrase = "correct horse battery staple";
-    let setup = env.run_with_secret(&["encryption", "setup", "--remember"], passphrase);
+    let recovery_file = env.path("recovery.txt");
+    let setup = env.run_with_secret(
+        &[
+            "encryption",
+            "setup",
+            "--remember",
+            "--recovery-file",
+            recovery_file.to_str().unwrap(),
+        ],
+        passphrase,
+    );
     assert_success(&["encryption", "setup"], &setup);
+    // The recovery key opens everything: its file is for its owner only.
+    assert!(fs::read_to_string(&recovery_file).unwrap().contains('-'));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&recovery_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     // Backing up uses the remembered key.
     env.ok(&["backup"]);

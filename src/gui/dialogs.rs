@@ -572,7 +572,11 @@ fn save_recovery_file(
     let text = lang.recovery_file_text(key, vault_id, &destination.display().to_string());
     // Notepad-friendly line endings.
     let text = text.replace('\n', "\r\n");
-    Some(std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display())))
+    // On Linux readable by its owner only, like the remembered key.
+    Some(
+        crate::platform::write_private_file(&path, text.as_bytes())
+            .map_err(|e| format!("{}: {e}", path.display())),
+    )
 }
 
 /// Weak / fair / good. The criteria appear when pointing at the bar or at
