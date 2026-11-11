@@ -330,3 +330,76 @@ fn job_with_its_own_encrypted_destination_takes_its_passphrase() {
     assert_eq!(at_job.as_array().unwrap().len(), 1);
     assert!(env.json(&["list"]).as_array().unwrap().is_empty());
 }
+
+/// Answers one HTTP request on this computer and returns its body.
+fn receive_one_request() -> (u16, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead, BufReader, Read};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let line = line.trim().to_ascii_lowercase();
+            if line.is_empty() {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("content-length:") {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        reader
+            .get_mut()
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .unwrap();
+        let _ = sender.send(String::from_utf8_lossy(&body).into_owned());
+    });
+    (port, receiver)
+}
+
+/// The notification of a job with its own destination is about that
+/// destination (name, free space), not about the general one.
+#[test]
+fn notification_names_the_destination_of_the_job() {
+    let env = Env::new();
+    add_documents(&env);
+    let own = env.path("job-dest");
+    env.ok(&[
+        "job",
+        "add",
+        "--every",
+        "day",
+        "--name",
+        "Nightly",
+        "--destination",
+        own.to_str().unwrap(),
+    ]);
+    let (port, received) = receive_one_request();
+    let url = format!("http://127.0.0.1:{port}/hook");
+    env.ok(&[
+        "notify", "add", "--kind", "webhook", "--name", "Hook", "--url", &url,
+    ]);
+    env.ok(&["config", "set", "notifications.on_success", "true"]);
+    env.ok(&[
+        "config",
+        "set",
+        "notifications.success_message",
+        "to {destination}",
+    ]);
+
+    env.ok(&["backup", "--job", "Nightly"]);
+    let body = received
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .unwrap();
+    let message: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        message["message"].as_str().unwrap(),
+        format!("to {}", own.display())
+    );
+}

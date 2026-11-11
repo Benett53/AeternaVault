@@ -322,7 +322,8 @@ pub fn run_job(
     });
     if record {
         record_run(&paths.config_file, &run, report.as_ref(), command_line);
-        crate::notify::after_run(config, &run, report.as_ref());
+        // With the job's own destination: its name and its free space.
+        crate::notify::after_run(&run_config, &run, report.as_ref());
     }
     match run.outcome {
         AutomaticOutcome::Complete => tracing::info!(
