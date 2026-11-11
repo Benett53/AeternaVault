@@ -1523,3 +1523,36 @@ fn edited_index_cannot_write_through_a_link_it_names() {
     let check = verify::verify(&latest, None, true, &CancelToken::default(), &mut quiet()).unwrap();
     assert_eq!(check.damaged, vec!["Documents/other.lnk".to_string()]);
 }
+
+/// Pipes, sockets and device files have no content to back up, and opening a
+/// pipe waits for a writer: they are listed as skipped, never read.
+#[cfg(unix)]
+#[test]
+fn pipes_and_sockets_are_skipped_not_read() {
+    let (_tmp, source, config) = setup();
+    let pipe = source.join("photos/app.pipe");
+    let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let _socket = std::os::unix::net::UnixListener::bind(source.join("agent.sock")).unwrap();
+
+    let plan = plan(&config, None);
+    let stored: Vec<&str> = plan.stored_files().map(|i| i.rel.as_str()).collect();
+    assert!(!stored.contains(&"photos/app.pipe"), "{stored:?}");
+    assert!(!stored.contains(&"agent.sock"), "{stored:?}");
+    let skipped: Vec<&str> = plan
+        .items
+        .iter()
+        .filter(|i| i.kind == ItemKind::Skipped && i.note == Some(plan::Note::SpecialFile))
+        .map(|i| i.rel.as_str())
+        .collect();
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+
+    // The backup finishes (reading the pipe would wait forever) and is complete.
+    let report = run(&plan, None);
+    assert_eq!(
+        report.header.status,
+        super::manifest::SnapshotStatus::Complete
+    );
+    assert_eq!(report.header.stats.files, 2);
+    assert_eq!(report.header.stats.skipped, 2);
+}

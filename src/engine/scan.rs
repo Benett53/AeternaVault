@@ -5,6 +5,8 @@
 //!   duplicates (older profiles contain junctions such as `My Music` inside
 //!   `Documents`). On Linux a link is collected as a link, with the target it
 //!   names; on Windows it is listed as skipped so nothing disappears silently.
+//! * Pipes, sockets and device files are listed as skipped. They have no
+//!   content to copy, and opening a pipe waits until something writes to it.
 //! * Cloud placeholders (OneDrive "online-only" files) are skipped by default,
 //!   because reading them would download them.
 //! * The destination folder is skipped if it lies inside a source.
@@ -37,6 +39,8 @@ pub struct ScannedFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
     Link,
+    /// A pipe, socket or device file.
+    Special,
     OnlineOnly,
     InsideDestination,
     SourceMissing,
@@ -253,6 +257,15 @@ fn walk(
             continue;
         }
 
+        // Neither a file nor a folder nor a link: never opened.
+        if !file_type.is_file() {
+            result.skipped.push(SkippedEntry {
+                path: path.to_path_buf(),
+                reason: SkipReason::Special,
+            });
+            continue;
+        }
+
         match entry.metadata() {
             Ok(meta) => consider_file(root, path, meta, options, progress, reporter, result),
             Err(err) => result.skipped.push(SkippedEntry {
@@ -311,8 +324,8 @@ fn consider_file(
 }
 
 /// A symbolic link, junction or other entry that is neither a file nor a
-/// folder. It is never followed. On Linux a symbolic link is collected with
-/// its target; everything else is listed as skipped.
+/// folder. It is never followed or opened. On Linux a symbolic link is
+/// collected with its target; everything else is listed as skipped.
 fn consider_link(
     root: &Path,
     path: &Path,
@@ -327,7 +340,10 @@ fn consider_link(
             reason,
         })
     };
-    if !cfg!(unix) || !meta.file_type().is_symlink() {
+    if cfg!(unix) && !meta.file_type().is_symlink() {
+        return skip(result, SkipReason::Special);
+    }
+    if !cfg!(unix) {
         return skip(result, SkipReason::Link);
     }
     let Ok(rel_path) = path.strip_prefix(root) else {

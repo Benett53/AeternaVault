@@ -208,6 +208,14 @@ pub fn run_backup(
                 continue;
             }
         };
+        // Replaced since the preview by something that is not a file (a
+        // folder, or a pipe that would never finish reading).
+        if !meta.is_file() {
+            warnings[part].push(format!("{}: not a file any more", src.display()));
+            stats.failed += 1;
+            progress.files_done += 1;
+            continue;
+        }
         let size = meta.len();
         let modified = meta.modified().map(to_unix_nanos).unwrap_or(0);
         let mode = fsops::unix_mode(&meta);

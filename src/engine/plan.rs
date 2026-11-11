@@ -53,6 +53,8 @@ impl ItemKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Note {
     Link,
+    /// Backup: a pipe, socket or device file.
+    SpecialFile,
     OnlineOnly,
     InsideDestination,
     SourceMissing,
@@ -70,6 +72,7 @@ impl From<SkipReason> for Note {
     fn from(reason: SkipReason) -> Self {
         match reason {
             SkipReason::Link => Note::Link,
+            SkipReason::Special => Note::SpecialFile,
             SkipReason::OnlineOnly => Note::OnlineOnly,
             SkipReason::InsideDestination => Note::InsideDestination,
             SkipReason::SourceMissing => Note::SourceMissing,

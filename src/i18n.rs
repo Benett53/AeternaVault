@@ -1230,6 +1230,7 @@ impl Lang {
         let t = self.t();
         match note {
             Note::Link => t.note_link.to_string(),
+            Note::SpecialFile => t.note_special_file.to_string(),
             Note::OnlineOnly => t.note_online_only.to_string(),
             Note::InsideDestination => t.note_inside_destination.to_string(),
             Note::SourceMissing => t.note_source_missing.to_string(),
@@ -1435,6 +1436,7 @@ pub struct Tr {
     pub kind_identical: &'static str,
 
     pub note_link: &'static str,
+    pub note_special_file: &'static str,
     pub note_online_only: &'static str,
     pub note_inside_destination: &'static str,
     pub note_source_missing: &'static str,
@@ -1907,6 +1909,7 @@ pub static EN: Tr = Tr {
     kind_identical: "Already identical",
 
     note_link: "link or junction, not backed up",
+    note_special_file: "pipe, socket or device file, not backed up",
     note_online_only: "online-only file, not stored on this computer",
     note_inside_destination: "this is the backup destination",
     note_source_missing: "folder not found",
@@ -2396,6 +2399,7 @@ pub static DE: Tr = Tr {
     kind_identical: "Bereits identisch",
 
     note_link: "Verknüpfung, wird nicht gesichert",
+    note_special_file: "Pipe, Socket oder Gerätedatei, wird nicht gesichert",
     note_online_only: "nur online verfügbar, nicht auf diesem Computer gespeichert",
     note_inside_destination: "dies ist das Sicherungsziel",
     note_source_missing: "Ordner nicht gefunden",

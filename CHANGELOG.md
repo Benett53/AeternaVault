@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ### Fixed
 
+- Linux: a named pipe in a backed-up folder (for example `~/.steam/steam.pipe`) made the backup wait forever, because opening a pipe waits for a writer. Pipes, sockets and device files are now listed as skipped and never opened.
 - Linux: with MangoHud or vkBasalt enabled for the whole session, the overlay was drawn inside the AeternaVault window and kept it redrawing, about 4 % CPU while idle. Both are now switched off for the window.
 
 ## [0.9.0] - 2026-11-02
