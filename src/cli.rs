@@ -981,6 +981,11 @@ fn backup(ctx: &mut Ctx, full: bool, job: Option<String>) -> anyhow::Result<Outc
         None => None,
     };
     let destination = ctx.destination(&At::default())?;
+    // A job with its own destination is unlocked with the key of that one.
+    let destination = match &schedule {
+        Some(job) => config.for_schedule(job).destination,
+        None => destination,
+    };
     let key = if config.encryption.enabled {
         ctx.write_key(&destination)?
     } else {

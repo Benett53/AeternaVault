@@ -297,3 +297,36 @@ fn piped_byte_order_mark_is_not_part_of_the_passphrase() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("not correct"), "{stderr}");
 }
+
+/// A job with its own destination is unlocked with the passphrase of that
+/// destination, not of the general one.
+#[test]
+fn job_with_its_own_encrypted_destination_takes_its_passphrase() {
+    let env = Env::new();
+    add_documents(&env);
+    let general = env.path("dest");
+    let own = env.path("job-dest");
+    for (destination, passphrase) in [(&own, "the job's passphrase"), (&general, "general words")] {
+        env.ok(&["destination", "set", destination.to_str().unwrap()]);
+        let setup = env.run_with_secret(&["encryption", "setup"], passphrase);
+        assert_success(&["encryption", "setup"], &setup);
+    }
+    env.ok(&[
+        "job",
+        "add",
+        "--every",
+        "day",
+        "--name",
+        "Nightly",
+        "--destination",
+        own.to_str().unwrap(),
+    ]);
+
+    let wrong = env.run_with_secret(&["backup", "--job", "Nightly"], "general words");
+    assert_eq!(wrong.status.code(), Some(1));
+    let output = env.run_with_secret(&["backup", "--job", "Nightly"], "the job's passphrase");
+    assert_success(&["backup", "--job"], &output);
+    let at_job = env.json(&["list", "--destination", own.to_str().unwrap()]);
+    assert_eq!(at_job.as_array().unwrap().len(), 1);
+    assert!(env.json(&["list"]).as_array().unwrap().is_empty());
+}
