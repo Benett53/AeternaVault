@@ -144,6 +144,15 @@ const MAX_KDF_PARALLELISM: u32 = 4;
 /// Memory times passes of all slots together: two slots of the strongest setting.
 const MAX_KDF_TOTAL_COST: u64 = 2 * 1024 * 1024 * 4;
 
+/// The weakest key derivation AeternaVault sets up for a passphrase. A new
+/// passphrase never gets less, whatever `vault.json` says: its settings are
+/// not authenticated, and lowered ones would make the new passphrase cheap to
+/// guess.
+#[cfg(not(test))]
+const MIN_PASSPHRASE_KDF: KdfParams = KdfParams::PASSPHRASE;
+#[cfg(test)]
+const MIN_PASSPHRASE_KDF: KdfParams = KdfParams::TEST;
+
 /// Whether the key settings in a header are within what AeternaVault uses.
 pub fn plausible_kdf(header: &VaultHeader) -> bool {
     let total: u64 = header
@@ -262,7 +271,8 @@ fn checked_header(destination: &Path, key: &VaultKey) -> Result<VaultHeader, Cry
 }
 
 /// Replaces the passphrase slot. The recovery key and all data stay valid; the
-/// key derivation strength stays as chosen.
+/// key derivation strength stays as chosen, but is never weaker than the
+/// default.
 pub fn change_passphrase(
     destination: &Path,
     key: &VaultKey,
@@ -273,6 +283,11 @@ pub fn change_passphrase(
         .slot(SlotKind::Passphrase)
         .map(|s| s.kdf)
         .unwrap_or(KdfParams::PASSPHRASE);
+    let kdf = KdfParams {
+        memory_kib: kdf.memory_kib.max(MIN_PASSPHRASE_KDF.memory_kib),
+        iterations: kdf.iterations.max(MIN_PASSPHRASE_KDF.iterations),
+        parallelism: kdf.parallelism,
+    };
     header.slots.retain(|s| s.kind != SlotKind::Passphrase);
     header.slots.insert(
         0,
@@ -479,5 +494,45 @@ mod tests {
             json["vault_id"] = created.header.vault_id.clone().into()
         });
         assert!(read_header(&destination).is_ok());
+    }
+
+    /// The key settings in `vault.json` are not authenticated. Lowered ones
+    /// must not be carried over to a new passphrase, which would then be much
+    /// cheaper to guess.
+    #[test]
+    fn a_new_passphrase_is_never_weaker_than_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let created = create_with(
+            tmp.path(),
+            "first",
+            test_options(Cipher::default()),
+            KdfParams::TEST,
+        )
+        .unwrap();
+        edit_header(tmp.path(), |json| {
+            json["slots"][0]["kdf"]["memory_kib"] = 8.into();
+        });
+        change_passphrase(tmp.path(), &created.key, "second").unwrap();
+        let header = read_header(tmp.path()).unwrap();
+        let kdf = header.slot(SlotKind::Passphrase).unwrap().kdf;
+        assert!(kdf.memory_kib >= MIN_PASSPHRASE_KDF.memory_kib, "{kdf:?}");
+        assert!(kdf.iterations >= MIN_PASSPHRASE_KDF.iterations, "{kdf:?}");
+        assert!(unlock(tmp.path(), "second").is_ok());
+
+        // A stronger setting chosen by the user is kept.
+        let strong = KdfParams {
+            memory_kib: 4 * MIN_PASSPHRASE_KDF.memory_kib,
+            iterations: 2,
+            parallelism: 1,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let options = VaultOptions {
+            cipher: Cipher::default(),
+            kdf: strong,
+        };
+        let created = create_with(tmp.path(), "first", options, KdfParams::TEST).unwrap();
+        change_passphrase(tmp.path(), &created.key, "second").unwrap();
+        let header = read_header(tmp.path()).unwrap();
+        assert_eq!(header.slot(SlotKind::Passphrase).unwrap().kdf, strong);
     }
 }

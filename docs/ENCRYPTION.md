@@ -89,7 +89,10 @@ All strings are ASCII without a terminating zero.
 
 ### Replacing keys
 
-- *Change passphrase* replaces the passphrase slot (same Argon2id strength).
+- *Change passphrase* replaces the passphrase slot (same Argon2id strength, but
+  never less than the default of 64 MiB and 3 passes: the settings in
+  `vault.json` are not authenticated, and lowered ones must not weaken a new
+  passphrase).
 - *New recovery key* replaces the recovery-key slot; the old key stops working.
 - The **vault key itself cannot be replaced** without re-encrypting every backup.
   If you believe the vault key was exposed (for example, malware ran as your

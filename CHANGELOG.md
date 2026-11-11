@@ -17,6 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 ### Security
 
 - `vault.json`: the vault id is used in the name of the key file remembered on this computer. An id that is not made of letters, digits, `-` and `_` is now refused; on Windows an edited `vault.json` on the backup storage could otherwise name a file outside the key folder.
+- Changing the passphrase reused the key derivation settings found in `vault.json`, which are not authenticated. Settings lowered by someone with write access to the backup storage would have made the new passphrase much cheaper to guess. A new passphrase is now derived with at least the default (64 MiB, 3 passes).
 
 ## [0.9.0] - 2026-11-02
 
