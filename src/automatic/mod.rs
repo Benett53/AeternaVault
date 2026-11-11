@@ -620,13 +620,22 @@ pub fn run_before_command(command: &str, cancel: &CancelToken) -> Result<(), Str
         // CREATE_NO_WINDOW: no console flashes up for background jobs.
         process.creation_flags(0x0800_0000);
     }
-    let errors =
-        std::env::temp_dir().join(format!("aeternavault-before-{}.log", std::process::id()));
+    // A new file under an unpredictable name, private on Linux: the temporary
+    // folder is shared there, and a file or link prepared under a guessable
+    // name would be written through.
+    let errors = std::env::temp_dir().join(format!(
+        "aeternavault-before-{}.log",
+        crate::engine::crypto::hex(&crate::engine::crypto::random_bytes::<8>())
+    ));
+    let mut new_file = std::fs::OpenOptions::new();
+    new_file.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut new_file, 0o600);
     let fail = |message: String| {
         tracing::error!("{message}");
         Err(message)
     };
-    let stderr = match std::fs::File::create(&errors) {
+    let stderr = match new_file.open(&errors) {
         Ok(file) => Stdio::from(file),
         Err(_) => Stdio::null(),
     };
@@ -690,6 +699,27 @@ mod before_command_tests {
         let err = super::run_before_command(failing, &cancel).unwrap_err();
         assert!(err.contains("broken"), "{err}");
         assert!(err.contains("failed"), "{err}");
+    }
+
+    /// The command's error output goes to a new file that nobody could have
+    /// prepared: a link waiting under a guessable name in the shared
+    /// temporary folder must not be written through.
+    #[cfg(unix)]
+    #[test]
+    fn error_output_is_not_written_through_a_prepared_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, "keep me").unwrap();
+        let guessable =
+            std::env::temp_dir().join(format!("aeternavault-before-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&guessable);
+        std::os::unix::fs::symlink(&victim, &guessable).unwrap();
+
+        let cancel = crate::engine::CancelToken::default();
+        let result = super::run_before_command("echo overwritten 1>&2; exit 3", &cancel);
+        let _ = std::fs::remove_file(&guessable);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        assert!(result.unwrap_err().contains("overwritten"));
     }
 }
 
