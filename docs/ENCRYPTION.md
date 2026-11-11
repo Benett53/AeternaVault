@@ -142,6 +142,10 @@ the first time it opens the destination (renames only, nothing is re-encrypted).
 `argon2id+aes256gcm-stream-1mib` and names the cipher used for new streams. Hex is
 lower-case.
 
+`vault_id` is 16 hex characters. AeternaVault uses it in the name of the
+remembered key file and refuses a header whose id is empty, longer than 64
+characters or contains anything but ASCII letters, digits, `-` and `_`.
+
 A reader must refuse a header that asks for more than AeternaVault writes, before
 deriving any key: more than 64 KiB, more than 3 slots, more than 1 GiB memory,
 8 iterations or 4 lanes per slot, or more than 8 GiB × iterations for all slots

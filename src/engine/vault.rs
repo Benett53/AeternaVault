@@ -99,7 +99,16 @@ pub fn read_header(destination: &Path) -> io::Result<VaultHeader> {
     if text.len() as u64 > MAX_HEADER_BYTES {
         return Err(io::Error::other("vault.json is too large"));
     }
-    serde_json::from_str(&text).map_err(io::Error::other)
+    let header: VaultHeader = serde_json::from_str(&text).map_err(io::Error::other)?;
+    // The id becomes part of a file name on this computer (the remembered
+    // key). The file lies on the backup storage: an id that could name
+    // another folder is refused.
+    let id = &header.vault_id;
+    let plain = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(plain) {
+        return Err(io::Error::other("vault.json has an invalid vault id"));
+    }
+    Ok(header)
 }
 
 /// The destination that belongs to a path someone opened: the destination
@@ -438,5 +447,37 @@ mod tests {
         assert_eq!(loaded.cipher(), Cipher::Aes256Gcm);
         forget_key(&keys, &created.header).unwrap();
         assert!(remembered_key(&keys, &created.header).is_none());
+    }
+
+    fn edit_header(destination: &Path, change: impl FnOnce(&mut serde_json::Value)) {
+        let path = vault_dir(destination).join(VAULT_FILE);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        change(&mut json);
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    }
+
+    /// `vault.json` lies on the backup storage, where others may be able to
+    /// write. Its `vault_id` becomes part of the name of the remembered key
+    /// file, so it must not be able to name another place.
+    #[test]
+    fn vault_id_cannot_name_a_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let destination = tmp.path().join("destination");
+        let created = create_with(
+            &destination,
+            "pass",
+            test_options(Cipher::default()),
+            KdfParams::TEST,
+        )
+        .unwrap();
+        for id in ["a/../../../escaped", "a\\..\\..\\escaped", "..", "", "x y"] {
+            edit_header(&destination, |json| json["vault_id"] = id.into());
+            assert!(read_header(&destination).is_err(), "{id:?} was accepted");
+        }
+        edit_header(&destination, |json| {
+            json["vault_id"] = created.header.vault_id.clone().into()
+        });
+        assert!(read_header(&destination).is_ok());
     }
 }

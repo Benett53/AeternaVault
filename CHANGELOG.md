@@ -14,6 +14,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 - Restore: files whose content is missing in the backup, or whose index entry is invalid, were counted as "left as they were", and `aeternavault-cli restore` ended with exit code 0. They now count as failed, are named in the report, and the exit code is 2.
 - Linux: with MangoHud or vkBasalt enabled for the whole session, the overlay was drawn inside the AeternaVault window and kept it redrawing, about 4 % CPU while idle. Both are now switched off for the window.
 
+### Security
+
+- `vault.json`: the vault id is used in the name of the key file remembered on this computer. An id that is not made of letters, digits, `-` and `_` is now refused; on Windows an edited `vault.json` on the backup storage could otherwise name a file outside the key folder.
+
 ## [0.9.0] - 2026-11-02
 
 ### Added
