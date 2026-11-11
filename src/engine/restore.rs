@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::crypto::VaultKey;
 use super::fsops::{self, CopyError};
-use super::plan::{ItemKind, RestorePlan};
+use super::plan::{ItemKind, Note, RestorePlan};
 use super::{CancelToken, Phase, Progress, Reporter, manifest, safe_relative_path, vault};
 use crate::config::ConflictPolicy;
 use crate::error::{EngineError, EngineResult};
@@ -45,6 +45,22 @@ pub fn run_restore(
         skipped: plan.summary.count(ItemKind::Skipped) + plan.summary.count(ItemKind::Unchanged),
         ..RestoreReport::default()
     };
+    // Left out by the plan because the backup cannot deliver the file or the
+    // target cannot be read, not by the conflict rule: these files were not
+    // restored, which is a failure of the restore and never passes silently.
+    for item in plan.items.iter().filter(|i| i.kind == ItemKind::Skipped) {
+        let reason = match &item.note {
+            Some(Note::BackupFileMissing) => "missing in the backup".to_string(),
+            Some(Note::UnsafePath) => "invalid entry in the backup index".to_string(),
+            Some(Note::NoAccess(err)) => err.clone(),
+            _ => continue,
+        };
+        let name = format!("{}/{}", plan.sources[item.source].key, item.rel);
+        tracing::warn!("not restored, {reason}: {name}");
+        report.warnings.push(format!("{name}: {reason}"));
+        report.failed += 1;
+        report.skipped -= 1;
+    }
     let mut reporter = Reporter::new(on_progress);
     let mut progress = Progress {
         phase: Phase::Restoring,

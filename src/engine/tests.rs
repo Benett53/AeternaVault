@@ -1556,3 +1556,25 @@ fn pipes_and_sockets_are_skipped_not_read() {
     assert_eq!(report.header.stats.files, 2);
     assert_eq!(report.header.stats.skipped, 2);
 }
+
+/// A file whose stored copy is gone was not restored: that is a failure of the
+/// restore, not something left out on purpose.
+#[test]
+fn missing_content_counts_as_failed_on_restore() {
+    let (tmp, _source, config) = setup();
+    let report = run(&plan(&config, None), None);
+    fs::remove_file(report.snapshot_dir.join("Documents/letter.txt")).unwrap();
+
+    let target = tmp.path().join("Restored");
+    let restore_plan = restore_plan(
+        &config.destination,
+        RestoreTarget::Folder(target.clone()),
+        None,
+    );
+    let result =
+        restore::run_restore(&restore_plan, None, &CancelToken::default(), &mut quiet()).unwrap();
+    assert_eq!(result.restored_files, 1);
+    assert_eq!(result.failed, 1, "{:?}", result.warnings);
+    assert!(result.warnings.iter().any(|w| w.contains("letter.txt")));
+    assert!(!target.join("Documents/letter.txt").exists());
+}
