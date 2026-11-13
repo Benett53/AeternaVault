@@ -5,10 +5,12 @@
 //! warning is about this computer.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::sign::CertifiedKey;
 use sha2::{Digest, Sha256};
 
 use crate::config::{TlsMode, WebSettings};
@@ -34,7 +36,9 @@ pub fn files(config_file: &Path, settings: &WebSettings) -> (PathBuf, PathBuf) {
 }
 
 /// The TLS setup for the server, or `None` for plain HTTP. Makes a
-/// self-signed certificate if one is needed and none exists yet.
+/// self-signed certificate if one is needed and none exists yet. Own
+/// certificate files are read again when they change (a renewal by certbot,
+/// win-acme or a company CA needs no restart).
 pub fn server_config(
     config_file: &Path,
     settings: &WebSettings,
@@ -46,23 +50,112 @@ pub fn server_config(
     if settings.tls != TlsMode::Files && !(cert_file.is_file() && key_file.is_file()) {
         create_self_signed(&cert_file, &key_file)?;
     }
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&cert_file)
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let resolver = Reloading::new(cert_file, key_file, provider.clone())?;
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(resolver));
+    Ok(Some(Arc::new(config)))
+}
+
+fn load_key(
+    cert_file: &Path,
+    key_file: &Path,
+    provider: &rustls::crypto::CryptoProvider,
+) -> Result<CertifiedKey, String> {
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_file)
         .map_err(|e| format!("{}: {e}", cert_file.display()))?
         .collect::<Result<_, _>>()
         .map_err(|e| format!("{}: {e}", cert_file.display()))?;
     if certs.is_empty() {
         return Err(format!("{}: no certificate found", cert_file.display()));
     }
-    let key = PrivateKeyDer::from_pem_file(&key_file)
+    let key = PrivateKeyDer::from_pem_file(key_file)
         .map_err(|e| format!("{}: {e}", key_file.display()))?;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| format!("certificate or key not usable: {e}"))?;
-    Ok(Some(Arc::new(config)))
+    CertifiedKey::from_der(certs, key, provider)
+        .map_err(|e| format!("certificate or key not usable: {e}"))
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// The certificate in use, read again when its files change (checked at most
+/// once a minute). A renewal that cannot be read keeps the previous one.
+struct Reloading {
+    cert_file: PathBuf,
+    key_file: PathBuf,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    state: Mutex<ReloadState>,
+}
+
+struct ReloadState {
+    key: Arc<CertifiedKey>,
+    stamp: (Option<SystemTime>, Option<SystemTime>),
+    checked: Instant,
+}
+
+impl std::fmt::Debug for Reloading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reloading")
+            .field("cert_file", &self.cert_file)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Reloading {
+    const EVERY: Duration = Duration::from_secs(60);
+
+    fn new(
+        cert_file: PathBuf,
+        key_file: PathBuf,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+    ) -> Result<Self, String> {
+        let key = load_key(&cert_file, &key_file, &provider)?;
+        let stamp = (modified(&cert_file), modified(&key_file));
+        Ok(Self {
+            cert_file,
+            key_file,
+            provider,
+            state: Mutex::new(ReloadState {
+                key: Arc::new(key),
+                stamp,
+                checked: Instant::now(),
+            }),
+        })
+    }
+
+    fn current(&self, every: Duration) -> Arc<CertifiedKey> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.checked.elapsed() >= every {
+            state.checked = Instant::now();
+            let stamp = (modified(&self.cert_file), modified(&self.key_file));
+            if stamp != state.stamp {
+                match load_key(&self.cert_file, &self.key_file, &self.provider) {
+                    Ok(key) => {
+                        state.key = Arc::new(key);
+                        state.stamp = stamp;
+                        tracing::info!(
+                            "web interface: certificate {} read again",
+                            self.cert_file.display()
+                        );
+                    }
+                    // Files may be half written during a renewal: try again
+                    // at the next check, keep serving the previous one.
+                    Err(err) => tracing::warn!("web interface: new certificate not used: {err}"),
+                }
+            }
+        }
+        state.key.clone()
+    }
+}
+
+impl rustls::server::ResolvesServerCert for Reloading {
+    fn resolve(&self, _hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.current(Self::EVERY))
+    }
 }
 
 /// SHA-256 of the certificate as browsers show it (`AB:CD:…`).
@@ -136,4 +229,35 @@ pub fn primary_address() -> Option<std::net::IpAddr> {
     socket.connect("192.0.2.1:9").ok()?;
     let ip = socket.local_addr().ok()?.ip();
     (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renewed_certificate_files_are_used_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cert, key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+        create_self_signed(&cert, &key).unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let reloading = Reloading::new(cert.clone(), key.clone(), provider).unwrap();
+        let first = reloading.current(Duration::ZERO).cert[0].clone();
+        assert_eq!(
+            reloading.current(Duration::ZERO).cert[0],
+            first,
+            "unchanged"
+        );
+
+        // A half-written renewal keeps the previous certificate.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&cert, "-----BEGIN CERTIFICATE-----\n").unwrap();
+        assert_eq!(reloading.current(Duration::ZERO).cert[0], first);
+
+        std::fs::remove_file(&cert).unwrap();
+        std::fs::remove_file(&key).unwrap();
+        create_self_signed(&cert, &key).unwrap();
+        let second = reloading.current(Duration::ZERO).cert[0].clone();
+        assert_ne!(second, first, "the new certificate is served");
+    }
 }

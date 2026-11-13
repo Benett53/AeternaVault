@@ -95,6 +95,9 @@ sha1 = "0.11"
 # Sign-in with LDAP / Active Directory for the web interface. rustls with the
 # certificates trusted by the system (company CAs from group policy included).
 ldap3 = { version = "0.12", default-features = false, features = ["sync", "tls-rustls-ring"] }
+# Country of an address for geoblocking, from a database the user downloads
+# (MaxMind GeoLite2 Country or DB-IP Lite, .mmdb). Read only, no network.
+maxminddb = "0.33"
 rustls-native-certs = "0.8"
 
 [target.'cfg(windows)'.dependencies]

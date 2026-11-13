@@ -574,8 +574,25 @@ pub struct WebSettings {
     pub allowed_networks: Vec<String>,
     /// Signed out after this many minutes without a request.
     pub session_minutes: u32,
-    /// Every user needs a one-time code from an authenticator app.
+    /// Read from older files: everybody needs a second factor. Moved to
+    /// `mfa = "everyone"` when the configuration is loaded.
+    #[serde(skip_serializing)]
     pub require_two_factor: bool,
+    /// Who needs a second factor (2FA) after the password.
+    pub mfa: crate::web::access::MfaPolicy,
+    /// Second factors users may use: an authenticator app (TOTP) …
+    pub mfa_app: bool,
+    /// … and codes by e-mail.
+    pub mfa_email: bool,
+    /// Where administrators may work from.
+    pub admin_access: crate::web::access::AdminAccess,
+    /// With `admin_access = "networks"`: those networks, e.g. `192.168.1.0/24`.
+    pub admin_networks: Vec<String>,
+    /// An address with this many wrong sign-ins within 24 hours is blocked
+    /// (0: never). This computer is never blocked.
+    pub auto_block_after: u32,
+    /// Countries that may connect.
+    pub geo: crate::web::access::GeoSettings,
     /// After this many wrong sign-ins in a row, a user or address waits …
     pub lockout_attempts: u32,
     /// … this many minutes.
@@ -602,6 +619,13 @@ impl Default for WebSettings {
             allowed_networks: Vec::new(),
             session_minutes: 30,
             require_two_factor: false,
+            mfa: crate::web::access::MfaPolicy::Optional,
+            mfa_app: true,
+            mfa_email: true,
+            admin_access: crate::web::access::AdminAccess::Anywhere,
+            admin_networks: Vec::new(),
+            auto_block_after: 20,
+            geo: crate::web::access::GeoSettings::default(),
             lockout_attempts: 5,
             lockout_minutes: 15,
             recommended_password_length: 12,
@@ -787,6 +811,9 @@ impl Config {
     /// Fills in what older or hand-edited files may lack (schedule ids), and
     /// moves settings that used to belong to single schedules.
     pub fn normalize(&mut self) {
+        if std::mem::take(&mut self.web.require_two_factor) {
+            self.web.mfa = crate::web::access::MfaPolicy::Everyone;
+        }
         let mut seen = std::collections::HashSet::new();
         for schedule in &mut self.schedules {
             if std::mem::take(&mut schedule.only_on_ac_power) {

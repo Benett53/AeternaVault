@@ -56,6 +56,13 @@ pub enum Permission {
 }
 
 impl Permission {
+    /// Permissions that only apply where administrators may work from
+    /// (`admin_access`), and that make a role count as administrative for
+    /// `mfa = "administrators"`.
+    pub fn administrative(self) -> bool {
+        matches!(self, Self::ManageUsers | Self::BlockAddresses)
+    }
+
     pub const ALL: [Permission; 8] = [
         Permission::ViewActivity,
         Permission::RunJobs,
@@ -202,8 +209,13 @@ impl User {
     /// Which second step this user's sign-in needs. `required`: the settings
     /// ask for a second step from everybody; then a known e-mail address is
     /// used even if the user did not choose it.
-    pub fn second_factor(&self, required: bool, email_possible: bool) -> Option<SecondFactor> {
-        if self.totp.is_some() {
+    pub fn second_factor(
+        &self,
+        required: bool,
+        app_allowed: bool,
+        email_possible: bool,
+    ) -> Option<SecondFactor> {
+        if app_allowed && self.totp.is_some() {
             return Some(SecondFactor::App);
         }
         let has_email = email_possible && self.email.contains('@');
@@ -912,17 +924,36 @@ mod tests {
         let mut store = UserStore::default();
         store.add("anna", "viewer", "pw").unwrap();
         let anna = store.find_mut("anna").unwrap();
-        assert_eq!(anna.second_factor(true, true), None, "no way known yet");
+        assert_eq!(
+            anna.second_factor(true, true, true),
+            None,
+            "no way known yet"
+        );
         anna.email = "anna@example.org".into();
         assert_eq!(
-            anna.second_factor(false, true),
+            anna.second_factor(false, true, true),
             None,
             "not chosen, not required"
         );
-        assert_eq!(anna.second_factor(true, true), Some(SecondFactor::Email));
-        assert_eq!(anna.second_factor(true, false), None, "no e-mail channel");
+        assert_eq!(
+            anna.second_factor(true, true, true),
+            Some(SecondFactor::Email)
+        );
+        assert_eq!(
+            anna.second_factor(true, true, false),
+            None,
+            "no e-mail channel"
+        );
         anna.totp = Some(new_totp_secret());
-        assert_eq!(anna.second_factor(false, true), Some(SecondFactor::App));
+        assert_eq!(
+            anna.second_factor(false, true, true),
+            Some(SecondFactor::App)
+        );
+        assert_eq!(
+            anna.second_factor(true, false, true),
+            Some(SecondFactor::Email),
+            "app not allowed: e-mail instead"
+        );
     }
 
     #[test]

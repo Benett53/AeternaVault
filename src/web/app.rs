@@ -64,6 +64,11 @@ pub struct WebApp {
     paths: AppPaths,
     settings: WebSettings,
     networks: Vec<Network>,
+    /// Networks administrators may work from (`admin_access = "networks"`).
+    admin_networks: Vec<Network>,
+    geo: Option<super::access::Geo>,
+    blocked: Mutex<super::access::BlockCache>,
+    failures: Mutex<super::access::FailureLog>,
     control: Arc<dyn Control>,
     sessions: Mutex<Sessions>,
     limiter: Mutex<Limiter>,
@@ -84,8 +89,10 @@ struct Ctx<'a> {
     token: String,
     session: Session,
     user: User,
-    /// What the user's role allows.
+    /// What the user's role allows from where the request comes.
     perms: Vec<Permission>,
+    /// Whether the user needs a second factor (by role, wherever they are).
+    mfa: bool,
     config: Config,
     en: bool,
 }
@@ -125,11 +132,22 @@ impl WebApp {
         settings: WebSettings,
         networks: Vec<Network>,
         control: Arc<dyn Control>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let admin_networks = settings
+            .admin_networks
+            .iter()
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| n.parse())
+            .collect::<Result<_, _>>()?;
+        let geo = super::access::Geo::open(&settings.geo)?;
+        Ok(Self {
             paths,
             settings,
             networks,
+            admin_networks,
+            geo,
+            blocked: Mutex::new(super::access::BlockCache::default()),
+            failures: Mutex::new(super::access::FailureLog::default()),
             control,
             sessions: Mutex::new(Sessions::default()),
             limiter: Mutex::new(Limiter::default()),
@@ -138,6 +156,61 @@ impl WebApp {
             pending_email: Mutex::new(HashMap::new()),
             checks: Arc::new(Mutex::new(Vec::new())),
             flash: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Whether a user with these permissions needs a second factor.
+    fn mfa_required(&self, perms: &[Permission]) -> bool {
+        use super::access::MfaPolicy;
+        match self.settings.mfa {
+            MfaPolicy::Optional => false,
+            MfaPolicy::Everyone => true,
+            MfaPolicy::Administrators => perms.iter().any(|p| p.administrative()),
+        }
+    }
+
+    /// Whether codes by e-mail can be used at all (allowed and a channel set up).
+    fn email_possible(&self, config: &Config) -> bool {
+        self.settings.mfa_email && super::email_channel(config).is_some()
+    }
+
+    /// The permissions of a user for a request from `ip`: administrative ones
+    /// only where administrators may work from.
+    fn effective(&self, mut perms: Vec<Permission>, ip: IpAddr) -> Vec<Permission> {
+        if !super::access::admin_allowed(self.settings.admin_access, &self.admin_networks, ip) {
+            perms.retain(|p| !p.administrative());
+        }
+        perms
+    }
+
+    /// Blocks an address after too many wrong sign-ins (never this computer).
+    fn count_failure(&self, ip: IpAddr) {
+        let limit = self.settings.auto_block_after;
+        if limit == 0 || super::http::canonical(ip).is_loopback() {
+            return;
+        }
+        let count = lock(&self.failures).failed(ip);
+        if count < limit as usize {
+            return;
+        }
+        let address = super::http::canonical(ip).to_string();
+        let mut list = super::access::Blocklist::load(&self.paths.config_file);
+        let reason = format!("{count} wrong sign-ins within 24 hours");
+        if let Ok(true) = list.add(&address, &reason, "automatic") {
+            match list.save(&self.paths.config_file) {
+                Ok(()) => {
+                    tracing::warn!("web interface: blocked {address}: {reason}");
+                    audit::record(
+                        &self.paths.config_file,
+                        Record::local("address-blocked")
+                            .target(address)
+                            .details(vec![reason]),
+                    );
+                }
+                Err(err) => tracing::warn!("web interface: block list not saved: {err}"),
+            }
+            lock(&self.blocked).invalidate();
+            lock(&self.failures).forget(ip);
         }
     }
 
@@ -204,6 +277,14 @@ impl WebApp {
     }
 
     pub fn handle(&self, req: Request) -> Response {
+        if lock(&self.blocked).blocks(&self.paths.config_file, req.peer) {
+            tracing::debug!("web interface: refused {} (blocked)", req.peer);
+            return Response::text(403, "Forbidden");
+        }
+        if self.geo.as_ref().is_some_and(|g| !g.allows(req.peer)) {
+            tracing::debug!("web interface: refused {} (country)", req.peer);
+            return Response::text(403, "Forbidden");
+        }
         if !self.allowed(req.peer) {
             tracing::warn!(
                 "web interface: refused {} (not an allowed network)",
@@ -258,13 +339,16 @@ impl WebApp {
             lock(&self.sessions).end(&token);
             return Response::redirect("/login");
         };
-        let perms = store.permissions(&user);
+        let role_perms = store.permissions(&user);
+        let mfa = self.mfa_required(&role_perms);
+        let perms = self.effective(role_perms, req.peer);
         let ctx = Ctx {
             req: &req,
             token,
             session,
             user,
             perms,
+            mfa,
             config,
             en,
         };
@@ -280,9 +364,12 @@ impl WebApp {
         }
 
         // A new password or the set-up of one-time codes comes first.
-        let email_possible = super::email_channel(&ctx.config).is_some();
-        let needs_code = self.settings.require_two_factor
-            && ctx.user.second_factor(true, email_possible).is_none();
+        let email_possible = self.email_possible(&ctx.config);
+        let needs_code = ctx.mfa
+            && ctx
+                .user
+                .second_factor(true, self.settings.mfa_app, email_possible)
+                .is_none();
         let account_only = ctx.user.must_change_password || needs_code;
         if account_only && !ctx.req.path.starts_with("/account") && ctx.req.path != "/logout" {
             return Response::redirect("/account");
@@ -311,9 +398,16 @@ impl WebApp {
             ("POST", "/users/add") if ctx.can(Permission::ManageUsers) => self.user_add(&ctx),
             ("POST", "/users/change") if ctx.can(Permission::ManageUsers) => self.user_change(&ctx),
             ("POST", "/roles/save") if ctx.can(Permission::ManageUsers) => self.role_save(&ctx),
+            ("GET", "/access") if ctx.can(Permission::BlockAddresses) => self.access_page(&ctx),
+            ("POST", "/access/block") if ctx.can(Permission::BlockAddresses) => {
+                self.access_block(&ctx)
+            }
+            ("POST", "/access/unblock") if ctx.can(Permission::BlockAddresses) => {
+                self.access_unblock(&ctx)
+            }
             ("GET", "/audit") if ctx.can(Permission::ViewAudit) => self.audit_page(&ctx),
             ("GET", "/users") if ctx.can(Permission::ManageUsers) => self.users_page(&ctx),
-            ("GET", "/audit" | "/users") | ("POST", _) => self.forbidden(&ctx),
+            ("GET", "/audit" | "/users" | "/access") | ("POST", _) => self.forbidden(&ctx),
             _ => self.not_found(&ctx),
         }
     }
@@ -326,6 +420,9 @@ impl WebApp {
             ("/backups", ctx.t("Backups", "Sicherungen")),
             ("/activity", ctx.t("Activity", "Verlauf")),
         ];
+        if ctx.can(Permission::BlockAddresses) {
+            nav.push(("/access", ctx.t("Access", "Zugriff")));
+        }
         if ctx.can(Permission::ManageUsers) {
             nav.push(("/users", ctx.t("Users", "Benutzer")));
         }
@@ -561,6 +658,7 @@ impl WebApp {
                 limiter.failed(&user_key);
                 drop(limiter);
                 failed(reason);
+                self.count_failure(req.peer);
                 return self.login_page(req, en, Some(wrong));
             }
         };
@@ -588,8 +686,9 @@ impl WebApp {
             limiter.succeeded(&ip);
         }
         let config = self.config();
-        let email_possible = super::email_channel(&config).is_some();
-        let factor = user.second_factor(self.settings.require_two_factor, email_possible);
+        let email_possible = self.email_possible(&config);
+        let mfa = self.mfa_required(&store.permissions(&user));
+        let factor = user.second_factor(mfa, self.settings.mfa_app, email_possible);
         let pending = factor.is_some();
         let (token, _) = lock(&self.sessions).create(&user.name, req.peer, pending);
         if factor == Some(SecondFactor::Email)
@@ -1418,6 +1517,7 @@ impl WebApp {
             ));
         }
         if sign_ins && ctx.can(Permission::ViewSignIns) {
+            body.push_str(&Self::message(ctx));
             body.push_str(&self.sign_ins(ctx));
             return self.page(ctx, ctx.t("Activity", "Verlauf"), &body, true);
         }
@@ -1486,13 +1586,33 @@ impl WebApp {
             addr = ctx.t("addresses", "Adressen"),
             last24 = ctx.t("last 24 hours", "letzte 24 Stunden"),
         ));
+        let may_block = ctx.can(Permission::BlockAddresses);
+        let blocked = super::access::Blocklist::load(&self.paths.config_file);
+        let own = super::tls::primary_address();
+        let csrf = csrf_field(&ctx.session);
         let rows: String = entries
             .iter()
             .rev()
             .take(300)
             .map(|e| {
+                let action = match Self::blockable(&e.source, own) {
+                    Some(ip) if may_block && !e.ok => {
+                        if blocked.blocking(ip).is_some() {
+                            format!(
+                                r#"<span class="badge bad">{}</span>"#,
+                                ctx.t("blocked", "gesperrt")
+                            )
+                        } else {
+                            format!(
+                                r#"<form method="post" action="/access/block" class="inline">{csrf}<input type="hidden" name="address" value="{ip}"><input type="hidden" name="back" value="sign-ins"><button class="secondary">{label}</button></form>"#,
+                                label = ctx.t("Block", "Sperren"),
+                            )
+                        }
+                    }
+                    _ => String::new(),
+                };
                 format!(
-                    r#"<tr><td class="nowrap">{}</td><td class="nowrap">{}</td><td>{}</td><td class="nowrap"><span class="dot {}"></span>{}</td><td>{}</td></tr>"#,
+                    r#"<tr><td class="nowrap">{}</td><td class="nowrap">{}</td><td>{}</td><td class="nowrap"><span class="dot {}"></span>{}</td><td>{}</td><td>{action}</td></tr>"#,
                     esc(&e.at.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()),
                     esc(e.actor.trim_start_matches("web:")),
                     esc(&e.source),
@@ -1503,7 +1623,7 @@ impl WebApp {
             })
             .collect();
         html.push_str(&format!(
-            r#"<section class="card"><table><thead><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr></thead><tbody>{rows}</tbody></table></section>"#,
+            r#"<section class="card"><div class="scroll"><table><thead><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th></th></tr></thead><tbody>{rows}</tbody></table></div></section>"#,
             ctx.t("When", "Wann"),
             ctx.t("User", "Benutzer"),
             ctx.t("Address", "Adresse"),
@@ -1511,6 +1631,205 @@ impl WebApp {
             ctx.t("Details", "Details"),
         ));
         html
+    }
+
+    /// The address at the start of a device label, if it may be blocked:
+    /// not this computer.
+    fn blockable(source: &str, own: Option<IpAddr>) -> Option<IpAddr> {
+        let ip: IpAddr = source.split(" · ").next()?.trim().parse().ok()?;
+        let ip = super::http::canonical(ip);
+        (!ip.is_loopback() && Some(ip) != own).then_some(ip)
+    }
+
+    // --- access -----------------------------------------------------------------------
+
+    fn access_page(&self, ctx: &Ctx<'_>) -> Response {
+        use super::access::{AdminAccess, GeoMode};
+        let csrf = csrf_field(&ctx.session);
+        let list = super::access::Blocklist::load(&self.paths.config_file);
+        let mut body = Self::message(ctx);
+        let rows: String = list
+            .entries
+            .iter()
+            .rev()
+            .map(|e| {
+                let by = if e.by == "automatic" {
+                    ctx.t("automatic", "automatisch").to_string()
+                } else {
+                    e.by.clone()
+                };
+                format!(
+                    r#"<tr><td><strong>{address}</strong></td><td class="nowrap">{since}</td><td>{by}</td><td>{reason}</td><td><form method="post" action="/access/unblock" class="inline">{csrf}<input type="hidden" name="address" value="{address}"><button class="secondary">{label}</button></form></td></tr>"#,
+                    address = esc(&e.address),
+                    since = esc(&Self::when(ctx, e.since)),
+                    by = esc(&by),
+                    reason = esc(&e.reason),
+                    label = ctx.t("Allow again", "Wieder zulassen"),
+                )
+            })
+            .collect();
+        let table = if rows.is_empty() {
+            format!(
+                r#"<p class="muted">{}</p>"#,
+                ctx.t("No address is blocked.", "Keine Adresse ist gesperrt.")
+            )
+        } else {
+            format!(
+                r#"<div class="scroll"><table><thead><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th></th></tr></thead><tbody>{rows}</tbody></table></div>"#,
+                ctx.t("Address", "Adresse"),
+                ctx.t("Since", "Seit"),
+                ctx.t("By", "Von"),
+                ctx.t("Reason", "Grund"),
+            )
+        };
+        body.push_str(&format!(
+            r#"<section class="card"><h2>{title} ({n})</h2>{table}</section>"#,
+            title = ctx.t("Blocked addresses", "Gesperrte Adressen"),
+            n = list.entries.len(),
+        ));
+
+        let w = &self.settings;
+        let networks = if w.allowed_networks.is_empty() {
+            ctx.t("any", "alle").to_string()
+        } else {
+            w.allowed_networks.join(", ")
+        };
+        let auto = if w.auto_block_after == 0 {
+            ctx.t("off", "aus").to_string()
+        } else if ctx.en {
+            format!(
+                "after {} wrong sign-ins within 24 hours",
+                w.auto_block_after
+            )
+        } else {
+            format!(
+                "nach {} falschen Anmeldungen in 24 Stunden",
+                w.auto_block_after
+            )
+        };
+        let countries = match w.geo.mode {
+            GeoMode::Off => ctx.t("any", "alle").to_string(),
+            GeoMode::Allow => format!("{} {}", ctx.t("only", "nur"), w.geo.countries.join(", ")),
+            GeoMode::Block => format!(
+                "{} {}",
+                ctx.t("all except", "alle außer"),
+                w.geo.countries.join(", ")
+            ),
+        };
+        let admins = match w.admin_access {
+            AdminAccess::Anywhere => ctx.t("anywhere", "überall").to_string(),
+            AdminAccess::ThisComputer => ctx
+                .t("this computer only", "nur dieser Computer")
+                .to_string(),
+            AdminAccess::Networks => format!(
+                "{} {}",
+                ctx.t("this computer and", "dieser Computer und"),
+                w.admin_networks.join(", ")
+            ),
+        };
+        body.push_str(r#"<div class="grid">"#);
+        body.push_str(&format!(
+            r#"<section class="card"><h2>{title}</h2><form method="post" action="/access/block" class="stack">{csrf}<label>{address}<input name="address" required placeholder="203.0.113.7 / 203.0.113.0/24" autocomplete="off"></label><label>{reason}<input name="reason" autocomplete="off"></label><button>{label}</button></form></section>"#,
+            title = ctx.t("Block an address", "Adresse sperren"),
+            address = ctx.t("Address or network", "Adresse oder Netz"),
+            reason = ctx.t("Reason", "Grund"),
+            label = ctx.t("Block", "Sperren"),
+        ));
+        body.push_str(&format!(
+            r#"<section class="card"><h2>{title}</h2><dl class="facts"><dt>{n}</dt><dd>{networks}</dd><dt>{c}</dt><dd>{countries}</dd><dt>{a}</dt><dd>{auto}</dd><dt>{ad}</dt><dd>{admins}</dd></dl><p class="muted small">{hint}</p></section>"#,
+            title = ctx.t("Rules", "Regeln"),
+            n = ctx.t("Networks", "Netze"),
+            networks = esc(&networks),
+            c = ctx.t("Countries", "Länder"),
+            countries = esc(&countries),
+            a = ctx.t("Automatic blocking", "Automatisch sperren"),
+            auto = esc(&auto),
+            ad = ctx.t("Administrators", "Administratoren"),
+            admins = esc(&admins),
+            hint = ctx.t(
+                "Changed in AeternaVault on the server: Web tab, Access.",
+                "Geändert in AeternaVault auf dem Server: Tab Web, Zugriff."
+            ),
+        ));
+        body.push_str("</div>");
+        self.page(ctx, ctx.t("Access", "Zugriff"), &body, false)
+    }
+
+    fn access_block(&self, ctx: &Ctx<'_>) -> Response {
+        let form = ctx.req.form();
+        let address = form.get("address").cloned().unwrap_or_default();
+        let reason = form.get("reason").cloned().unwrap_or_default();
+        let back = if form.get("back").is_some_and(|b| b == "sign-ins") {
+            "/activity?tab=sign-ins"
+        } else {
+            "/access"
+        };
+        let reason = if reason.trim().is_empty() && back != "/access" {
+            ctx.t(
+                "blocked from the sign-in log",
+                "aus dem Anmeldeprotokoll gesperrt",
+            )
+            .to_string()
+        } else {
+            reason
+        };
+        let mut list = super::access::Blocklist::load(&self.paths.config_file);
+        let message = match list.add(&address, &reason, &ctx.actor()) {
+            Ok(true) => match list.save(&self.paths.config_file) {
+                Ok(()) => {
+                    lock(&self.blocked).invalidate();
+                    let mut record = ctx
+                        .record("address-blocked")
+                        .target(address.trim().to_string());
+                    if !reason.trim().is_empty() {
+                        record = record.details(vec![reason.trim().to_string()]);
+                    }
+                    audit::record(&self.paths.config_file, record);
+                    format!("{}: {}", ctx.t("Blocked", "Gesperrt"), address.trim())
+                }
+                Err(err) => err.to_string(),
+            },
+            Ok(false) => ctx
+                .t(
+                    "This address was blocked already.",
+                    "Diese Adresse war schon gesperrt.",
+                )
+                .to_string(),
+            Err(err) => err,
+        };
+        let separator = if back.contains('?') { "&" } else { "?" };
+        Response::redirect(&format!("{back}{separator}msg={}", encode(&message)))
+    }
+
+    fn access_unblock(&self, ctx: &Ctx<'_>) -> Response {
+        let address = ctx.req.form().get("address").cloned().unwrap_or_default();
+        let mut list = super::access::Blocklist::load(&self.paths.config_file);
+        if !list.remove(&address) {
+            return Self::back(
+                "/access",
+                ctx.t(
+                    "This address is not blocked.",
+                    "Diese Adresse ist nicht gesperrt.",
+                ),
+            );
+        }
+        if let Err(err) = list.save(&self.paths.config_file) {
+            return Self::back("/access", &err.to_string());
+        }
+        lock(&self.blocked).invalidate();
+        audit::record(
+            &self.paths.config_file,
+            ctx.record("address-unblocked")
+                .target(address.trim().to_string()),
+        );
+        Self::back(
+            "/access",
+            &format!(
+                "{}: {}",
+                ctx.t("Allowed again", "Wieder zugelassen"),
+                address.trim()
+            ),
+        )
     }
 
     // --- jobs -------------------------------------------------------------------------
@@ -2360,7 +2679,7 @@ impl WebApp {
                     "Bitte wähle zuerst ein neues Passwort."
                 )
             ));
-        } else if self.settings.require_two_factor && ctx.user.totp.is_none() {
+        } else if ctx.mfa && ctx.user.totp.is_none() && !self.email_factor(ctx) {
             body.push_str(&format!(
                 r#"<p class="notice">{}</p>"#,
                 ctx.t(
@@ -2407,7 +2726,7 @@ impl WebApp {
             (Some(_), _) => format!(
                 r#"<p><span class="badge good">{on}</span></p>{off}"#,
                 on = ctx.t("on", "an"),
-                off = if self.settings.require_two_factor && !self.email_factor(ctx) {
+                off = if ctx.mfa && !self.email_factor(ctx) {
                     String::new()
                 } else {
                     format!(
@@ -2438,22 +2757,23 @@ impl WebApp {
                 label = ctx.t("Set up", "Einrichten")
             ),
         };
-        body.push_str(&format!(
-            r#"<section class="card"><h2>{}</h2>{twofa}</section>"#,
-            ctx.t(
-                "Authenticator app (two-factor sign-in)",
-                "Authenticator-App (Zwei-Faktor-Anmeldung)"
-            )
-        ));
-        body.push_str(&self.email_section(ctx));
+        if self.settings.mfa_app || ctx.user.totp.is_some() {
+            body.push_str(&format!(
+                r#"<section class="card"><h2>{}</h2>{twofa}</section>"#,
+                ctx.t("Authenticator app", "Authenticator-App")
+            ));
+        }
+        if self.settings.mfa_email {
+            body.push_str(&self.email_section(ctx));
+        }
         self.page(ctx, ctx.t("Account", "Konto"), &body, false)
     }
 
     /// Whether codes by e-mail work for this user now (channel, address, chosen or required).
     fn email_factor(&self, ctx: &Ctx<'_>) -> bool {
-        super::email_channel(&ctx.config).is_some()
+        self.email_possible(&ctx.config)
             && ctx.user.email.contains('@')
-            && (ctx.user.email_codes || self.settings.require_two_factor)
+            && (ctx.user.email_codes || ctx.mfa)
     }
 
     fn email_section(&self, ctx: &Ctx<'_>) -> String {
@@ -2480,7 +2800,7 @@ impl WebApp {
                 on = ctx.t("on", "an"),
                 to = ctx.t("Codes go to", "Codes gehen an"),
             ));
-            let can_switch_off = !self.settings.require_two_factor || ctx.user.totp.is_some();
+            let can_switch_off = !ctx.mfa || ctx.user.totp.is_some();
             if can_switch_off && ctx.user.email_codes {
                 html.push_str(&format!(
                     r#"<form method="post" action="/account/email/off" class="stack">{csrf}<label>{pw}<input name="current" type="password" required></label><button class="secondary">{label}</button></form>"#,
@@ -2536,7 +2856,7 @@ impl WebApp {
     }
 
     fn email_start(&self, ctx: &Ctx<'_>) -> Response {
-        if ctx.user.source == UserSource::Directory {
+        if ctx.user.source == UserSource::Directory || !self.settings.mfa_email {
             return self.forbidden(ctx);
         }
         let address = ctx
@@ -2632,7 +2952,7 @@ impl WebApp {
     }
 
     fn email_off(&self, ctx: &Ctx<'_>) -> Response {
-        if self.settings.require_two_factor && ctx.user.totp.is_none() {
+        if ctx.mfa && ctx.user.totp.is_none() {
             return self.forbidden(ctx);
         }
         let current = ctx.req.form().get("current").cloned().unwrap_or_default();
@@ -2730,6 +3050,9 @@ impl WebApp {
     }
 
     fn totp_start(&self, ctx: &Ctx<'_>) -> Response {
+        if !self.settings.mfa_app {
+            return self.forbidden(ctx);
+        }
         if ctx.user.totp.is_none() {
             lock(&self.pending_totp).insert(ctx.user.name.to_lowercase(), users::new_totp_secret());
         }
@@ -2768,7 +3091,7 @@ impl WebApp {
     }
 
     fn totp_off(&self, ctx: &Ctx<'_>) -> Response {
-        if self.settings.require_two_factor && !self.email_factor(ctx) {
+        if ctx.mfa && !self.email_factor(ctx) {
             return self.forbidden(ctx);
         }
         let current = ctx.req.form().get("current").cloned().unwrap_or_default();

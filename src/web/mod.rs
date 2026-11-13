@@ -12,6 +12,7 @@
 //! Not offered here on purpose: restoring, deleting backups, changing folders
 //! or settings, and entering passphrases.
 
+pub mod access;
 pub mod app;
 pub mod device;
 pub mod http;
@@ -254,6 +255,21 @@ pub fn check_settings(settings: &WebSettings) -> Result<Vec<Network>, String> {
     }
     settings.ldap.check()?;
     bind_address(settings)?;
+    if settings.mfa != access::MfaPolicy::Optional && !settings.mfa_app && !settings.mfa_email {
+        return Err(
+            "2FA is required, but neither an authenticator app nor e-mail codes are allowed".into(),
+        );
+    }
+    if settings.admin_access == access::AdminAccess::Networks {
+        for n in settings
+            .admin_networks
+            .iter()
+            .filter(|n| !n.trim().is_empty())
+        {
+            n.parse::<Network>()?;
+        }
+    }
+    settings.geo.codes()?;
     settings
         .allowed_networks
         .iter()
@@ -298,7 +314,7 @@ impl WebServer {
             settings.clone(),
             networks,
             control,
-        ));
+        )?);
         let handling = app.clone();
         let handler: http::Handler = Arc::new(move |request| handling.handle(request));
         let stop = Arc::new(AtomicBool::new(false));

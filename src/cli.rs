@@ -527,6 +527,19 @@ pub enum WebCommand {
     /// Roles and what they allow.
     #[command(subcommand)]
     Role(WebRoleCommand),
+    /// Block an address or network (e.g. `203.0.113.7` or `203.0.113.0/24`).
+    /// Applies at once, also to a running web interface.
+    Block {
+        address: String,
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
+    /// Allow a blocked address again.
+    Unblock {
+        address: String,
+    },
+    /// Blocked addresses.
+    Blocked,
     /// Who changed what, when and from where.
     Audit {
         /// Show the newest N entries.
@@ -559,9 +572,36 @@ pub struct WebSetArgs {
     /// Sign out after this many minutes without activity.
     #[arg(long)]
     session_minutes: Option<u32>,
-    /// Every user needs a one-time code from an authenticator app.
+    /// Who needs a second factor (2FA) after the password.
     #[arg(long, value_enum)]
+    mfa: Option<crate::web::access::MfaPolicy>,
+    /// Same as `--mfa everyone` (on) or `--mfa optional` (off).
+    #[arg(long, value_enum, hide = true)]
     require_two_factor: Option<OnOff>,
+    /// Allow an authenticator app as second factor.
+    #[arg(long, value_enum)]
+    mfa_app: Option<OnOff>,
+    /// Allow codes by e-mail as second factor.
+    #[arg(long, value_enum)]
+    mfa_email: Option<OnOff>,
+    /// Where administrators may work from.
+    #[arg(long, value_enum)]
+    admin_access: Option<crate::web::access::AdminAccess>,
+    /// Networks for `--admin-access networks`, separated by commas.
+    #[arg(long, value_name = "NETWORKS")]
+    admin_networks: Option<String>,
+    /// Block an address after this many wrong sign-ins within 24 hours (0: never).
+    #[arg(long)]
+    auto_block_after: Option<u32>,
+    /// Geoblocking: only the listed countries (`allow`), all but them (`block`), or `off`.
+    #[arg(long, value_enum)]
+    geo: Option<crate::web::access::GeoMode>,
+    /// Country database (.mmdb: MaxMind GeoLite2 Country or DB-IP Lite).
+    #[arg(long, value_name = "FILE")]
+    geo_database: Option<PathBuf>,
+    /// Countries by ISO code, separated by commas (e.g. `DE,AT,CH`).
+    #[arg(long, value_name = "CODES")]
+    geo_countries: Option<String>,
     /// Wrong sign-ins in a row before a user or address has to wait.
     #[arg(long)]
     lockout_attempts: Option<u32>,
@@ -3118,12 +3158,30 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
                     text += &format!("Certificate:   SHA-256 {fp}\n");
                 }
                 text += &format!(
-                    "Networks:      {}\nSessions:      signed out after {} min without activity\nOne-time codes: {}\nLockout:       {} wrong sign-ins, {} min\nUsers:",
+                    "Networks:      {}\nSessions:      signed out after {} min without activity\n2FA:           {}{}{}\nAdministrators: {}\nLockout:       {} wrong sign-ins, {} min\nAuto-block:    {}\nCountries:     {}\nBlocked:       {}\nUsers:",
                     if w.allowed_networks.is_empty() { "any".to_string() } else { w.allowed_networks.join(", ") },
                     w.session_minutes,
-                    if w.require_two_factor { "required" } else { "optional" },
+                    match w.mfa {
+                        crate::web::access::MfaPolicy::Optional => "optional",
+                        crate::web::access::MfaPolicy::Administrators => "required for administrators",
+                        crate::web::access::MfaPolicy::Everyone => "required for everyone",
+                    },
+                    if w.mfa_app { ", app" } else { "" },
+                    if w.mfa_email { ", e-mail" } else { "" },
+                    match w.admin_access {
+                        crate::web::access::AdminAccess::Anywhere => "anywhere".to_string(),
+                        crate::web::access::AdminAccess::ThisComputer => "this computer only".to_string(),
+                        crate::web::access::AdminAccess::Networks => format!("this computer and {}", w.admin_networks.join(", ")),
+                    },
                     w.lockout_attempts,
                     w.lockout_minutes,
+                    if w.auto_block_after == 0 { "off".to_string() } else { format!("after {} wrong sign-ins in 24 h", w.auto_block_after) },
+                    match w.geo.mode {
+                        crate::web::access::GeoMode::Off => "any".to_string(),
+                        crate::web::access::GeoMode::Allow => format!("only {}", w.geo.countries.join(", ")),
+                        crate::web::access::GeoMode::Block => format!("all but {}", w.geo.countries.join(", ")),
+                    },
+                    crate::web::access::Blocklist::load(&config_file).entries.len(),
                 );
                 if view.users.is_empty() {
                     text += " none yet; add one with `aeternavault-cli web user add NAME --role admin`";
@@ -3195,7 +3253,44 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
                 web.session_minutes = minutes.max(1);
             }
             if let Some(on) = args.require_two_factor {
-                web.require_two_factor = on == OnOff::On;
+                web.mfa = if on == OnOff::On {
+                    crate::web::access::MfaPolicy::Everyone
+                } else {
+                    crate::web::access::MfaPolicy::Optional
+                };
+            }
+            if let Some(policy) = args.mfa {
+                web.mfa = policy;
+            }
+            if let Some(on) = args.mfa_app {
+                web.mfa_app = on == OnOff::On;
+            }
+            if let Some(on) = args.mfa_email {
+                web.mfa_email = on == OnOff::On;
+            }
+            if let Some(access) = args.admin_access {
+                web.admin_access = access;
+            }
+            let list = |text: &str| -> Vec<String> {
+                text.split(',')
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .collect()
+            };
+            if let Some(networks) = &args.admin_networks {
+                web.admin_networks = list(networks);
+            }
+            if let Some(n) = args.auto_block_after {
+                web.auto_block_after = n;
+            }
+            if let Some(mode) = args.geo {
+                web.geo.mode = mode;
+            }
+            if let Some(file) = args.geo_database {
+                web.geo.database = file;
+            }
+            if let Some(codes) = &args.geo_countries {
+                web.geo.countries = list(codes);
             }
             if let Some(n) = args.lockout_attempts {
                 web.lockout_attempts = n;
@@ -3207,6 +3302,7 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
                 web.recommended_password_length = n;
             }
             crate::web::check_settings(web).map_err(|e| anyhow!(e))?;
+            crate::web::access::Geo::open(&web.geo).map_err(|e| anyhow!(e))?;
             ctx.save()?;
             println!(
                 "Saved. A running web interface uses the new settings after it is started again."
@@ -3292,6 +3388,60 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
         WebCommand::User(command) => return web_user(ctx, command),
         WebCommand::Ldap(command) => return web_ldap(ctx, command),
         WebCommand::Role(command) => return web_role(ctx, command),
+        WebCommand::Block { address, reason } => {
+            let mut list = crate::web::access::Blocklist::load(&config_file);
+            let actor = audit::process_actor();
+            if list
+                .add(&address, &reason, &actor)
+                .map_err(|e| anyhow!(e))?
+            {
+                list.save(&config_file)?;
+                let mut record =
+                    Record::local("address-blocked").target(address.trim().to_string());
+                if !reason.trim().is_empty() {
+                    record = record.details(vec![reason.trim().to_string()]);
+                }
+                audit::record(&config_file, record);
+                println!("Blocked: {}", address.trim());
+            } else {
+                println!("{} was blocked already.", address.trim());
+            }
+        }
+        WebCommand::Unblock { address } => {
+            let mut list = crate::web::access::Blocklist::load(&config_file);
+            if !list.remove(&address) {
+                bail!("{} is not blocked", address.trim());
+            }
+            list.save(&config_file)?;
+            audit::record(
+                &config_file,
+                Record::local("address-unblocked").target(address.trim().to_string()),
+            );
+            println!("Allowed again: {}", address.trim());
+        }
+        WebCommand::Blocked => {
+            let list = crate::web::access::Blocklist::load(&config_file);
+            ctx.print(&list.entries, || {
+                if list.entries.is_empty() {
+                    return "No address is blocked.".to_string();
+                }
+                list.entries
+                    .iter()
+                    .map(|e| {
+                        format!(
+                            "{:<20} {}  {:<20} {}",
+                            e.address,
+                            e.since
+                                .with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %H:%M"),
+                            e.by,
+                            e.reason
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+        }
     }
     Ok(Outcome::Ok)
 }

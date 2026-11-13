@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 - LDAP: roles from directory groups (any group to any role, the highest wins) or assigned in AeternaVault, with an optional default role for new directory users.
 - Help (the ? at the top right): keyboard shortcuts, version and links to the documentation and the issue tracker.
 - Settings → Features: backup jobs and drive health can be switched like the other parts; all five sit in one row of switches.
+- Web interface access: blocked addresses and networks (Access page, a Block button next to failed sign-ins, `aeternavault-cli web block|unblock|blocked`), applied at once without a restart; automatic blocking of an address after 20 wrong sign-ins within 24 hours (`auto_block_after`, never this computer); geoblocking by country with a downloaded country database (MaxMind GeoLite2 Country or DB-IP Lite, `.mmdb`; private networks are not checked).
+- Web interface: administrators can be limited to this computer or to given networks (`admin_access`, `admin_networks`); elsewhere they keep the other permissions of their role.
+- 2FA policy: optional, required for administrators, or required for everyone (`mfa`), and which methods are allowed (`mfa_app`, `mfa_email`). `require_two_factor = true` from older files becomes `mfa = "everyone"`.
+- Own certificate files are read again when they change, so a renewal (for example Let's Encrypt with certbot or win-acme) needs no restart.
 - Notifications → Message texts: one message at a time, starting from the built-in text, values to click in at the cursor, a preview with sample values and a button to restore the built-in text.
 
 ### Changed
@@ -17,7 +21,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 - Switches instead of check boxes for settings that are on or off (green when on, grey when off, animated); chosen options are marked by their colour only, without a check mark. The same in the web interface.
 - Settings are placed in two balanced columns; cards no longer leave gaps or overlap when options wrap.
 - Shorter labels; number fields show “off” or “never” for 0.
-- Pages before sign-in name nothing about the computer; the style sheet address carries the version, so a browser never mixes old and new.
+- Pages before sign-in name nothing about the computer, and the sign-in box is centred; the style sheet address carries the version, so a browser never mixes old and new.
 
 ## [0.13.0] - 2026-11-13
 

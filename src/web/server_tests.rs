@@ -438,7 +438,7 @@ fn fake_smtp() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
 #[test]
 fn codes_by_e_mail_when_a_second_step_is_required() {
     let settings = WebSettings {
-        require_two_factor: true,
+        mfa: crate::web::access::MfaPolicy::Everyone,
         ..WebSettings::default()
     };
     let (_tmp, paths, _server, port) = setup(settings);
@@ -539,4 +539,183 @@ fn administrators_see_sign_ins_live() {
         !page.body.contains("wrong password"),
         "viewers do not see sign-ins"
     );
+}
+
+/// Requests as if they came from other computers (the test itself can only
+/// connect from this one), straight to the request handler.
+mod from_elsewhere {
+    use std::collections::HashMap;
+    use std::net::IpAddr;
+    use std::sync::Arc;
+
+    use super::super::access::{AdminAccess, Blocklist};
+    use super::super::app::WebApp;
+    use super::super::http::{Request, Response};
+    use super::*;
+
+    fn app(settings: WebSettings) -> (tempfile::TempDir, AppPaths, WebApp) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = AppPaths {
+            config_file: tmp.path().join("config.toml"),
+            log_dir: tmp.path().join("logs"),
+            portable: false,
+        };
+        let mut store = UserStore::default();
+        store.add("admin", "admin", "admin password 1").unwrap();
+        store.save(&paths.config_file).unwrap();
+        let settings = WebSettings {
+            bind: "0.0.0.0".into(),
+            ..settings
+        };
+        let app = WebApp::new(
+            paths.clone(),
+            settings,
+            Vec::new(),
+            Arc::new(LocalRunner::new(paths.clone())),
+        )
+        .unwrap();
+        (tmp, paths, app)
+    }
+
+    fn request(method: &str, path: &str, from: &str, cookie: Option<&str>, body: &str) -> Request {
+        let mut headers = HashMap::new();
+        headers.insert("host".to_string(), "server:8686".to_string());
+        if let Some(cookie) = cookie {
+            headers.insert("cookie".to_string(), cookie.to_string());
+        }
+        Request {
+            method: method.into(),
+            path: path.into(),
+            query: HashMap::new(),
+            headers,
+            body: body.as_bytes().to_vec(),
+            peer: from.parse::<IpAddr>().unwrap(),
+            tls: false,
+        }
+    }
+
+    fn header<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
+        response
+            .headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn sign_in(app: &WebApp, from: &str) -> String {
+        let r = app.handle(request(
+            "POST",
+            "/login",
+            from,
+            None,
+            "user=admin&password=admin+password+1",
+        ));
+        assert_eq!(r.status, 303);
+        header(&r, "set-cookie")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn an_address_with_many_wrong_sign_ins_is_blocked() {
+        let (_tmp, paths, app) = app(WebSettings {
+            auto_block_after: 3,
+            lockout_attempts: 0,
+            ..WebSettings::default()
+        });
+        let wrong = "user=admin&password=wrong";
+        for _ in 0..3 {
+            let r = app.handle(request("POST", "/login", "203.0.113.7", None, wrong));
+            assert_eq!(r.status, 200, "the sign-in page again");
+        }
+        let list = Blocklist::load(&paths.config_file);
+        assert_eq!(list.entries.len(), 1);
+        assert_eq!(list.entries[0].address, "203.0.113.7");
+        assert_eq!(list.entries[0].by, "automatic");
+        assert_eq!(
+            app.handle(request("GET", "/login", "203.0.113.7", None, ""))
+                .status,
+            403
+        );
+        assert_eq!(
+            app.handle(request("GET", "/login", "203.0.113.8", None, ""))
+                .status,
+            200,
+            "other addresses are not affected"
+        );
+        // This computer is never blocked.
+        for _ in 0..4 {
+            app.handle(request("POST", "/login", "127.0.0.1", None, wrong));
+        }
+        assert_eq!(Blocklist::load(&paths.config_file).entries.len(), 1);
+        assert_eq!(
+            app.handle(request("GET", "/login", "127.0.0.1", None, ""))
+                .status,
+            200
+        );
+    }
+
+    #[test]
+    fn administrators_manage_only_from_where_allowed() {
+        let (_tmp, paths, app) = app(WebSettings {
+            admin_access: AdminAccess::Networks,
+            admin_networks: vec!["192.168.1.0/24".into()],
+            ..WebSettings::default()
+        });
+        let away = sign_in(&app, "203.0.113.7");
+        assert_eq!(
+            app.handle(request("GET", "/", "203.0.113.7", Some(&away), ""))
+                .status,
+            200,
+            "signed in, with what the role allows besides administration"
+        );
+        assert_eq!(
+            app.handle(request("GET", "/users", "203.0.113.7", Some(&away), ""))
+                .status,
+            403
+        );
+        assert_eq!(
+            app.handle(request("GET", "/access", "203.0.113.7", Some(&away), ""))
+                .status,
+            403
+        );
+        let office = sign_in(&app, "192.168.1.20");
+        assert_eq!(
+            app.handle(request("GET", "/users", "192.168.1.20", Some(&office), ""))
+                .status,
+            200
+        );
+
+        // One click in the access page blocks an address; the next request
+        // from there is refused, without a restart.
+        let page = app.handle(request("GET", "/access", "192.168.1.20", Some(&office), ""));
+        assert_eq!(page.status, 200);
+        let html = String::from_utf8_lossy(&page.body);
+        let csrf = html
+            .split(r#"name="csrf" value=""#)
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .unwrap()
+            .to_string();
+        let r = app.handle(request(
+            "POST",
+            "/access/block",
+            "192.168.1.20",
+            Some(&office),
+            &format!("csrf={csrf}&address=203.0.113.7&reason=test"),
+        ));
+        assert_eq!(r.status, 303);
+        assert_eq!(
+            Blocklist::load(&paths.config_file).entries[0].by,
+            "web:admin"
+        );
+        assert_eq!(
+            app.handle(request("GET", "/", "203.0.113.7", Some(&away), ""))
+                .status,
+            403
+        );
+    }
 }

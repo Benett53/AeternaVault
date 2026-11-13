@@ -182,8 +182,8 @@ svg.ring text.sub { fill: var(--muted); font: 12px var(--sans); }
 .summary { display: flex; flex-wrap: wrap; align-items: center; gap: 18px 28px; }
 
 /* Sign-in page. */
-body.bare { display: flex; min-height: 100vh; align-items: flex-start; justify-content: center; }
-.login { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 32px; margin-top: 10vh; width: min(420px, 92vw); }
+body.bare { display: flex; min-height: 100vh; align-items: center; justify-content: center; padding: 24px 0; box-sizing: border-box; }
+.login { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 32px; width: min(420px, 92vw); box-sizing: border-box; }
 .login .brand { margin-bottom: 4px; }
 .login .computer { display: block; margin-bottom: 22px; }
 .login form.stack button { justify-content: center; }
@@ -198,3 +198,8 @@ body.bare { display: flex; min-height: 100vh; align-items: flex-start; justify-c
   .tile { padding: 12px 14px; }
   .tile .value { font-size: 22px; }
 }
+
+/* Label and value pairs (access rules). */
+dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 8px 20px; margin: 0 0 12px; }
+dl.facts dt { color: var(--muted); }
+dl.facts dd { margin: 0; overflow-wrap: anywhere; }
