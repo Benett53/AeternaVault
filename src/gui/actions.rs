@@ -595,6 +595,10 @@ impl AeternaApp {
                     &result,
                     self.lang.t().back_up_now,
                 );
+                if self.config.drive_health_on() {
+                    let (file, config) = (self.paths.config_file.clone(), self.config.clone());
+                    std::thread::spawn(move || crate::notify::check_drive_health(&file, &config));
+                }
                 let result = result.map_err(|e| {
                     tracing::error!("backup failed: {e}");
                     self.lang.error_message(&e)

@@ -33,8 +33,9 @@ Backups of folders as plain, browsable folders, optionally encrypted. Windows an
 | Notifications | Summary after backups, alerts on problems and low disk space by e-mail, Teams, Telegram, ntfy, Slack, Discord, Gotify or webhook. Thresholds and texts are configurable ([details](docs/notifications.md)). |
 | Jobs for servers | Command before the backup (e.g. `pg_dump`), own destination per job, named backups ([administration](docs/administration.md)). |
 | Command line | `aeternavault-cli` does everything the window does, with `--json`. PowerShell module on Windows. |
-| Web interface | Optional, off by default: overview of jobs, backups and problems in a browser; run and check from elsewhere. Users with roles, one-time codes, HTTPS, audit log of who changed what ([details](docs/web.md)). |
-| Interface | English and German; light, dark and black (OLED); keyboard shortcuts, mouse back/forward, middle-click scrolling. |
+| Web interface | Optional, off by default: overview of jobs, backups and problems in a browser; run and check from elsewhere. Users with own roles, LDAP/Active Directory, 2FA, HTTPS, blocked addresses and countries, audit log of who changed what ([details](docs/web.md)). |
+| Drive health | Optional: S.M.A.R.T. status of the destination drive, with an alert when it gets worse. |
+| Interface | English and German; light, dark and black (OLED); optional parts switched on only when used; keyboard shortcuts (Help, the ? at the top), mouse back/forward, middle-click scrolling. |
 | Updates | Button in the settings and `aeternavault-cli update`; optional check once a day. Apart from notifications and the optional web interface, the only network connection. Installs only signed releases. |
 
 ## Download

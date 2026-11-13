@@ -82,6 +82,8 @@ aeternavault-cli notify test
 
 E-mail, Teams, Telegram, Slack, Discord, Gotify and webhooks: see [notifications.md](notifications.md).
 
+Health (S.M.A.R.T.) of the destination drive: `aeternavault-cli drive-health`; with Settings → Features → Drive health a message comes when it gets worse.
+
 ## Settings
 
 ```powershell

@@ -1348,8 +1348,33 @@ impl WebApp {
             let size_note = space
                 .map(|(_, size)| esc(&lang.bytes(size)))
                 .unwrap_or_default();
+            let health = if config.drive_health_on() {
+                use crate::platform::drive_health::{self, Status};
+                let text = match drive_health::cached(d, || {}) {
+                    None => ctx.t("reading…", "wird gelesen…").to_string(),
+                    Some(Ok(h)) => {
+                        let class = match h.status {
+                            Status::Good => "good",
+                            Status::Warning => "warn",
+                            Status::Failing => "bad",
+                        };
+                        format!(
+                            r#"<span class="badge {class}" title="{title}">{summary}</span>"#,
+                            title = esc(&h.findings.join("; ")),
+                            summary = esc(&h.summary(ctx.en)),
+                        )
+                    }
+                    Some(Err(why)) => esc(&why.text(ctx.en)),
+                };
+                format!(
+                    "<dt>{}</dt><dd>{text}</dd>",
+                    ctx.t("Drive health", "Laufwerkszustand")
+                )
+            } else {
+                String::new()
+            };
             dest_cards.push_str(&format!(
-                r#"<section class="card job"><div class="head"><h3><a href="/backups?d={n}">{path}</a></h3>{state}</div>{meter}<dl class="meta"><dt>{l1}</dt><dd>{size_note}</dd><dt>{l2}</dt><dd>{count}</dd><dt>{l3}</dt><dd>{newest}</dd></dl></section>"#,
+                r#"<section class="card job"><div class="head"><h3><a href="/backups?d={n}">{path}</a></h3>{state}</div>{meter}<dl class="meta"><dt>{l1}</dt><dd>{size_note}</dd><dt>{l2}</dt><dd>{count}</dd><dt>{l3}</dt><dd>{newest}</dd>{health}</dl></section>"#,
                 path = esc(&d.display().to_string()),
                 state = if reachable {
                     format!(r#"<span class="badge good">{}</span>"#, ctx.t("reachable", "erreichbar"))

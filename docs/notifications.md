@@ -42,9 +42,20 @@ With `--passphrase-stdin`, the SMTP password is read from standard input instead
 
 The overdue alert is checked in the background every 15 minutes (Linux: with every run of the systemd timer), so it also comes when backups do not run at all (computer off, drive not connected, job stuck). A weekly job counts as overdue after 8 days at the earliest. The alert is repeated once a day until a backup of the job succeeds.
 
+## Drive health
+
+With Settings → Features → Drive health on, AeternaVault reads the S.M.A.R.T. status of the drive the destination is on after every backup, and shows it in Settings and in the web overview. When the drive starts to warn (bad sectors, worn out, errors) or reports that it is failing, a message goes to the channels; it is sent again only when the state gets worse. The values come from UDisks on Linux (no root needed; `smartctl` as a fallback) and from the Storage module on Windows. Network shares are not checked: their drives are in the server.
+
+```sh
+aeternavault-cli drive-health          # the destination
+aeternavault-cli drive-health /mnt/usb
+```
+
+Exit code `2` when the drive warns or is failing.
+
 ## Texts
 
-`success_title`, `success_message`, `problem_title`, `problem_message`, `low_space_title` and `low_space_message` replace the built-in texts. Placeholders:
+In the window (Notifications → Message texts) one message at a time: switch on *Own text* to start from the built-in one, click a value to insert it at the cursor, and check the preview with sample values. On the command line, `success_title`, `success_message`, `problem_title`, `problem_message`, `low_space_title` and `low_space_message` replace the built-in texts. Placeholders:
 
 `{job}` `{status}` `{backup}` `{files}` `{copied}` `{size}` `{failed}` `{duration}` `{computer}` `{destination}` `{free}` `{free_percent}` `{message}`
 

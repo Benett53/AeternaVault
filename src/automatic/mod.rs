@@ -335,6 +335,7 @@ pub fn run_job(
         record_run(&paths.config_file, &run, report.as_ref(), command_line);
         // With the job's own destination: its name and its free space.
         crate::notify::after_run(&run_config, &run, report.as_ref());
+        crate::notify::check_drive_health(&paths.config_file, &run_config);
     }
     match run.outcome {
         AutomaticOutcome::Complete => tracing::info!(

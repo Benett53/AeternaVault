@@ -133,6 +133,10 @@ pub struct State {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_executable: Option<PathBuf>,
     pub schedules: BTreeMap<String, ScheduleState>,
+    /// Last drive health reported by a notification, per destination, so a
+    /// warning is sent when it changes, not after every backup.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub drive_alerted: BTreeMap<String, crate::platform::drive_health::Status>,
 }
 
 impl State {

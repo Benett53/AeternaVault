@@ -56,6 +56,12 @@ pub struct Cli {
 pub enum Command {
     /// Destination, encryption, folders, jobs and the last backup at a glance.
     Status,
+    /// Health (S.M.A.R.T.) of the drive the destination or another folder is
+    /// on. Exit code 2 when the drive warns or is failing.
+    DriveHealth {
+        /// A folder on the drive; the destination if left out.
+        path: Option<PathBuf>,
+    },
     /// Back up now: all ticked folders, or the folders of one job.
     Backup {
         /// Copy every file again instead of only new and changed ones.
@@ -826,6 +832,7 @@ pub fn main() -> ExitCode {
 fn run(command: Command, ctx: &mut Ctx) -> anyhow::Result<Outcome> {
     match command {
         Command::Status => status(ctx),
+        Command::DriveHealth { path } => drive_health(ctx, path),
         Command::Backup { full, job } => backup(ctx, full, job),
         Command::List { at } => list(ctx, &at),
         Command::Files { backup, filter, at } => files(ctx, &backup, filter, &at),
@@ -1092,6 +1099,31 @@ struct StatusView {
     last_backup: Option<String>,
     backups: usize,
     background: bool,
+}
+
+fn drive_health(ctx: &mut Ctx, path: Option<PathBuf>) -> anyhow::Result<Outcome> {
+    use crate::platform::drive_health::{self, Status};
+    let path = path.unwrap_or_else(|| ctx.config.destination.clone());
+    if path.as_os_str().is_empty() {
+        bail!("no destination is set; name a folder");
+    }
+    match drive_health::read(&path) {
+        Ok(health) => {
+            ctx.print(&health, || {
+                let mut text = format!("{}: {}", health.model, health.summary(true));
+                for finding in &health.findings {
+                    text += &format!("\n  {finding}");
+                }
+                text
+            });
+            Ok(if health.status == Status::Good {
+                Outcome::Ok
+            } else {
+                Outcome::Partly
+            })
+        }
+        Err(why) => bail!("{}: {}", path.display(), why.text(true)),
+    }
 }
 
 fn status(ctx: &mut Ctx) -> anyhow::Result<Outcome> {

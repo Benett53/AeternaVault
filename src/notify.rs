@@ -443,6 +443,108 @@ pub fn after_run(config: &Config, run: &AutomaticRun, report: Option<&BackupRepo
     }
 }
 
+/// The message about the destination drive when its health became worse
+/// than last reported; `None` when it is good, unchanged or not readable.
+pub fn drive_health_message(
+    previous: Option<crate::platform::drive_health::Status>,
+    health: &crate::platform::drive_health::DriveHealth,
+    destination: &std::path::Path,
+    lang: Lang,
+) -> Option<Message> {
+    use crate::platform::drive_health::Status;
+    if health.status == Status::Good || previous.is_some_and(|p| p >= health.status) {
+        return None;
+    }
+    let en = lang == Lang::En;
+    let computer = platform::computer_name();
+    let findings = if health.findings.is_empty() {
+        String::new()
+    } else {
+        format!("\n- {}", health.findings.join("\n- "))
+    };
+    let advice = match (health.status, en) {
+        (Status::Failing, true) => "Copy the backups to another drive soon and replace this one.",
+        (Status::Failing, false) => {
+            "Kopiere die Sicherungen bald auf ein anderes Laufwerk und ersetze dieses."
+        }
+        (_, true) => "Keep an eye on it and keep a second copy of the backups.",
+        (_, false) => "Behalte es im Blick und halte eine zweite Kopie der Sicherungen bereit.",
+    };
+    let (title, body) = if en {
+        (
+            format!(
+                "Drive health: {} {}",
+                health.model,
+                health.status_name(true)
+            ),
+            format!(
+                "{computer}: the drive with the backups at {} reports: {}.{findings}\n{advice}",
+                destination.display(),
+                health.summary(true)
+            ),
+        )
+    } else {
+        (
+            format!(
+                "Laufwerkszustand: {} {}",
+                health.model,
+                health.status_name(false)
+            ),
+            format!(
+                "{computer}: Das Laufwerk mit den Sicherungen unter {} meldet: {}.{findings}\n{advice}",
+                destination.display(),
+                health.summary(false)
+            ),
+        )
+    };
+    Some(Message {
+        title,
+        body,
+        severity: Severity::Warning,
+        attachment: None,
+    })
+}
+
+/// After a backup: reads the health of the destination drive and sends a
+/// message when it became worse. Blocking; call it from a background thread.
+pub fn check_drive_health(config_file: &std::path::Path, config: &Config) {
+    if !config.drive_health_on() || config.destination.as_os_str().is_empty() {
+        return;
+    }
+    let Ok(health) = crate::platform::drive_health::read(&config.destination) else {
+        return;
+    };
+    let key = config.destination.display().to_string();
+    let previous = crate::state::State::load(config_file)
+        .drive_alerted
+        .get(&key)
+        .copied();
+    if previous == Some(health.status) {
+        return;
+    }
+    let lang = Lang::resolve(config.language);
+    if config.notifications_on()
+        && config.notifications.active()
+        && let Some(message) = drive_health_message(previous, &health, &config.destination, lang)
+    {
+        for channel in config.notifications.channels.iter().filter(|c| c.enabled) {
+            if let Err(err) = send(channel, &message) {
+                tracing::warn!("notification via {} failed: {err}", channel.label());
+            }
+        }
+    }
+    if health.status != crate::platform::drive_health::Status::Good {
+        tracing::warn!(
+            "drive health of {}: {}",
+            config.destination.display(),
+            health.summary(true)
+        );
+    }
+    crate::state::State::update(config_file, |s| {
+        s.drive_alerted.insert(key, health.status);
+    });
+}
+
 /// Enabled jobs without a successful backup for longer than allowed, with the
 /// time of their last success. A weekly job gets at least eight days.
 pub fn overdue_jobs<'a>(
@@ -1316,5 +1418,37 @@ mod tests {
         assert!(text.contains("[[notifications.channel]]"));
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.notifications, config.notifications);
+    }
+
+    #[test]
+    fn drive_health_is_reported_when_it_gets_worse() {
+        use crate::platform::drive_health::{DriveHealth, Status};
+        let mut health = DriveHealth {
+            model: "WDC WD40EFRX".into(),
+            status: Status::Good,
+            temperature_c: Some(35),
+            power_on_hours: Some(10_000),
+            findings: Vec::new(),
+            source: "udisks".into(),
+        };
+        let at = std::path::Path::new("/mnt/backup");
+        assert!(drive_health_message(None, &health, at, Lang::En).is_none());
+        health.status = Status::Warning;
+        health.findings = vec!["8 bad sectors".into()];
+        let message = drive_health_message(Some(Status::Good), &health, at, Lang::En).unwrap();
+        assert!(
+            message.title.contains("WDC WD40EFRX Warning"),
+            "{}",
+            message.title
+        );
+        assert!(message.body.contains("8 bad sectors"));
+        assert!(message.body.contains("/mnt/backup"));
+        assert!(
+            drive_health_message(Some(Status::Warning), &health, at, Lang::En).is_none(),
+            "told already"
+        );
+        health.status = Status::Failing;
+        let message = drive_health_message(Some(Status::Warning), &health, at, Lang::De).unwrap();
+        assert!(message.body.contains("ersetze"));
     }
 }

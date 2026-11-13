@@ -525,6 +525,9 @@ fn destination_card(app: &mut AeternaApp, ui: &mut Ui) {
             });
         });
         crate::gui::views::backup::destination_status(app, ui);
+        if app.config.drive_health_on() && !app.config.destination.as_os_str().is_empty() {
+            drive_health_line(app, ui);
+        }
         ui.add_space(4.0);
         let mut app_folder = app.config.advanced.destination_app_folder;
         let busy = app.is_busy();
@@ -555,6 +558,56 @@ fn destination_card(app: &mut AeternaApp, ui: &mut Ui) {
         });
         if app.config.mode != before {
             app.mark_dirty();
+        }
+    });
+}
+
+/// The S.M.A.R.T. status of the destination drive: a coloured dot, the
+/// verdict, temperature and hours; findings and the model on hover.
+fn drive_health_line(app: &AeternaApp, ui: &mut Ui) {
+    use crate::platform::drive_health::{self, Status};
+    let p = *theme::palette(ui);
+    let en = app.lang == crate::i18n::Lang::En;
+    let repaint = ui.ctx().clone();
+    let reading = drive_health::cached(&app.config.destination, move || repaint.request_repaint());
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        let label = if en {
+            "Drive health"
+        } else {
+            "Laufwerkszustand"
+        };
+        widgets::secondary_text(ui, label);
+        match &reading {
+            None => {
+                widgets::secondary_text(ui, if en { "reading…" } else { "wird gelesen…" });
+            }
+            Some(Ok(health)) => {
+                let color = match health.status {
+                    Status::Good => p.success,
+                    Status::Warning => p.warning,
+                    Status::Failing => p.error,
+                };
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 4.5, color);
+                let mut hover = health.model.clone();
+                for finding in &health.findings {
+                    hover.push('\n');
+                    hover.push_str(finding);
+                }
+                ui.label(egui::RichText::new(health.summary(en)).color(
+                    if health.status == Status::Good {
+                        p.text
+                    } else {
+                        color
+                    },
+                ))
+                .on_hover_text(hover);
+            }
+            Some(Err(why)) => {
+                widgets::secondary_text(ui, why.text(en));
+            }
         }
     });
 }
