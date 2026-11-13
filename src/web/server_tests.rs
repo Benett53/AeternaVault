@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use rustls::pki_types::pem::PemObject;
 
-use super::users::{self, Role, UserStore};
+use super::users::{self, UserStore};
 use super::{LocalRunner, WebServer};
 use crate::config::{TlsMode, WebSettings};
 use crate::paths::AppPaths;
@@ -110,10 +110,8 @@ fn setup(settings: WebSettings) -> (tempfile::TempDir, AppPaths, WebServer, u16)
         portable: false,
     };
     let mut store = UserStore::default();
-    store.add("admin", Role::Admin, "admin password 1").unwrap();
-    store
-        .add("viewer", Role::Viewer, "viewer password 1")
-        .unwrap();
+    store.add("admin", "admin", "admin password 1").unwrap();
+    store.add("viewer", "viewer", "viewer password 1").unwrap();
     store.save(&paths.config_file).unwrap();
     let port = free_port();
     let settings = WebSettings {
@@ -234,7 +232,7 @@ fn administrators_manage_users_and_the_last_one_stays() {
     assert_eq!(add.status, 303);
     let store = UserStore::load(&paths.config_file);
     let olga = store.find("olga").unwrap();
-    assert_eq!(olga.role, Role::Operator);
+    assert_eq!(olga.role, "operator");
     assert!(
         olga.must_change_password,
         "a password set by someone else is changed first"
@@ -268,12 +266,13 @@ fn administrators_manage_users_and_the_last_one_stays() {
         );
         assert_eq!(reply.status, 303);
         assert!(reply.header("location").unwrap().contains("msg="));
-        assert!(
-            UserStore::load(&paths.config_file)
-                .find("admin")
-                .unwrap()
-                .may(Role::Admin)
-        );
+        assert!({
+            let store = UserStore::load(&paths.config_file);
+            store.can(
+                store.find("admin").unwrap(),
+                super::users::Permission::ManageUsers,
+            )
+        });
     }
 
     // Locking a user ends their access at the next request.

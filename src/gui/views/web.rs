@@ -19,7 +19,7 @@ use crate::gui::theme::palette;
 use crate::gui::widgets::{self, ButtonKind, NoticeKind};
 use crate::i18n::Lang;
 use crate::web::ldap::{self, LdapSettings};
-use crate::web::users::{self, Role, UserSource, UserStore};
+use crate::web::users::{self, UserSource, UserStore};
 
 /// A message under a section that stays until the next action.
 #[derive(Clone)]
@@ -40,7 +40,7 @@ pub struct WebUi {
     apply_note: Option<Note>,
     new_name: String,
     new_password: String,
-    new_role: Role,
+    new_role: String,
     user_note: Option<Note>,
     /// A password set for a user, shown once: (user, password).
     shown_password: Option<(String, String)>,
@@ -70,7 +70,7 @@ impl Default for WebUi {
             apply_note: None,
             new_name: String::new(),
             new_password: String::new(),
-            new_role: Role::Viewer,
+            new_role: "viewer".into(),
             user_note: None,
             shown_password: None,
             confirm_remove: None,
@@ -99,10 +99,10 @@ impl WebUi {
 
     /// Fills the "add user" fields (interface tests).
     #[cfg(test)]
-    pub fn fill_new_user(&mut self, name: &str, password: &str, role: Role) {
+    pub fn fill_new_user(&mut self, name: &str, password: &str, role: &str) {
         self.new_name = name.into();
         self.new_password = password.into();
-        self.new_role = role;
+        self.new_role = role.to_string();
     }
 }
 
@@ -1064,8 +1064,24 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                         ui.label(RichText::new(h).color(p.text_secondary).size(13.0));
                     }
                     ui.end_row();
+                    let role_names = store.role_names();
+                    let admin_names: Vec<String> = store
+                        .users
+                        .iter()
+                        .filter(|u| store.can(u, users::Permission::ManageUsers))
+                        .map(|u| u.name.clone())
+                        .collect();
+                    let manages = |role: &str| {
+                        users::Role::from_id(role).is_some_and(|r| r == users::Role::Admin)
+                            || store.roles.iter().any(|d| {
+                                d.name.eq_ignore_ascii_case(role)
+                                    && d.permissions.contains(&users::Permission::ManageUsers)
+                            })
+                    };
+                    let manages: Vec<String> =
+                        role_names.iter().filter(|r| manages(r)).cloned().collect();
                     for user in store.users.iter_mut() {
-                        let last_admin = admins == 1 && user.may(Role::Admin);
+                        let last_admin = admins == 1 && admin_names.contains(&user.name);
                         let directory = user.source == UserSource::Directory;
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&user.name).strong());
@@ -1074,22 +1090,27 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                             }
                         });
                         if directory {
-                            ui.label(user.role.name(en)).on_hover_text(tr(
-                                lang,
-                                "From the directory groups",
-                                "Aus den Verzeichnisgruppen",
-                            ));
+                            ui.label(UserStore::role_label(&user.role, en))
+                                .on_hover_text(tr(
+                                    lang,
+                                    "From the directory groups",
+                                    "Aus den Verzeichnisgruppen",
+                                ));
                         } else {
-                            let before = user.role;
+                            let before = user.role.clone();
                             egui::ComboBox::from_id_salt(("role", user.name.clone()))
-                                .selected_text(user.role.name(en))
+                                .selected_text(UserStore::role_label(&user.role, en))
                                 .show_ui(ui, |ui| {
-                                    for role in Role::ALL {
-                                        ui.selectable_value(&mut user.role, role, role.name(en));
+                                    for role in &role_names {
+                                        ui.selectable_value(
+                                            &mut user.role,
+                                            role.clone(),
+                                            UserStore::role_label(role, en),
+                                        );
                                     }
                                 });
                             if user.role != before {
-                                if last_admin {
+                                if last_admin && !manages.contains(&user.role) {
                                     user.role = before;
                                     app.web.user_note = Some(Note::Bad(
                                         tr(
@@ -1104,9 +1125,8 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                                         Record::local("user-changed")
                                             .target(user.name.clone())
                                             .details(vec![format!(
-                                                "role: {} → {}",
-                                                before.name(true),
-                                                user.role.name(true)
+                                                "role: {before} → {}",
+                                                user.role
                                             )]),
                                     );
                                 }
@@ -1370,11 +1390,12 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                         });
                         ui.end_row();
                         row_label(ui, tr(lang, "Role", "Rolle"));
+                        let names = store.role_names();
                         egui::ComboBox::from_id_salt("new-role")
-                            .selected_text(app.web.new_role.name(en))
+                            .selected_text(UserStore::role_label(&app.web.new_role, en))
                             .show_ui(ui, |ui| {
-                                for role in Role::ALL {
-                                    ui.selectable_value(&mut app.web.new_role, role, role.name(en));
+                                for role in &names {
+                                    ui.selectable_value(&mut app.web.new_role, role.clone(), UserStore::role_label(role, en));
                                 }
                             });
                         ui.end_row();
@@ -1383,12 +1404,12 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                 let ready = !app.web.new_name.trim().is_empty() && !app.web.new_password.is_empty();
                 if widgets::button(ui, ButtonKind::Secondary, tr(lang, "Add", "Hinzufügen"), ready).clicked() {
                     let name = app.web.new_name.trim().to_string();
-                    match store.add(&name, app.web.new_role, &app.web.new_password) {
+                    match store.add(&name, &app.web.new_role, &app.web.new_password) {
                         Ok(()) => {
                             changed = Some(
                                 Record::local("user-added")
                                     .target(name.clone())
-                                    .details(vec![format!("role: {}", app.web.new_role.name(true))]),
+                                    .details(vec![format!("role: {}", app.web.new_role)]),
                             );
                             let text = format!("{} {name}.", tr(lang, "Added:", "Hinzugefügt:"));
                             app.web.user_note = Some(match users::password_advice(&app.web.new_password, recommended, en) {

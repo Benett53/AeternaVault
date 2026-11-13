@@ -20,17 +20,84 @@ use crate::engine::crypto::{hex, random_bytes, unhex};
 
 pub const USERS_FILE: &str = "web-users.json";
 
-/// What a user may do. Each role includes the ones before it.
+/// One thing a role allows. Every signed-in user sees the overview and the
+/// backups of the jobs they may use.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Permission {
+    /// The activity: backups, restores, checks.
+    ViewActivity,
+    /// Start and cancel jobs.
+    RunJobs,
+    /// Switch jobs on and off.
+    SwitchJobs,
+    /// Check backups against their checksums.
+    CheckBackups,
+    /// See sign-ins live and who is signed in.
+    ViewSignIns,
+    /// Block and unblock addresses.
+    BlockAddresses,
+    /// Read the audit log.
+    ViewAudit,
+    /// Add, change and remove users and roles.
+    ManageUsers,
+}
+
+impl Permission {
+    pub const ALL: [Permission; 8] = [
+        Permission::ViewActivity,
+        Permission::RunJobs,
+        Permission::SwitchJobs,
+        Permission::CheckBackups,
+        Permission::ViewSignIns,
+        Permission::BlockAddresses,
+        Permission::ViewAudit,
+        Permission::ManageUsers,
+    ];
+
+    pub fn name(self, en: bool) -> &'static str {
+        match (self, en) {
+            (Permission::ViewActivity, true) => "View activity",
+            (Permission::ViewActivity, false) => "Verlauf ansehen",
+            (Permission::RunJobs, true) => "Run and cancel jobs",
+            (Permission::RunJobs, false) => "Aufträge starten und abbrechen",
+            (Permission::SwitchJobs, true) => "Switch jobs on and off",
+            (Permission::SwitchJobs, false) => "Aufträge ein- und ausschalten",
+            (Permission::CheckBackups, true) => "Check backups",
+            (Permission::CheckBackups, false) => "Sicherungen prüfen",
+            (Permission::ViewSignIns, true) => "View sign-ins",
+            (Permission::ViewSignIns, false) => "Anmeldungen ansehen",
+            (Permission::BlockAddresses, true) => "Block addresses",
+            (Permission::BlockAddresses, false) => "Adressen sperren",
+            (Permission::ViewAudit, true) => "Read the audit log",
+            (Permission::ViewAudit, false) => "Audit-Log lesen",
+            (Permission::ManageUsers, true) => "Manage users and roles",
+            (Permission::ManageUsers, false) => "Benutzer und Rollen verwalten",
+        }
+    }
+}
+
+/// The three roles that always exist. Further roles can be defined with any
+/// set of permissions ([`RoleDef`]).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum Role {
-    /// Sees the overview, jobs, backups and the activity.
     Viewer,
-    /// Also runs, cancels, switches on and off jobs and checks backups.
     Operator,
-    /// Also manages users and reads the audit log.
     Admin,
 }
 
@@ -46,7 +113,38 @@ impl Role {
         }
     }
 
+    /// The name stored for users with this role.
+    pub fn id(self) -> &'static str {
+        match self {
+            Role::Viewer => "viewer",
+            Role::Operator => "operator",
+            Role::Admin => "admin",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Role::ALL
+            .into_iter()
+            .find(|r| r.id().eq_ignore_ascii_case(id))
+    }
+
+    pub fn permissions(self) -> Vec<Permission> {
+        use Permission as P;
+        match self {
+            Role::Viewer => vec![P::ViewActivity],
+            Role::Operator => vec![P::ViewActivity, P::RunJobs, P::SwitchJobs, P::CheckBackups],
+            Role::Admin => Permission::ALL.to_vec(),
+        }
+    }
+
     pub const ALL: [Role; 3] = [Role::Viewer, Role::Operator, Role::Admin];
+}
+
+/// A role defined by an administrator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleDef {
+    pub name: String,
+    pub permissions: Vec<Permission>,
 }
 
 /// Where a user signs in.
@@ -64,7 +162,9 @@ pub enum UserSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub name: String,
-    pub role: Role,
+    /// `viewer`, `operator`, `admin` or the name of a role defined here.
+    /// Empty: no access (a directory user waiting for a role).
+    pub role: String,
     #[serde(default)]
     pub source: UserSource,
     /// `argon2id$<memory KiB>$<passes>$<salt hex>$<hash hex>`.
@@ -110,10 +210,6 @@ impl User {
         (has_email && (self.email_codes || required)).then_some(SecondFactor::Email)
     }
 
-    pub fn may(&self, role: Role) -> bool {
-        !self.disabled && self.role >= role
-    }
-
     /// Whether the user may see and run a job (`None`: a backup of all folders).
     pub fn may_use_job(&self, id: Option<&str>) -> bool {
         match id {
@@ -127,6 +223,9 @@ impl User {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserStore {
     pub users: Vec<User>,
+    /// Roles defined here, besides viewer, operator and administrator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<RoleDef>,
 }
 
 pub fn file(config_file: &Path) -> PathBuf {
@@ -165,21 +264,108 @@ impl UserStore {
             .find(|u| u.name.eq_ignore_ascii_case(name))
     }
 
-    pub fn admins(&self) -> usize {
-        self.users.iter().filter(|u| u.may(Role::Admin)).count()
+    /// The permissions of a role (built-in or defined here); `None` if there
+    /// is no such role.
+    pub fn role_permissions(&self, role: &str) -> Option<Vec<Permission>> {
+        if let Some(builtin) = Role::from_id(role) {
+            return Some(builtin.permissions());
+        }
+        self.roles
+            .iter()
+            .find(|r| r.name.eq_ignore_ascii_case(role))
+            .map(|r| r.permissions.clone())
     }
 
-    /// Adds a user; the name must be new and the password not empty.
-    pub fn add(&mut self, name: &str, role: Role, password: &str) -> Result<(), String> {
+    /// What a user may do; nothing for a locked user or an unknown role.
+    pub fn permissions(&self, user: &User) -> Vec<Permission> {
+        if user.disabled {
+            return Vec::new();
+        }
+        self.role_permissions(&user.role).unwrap_or_default()
+    }
+
+    pub fn can(&self, user: &User, permission: Permission) -> bool {
+        self.permissions(user).contains(&permission)
+    }
+
+    /// Names of all roles: the built-in ones first.
+    pub fn role_names(&self) -> Vec<String> {
+        Role::ALL
+            .iter()
+            .map(|r| r.id().to_string())
+            .chain(self.roles.iter().map(|r| r.name.clone()))
+            .collect()
+    }
+
+    /// How a role is shown: the built-in ones translated.
+    pub fn role_label(role: &str, en: bool) -> String {
+        match Role::from_id(role) {
+            Some(builtin) => builtin.name(en).to_string(),
+            None if role.is_empty() => if en { "no role" } else { "keine Rolle" }.to_string(),
+            None => role.to_string(),
+        }
+    }
+
+    /// Users who can manage users (at least one must stay).
+    pub fn admins(&self) -> usize {
+        self.users
+            .iter()
+            .filter(|u| self.can(u, Permission::ManageUsers))
+            .count()
+    }
+
+    /// Defines or changes a role. Built-in roles cannot be changed.
+    pub fn set_role(&mut self, name: &str, permissions: Vec<Permission>) -> Result<(), String> {
         let name = name.trim();
         valid_name(name)?;
+        if Role::from_id(name).is_some() {
+            return Err(format!("{name} is a built-in role"));
+        }
+        match self
+            .roles
+            .iter_mut()
+            .find(|r| r.name.eq_ignore_ascii_case(name))
+        {
+            Some(role) => role.permissions = permissions,
+            None => self.roles.push(RoleDef {
+                name: name.to_string(),
+                permissions,
+            }),
+        }
+        Ok(())
+    }
+
+    /// Removes a role that no user has.
+    pub fn remove_role(&mut self, name: &str) -> Result<(), String> {
+        if let Some(user) = self
+            .users
+            .iter()
+            .find(|u| u.role.eq_ignore_ascii_case(name))
+        {
+            return Err(format!("{} still has this role", user.name));
+        }
+        let before = self.roles.len();
+        self.roles.retain(|r| !r.name.eq_ignore_ascii_case(name));
+        if self.roles.len() == before {
+            return Err(format!("there is no role {name} to remove"));
+        }
+        Ok(())
+    }
+
+    /// Adds a user; the name must be new, the role must exist and the password not be empty.
+    pub fn add(&mut self, name: &str, role: &str, password: &str) -> Result<(), String> {
+        let name = name.trim();
+        valid_name(name)?;
+        if self.role_permissions(role).is_none() {
+            return Err(format!("there is no role {role}"));
+        }
         if self.find(name).is_some() {
             return Err(format!("a user named {name} already exists"));
         }
         check_password(password)?;
         self.users.push(User {
             name: name.to_string(),
-            role,
+            role: role.to_string(),
             source: UserSource::Local,
             password: hash_password(password),
             totp: None,
@@ -196,7 +382,10 @@ impl UserStore {
 
     /// Whether removing or demoting `name` would leave no administrator.
     pub fn is_last_admin(&self, name: &str) -> bool {
-        self.admins() == 1 && self.find(name).is_some_and(|u| u.may(Role::Admin))
+        self.admins() == 1
+            && self
+                .find(name)
+                .is_some_and(|u| self.can(u, Permission::ManageUsers))
     }
 }
 
@@ -655,28 +844,49 @@ mod tests {
     #[test]
     fn roles_and_jobs_limit_what_a_user_may_do() {
         let mut store = UserStore::default();
-        store
-            .add("anna", Role::Operator, "long enough pass")
-            .unwrap();
-        assert!(store.add("Anna", Role::Viewer, "long enough pass").is_err());
+        store.add("anna", "operator", "long enough pass").unwrap();
+        assert!(store.add("Anna", "viewer", "long enough pass").is_err());
         assert!(
-            store.add("bob", Role::Viewer, "").is_err(),
+            store.add("bob", "viewer", "").is_err(),
             "only empty is refused"
         );
-        store.add("carl", Role::Viewer, "short").unwrap();
-        assert!(
-            store
-                .add("bad name", Role::Viewer, "long enough pass")
-                .is_err()
-        );
-        let anna = store.find_mut("ANNA").unwrap();
-        assert!(anna.may(Role::Operator) && !anna.may(Role::Admin));
+        store.add("carl", "viewer", "short").unwrap();
+        assert!(store.add("bad name", "viewer", "long enough pass").is_err());
+        assert!(store.add("dora", "no-such-role", "pw").is_err());
+        let anna = store.find("ANNA").unwrap().clone();
+        assert!(store.can(&anna, Permission::RunJobs));
+        assert!(!store.can(&anna, Permission::ManageUsers));
+        let anna = store.find_mut("anna").unwrap();
         anna.jobs = vec!["nightly".into()];
         assert!(anna.may_use_job(Some("nightly")));
         assert!(!anna.may_use_job(Some("other")));
         assert!(!anna.may_use_job(None));
         anna.disabled = true;
-        assert!(!anna.may(Role::Viewer));
+        let anna = anna.clone();
+        assert!(store.permissions(&anna).is_empty(), "locked: nothing");
+    }
+
+    #[test]
+    fn own_roles_have_exactly_their_permissions() {
+        let mut store = UserStore::default();
+        store
+            .set_role(
+                "Auditor",
+                vec![Permission::ViewAudit, Permission::ViewSignIns],
+            )
+            .unwrap();
+        assert!(
+            store.set_role("admin", vec![]).is_err(),
+            "built-in roles stay"
+        );
+        store.add("eve", "auditor", "pw").unwrap();
+        let eve = store.find("eve").unwrap().clone();
+        assert!(store.can(&eve, Permission::ViewAudit));
+        assert!(!store.can(&eve, Permission::RunJobs));
+        assert!(store.remove_role("Auditor").is_err(), "still in use");
+        store.users.clear();
+        store.remove_role("auditor").unwrap();
+        assert_eq!(store.role_names(), vec!["viewer", "operator", "admin"]);
     }
 
     #[test]
@@ -700,7 +910,7 @@ mod tests {
     #[test]
     fn second_factor_is_app_then_email() {
         let mut store = UserStore::default();
-        store.add("anna", Role::Viewer, "pw").unwrap();
+        store.add("anna", "viewer", "pw").unwrap();
         let anna = store.find_mut("anna").unwrap();
         assert_eq!(anna.second_factor(true, true), None, "no way known yet");
         anna.email = "anna@example.org".into();

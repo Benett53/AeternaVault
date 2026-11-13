@@ -524,6 +524,9 @@ pub enum WebCommand {
     /// Sign-in with LDAP / Active Directory.
     #[command(subcommand)]
     Ldap(WebLdapCommand),
+    /// Roles and what they allow.
+    #[command(subcommand)]
+    Role(WebRoleCommand),
     /// Who changed what, when and from where.
     Audit {
         /// Show the newest N entries.
@@ -567,6 +570,20 @@ pub struct WebSetArgs {
     /// Recommended length; shorter passwords are accepted with a note.
     #[arg(long, alias = "min-password-length")]
     recommended_password_length: Option<u32>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebRoleCommand {
+    /// All roles with their permissions.
+    List,
+    /// Define a role, or change one defined before.
+    Set {
+        name: String,
+        #[arg(long, value_enum, value_delimiter = ',')]
+        permissions: Vec<crate::web::users::Permission>,
+    },
+    /// Remove a role no user has.
+    Remove { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -631,8 +648,9 @@ pub enum WebUserCommand {
     /// Add a user. The password is asked for (or read with `--passphrase-stdin`).
     Add {
         name: String,
-        #[arg(long, value_enum, default_value = "viewer")]
-        role: crate::web::users::Role,
+        /// `viewer`, `operator`, `admin` or a role from `web role list`.
+        #[arg(long, default_value = "viewer")]
+        role: String,
         /// Only these jobs (ids from `job list`), separated by commas. Default: all.
         #[arg(long, value_delimiter = ',')]
         jobs: Vec<String>,
@@ -642,8 +660,8 @@ pub enum WebUserCommand {
     },
     Role {
         name: String,
-        #[arg(value_enum)]
-        role: crate::web::users::Role,
+        /// `viewer`, `operator`, `admin` or a role from `web role list`.
+        role: String,
     },
     /// Limit a user to these jobs (ids from `job list`); none: all jobs.
     Jobs {
@@ -3030,7 +3048,7 @@ struct WebStatus {
 #[derive(Serialize)]
 struct WebUserView {
     name: String,
-    role: crate::web::users::Role,
+    role: String,
     two_factor: bool,
     jobs: Vec<String>,
     locked: bool,
@@ -3078,7 +3096,7 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
                     .iter()
                     .map(|u| WebUserView {
                         name: u.name.clone(),
-                        role: u.role,
+                        role: u.role.clone(),
                         two_factor: u.totp.is_some(),
                         jobs: u.jobs.clone(),
                         locked: u.disabled,
@@ -3114,7 +3132,7 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
                     text += &format!(
                         "\n  {:<20} {:<9} {}{}{}",
                         u.name,
-                        u.role.name(true),
+                        crate::web::users::UserStore::role_label(&u.role, true),
                         if u.two_factor { "one-time codes" } else { "" },
                         if u.locked { " locked" } else { "" },
                         if u.jobs.is_empty() { String::new() } else { format!(" jobs: {}", u.jobs.join(", ")) },
@@ -3273,13 +3291,14 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
         }
         WebCommand::User(command) => return web_user(ctx, command),
         WebCommand::Ldap(command) => return web_ldap(ctx, command),
+        WebCommand::Role(command) => return web_role(ctx, command),
     }
     Ok(Outcome::Ok)
 }
 
 fn web_user(ctx: &mut Ctx, command: WebUserCommand) -> anyhow::Result<Outcome> {
     use crate::audit::{self, Record};
-    use crate::web::users::{self, Role, UserStore};
+    use crate::web::users::{self, Permission, UserStore};
     let config_file = ctx.paths.config_file.clone();
     let mut store = UserStore::load(&config_file);
     let recommended = ctx.config.web.recommended_password_length;
@@ -3297,14 +3316,14 @@ fn web_user(ctx: &mut Ctx, command: WebUserCommand) -> anyhow::Result<Outcome> {
                 bail!("there is no job {unknown} (see `aeternavault-cli job list`)");
             }
             let password = ctx.new_web_password()?;
-            store.add(&name, role, &password).map_err(|e| anyhow!(e))?;
+            store.add(&name, &role, &password).map_err(|e| anyhow!(e))?;
             if let Some(advice) = users::password_advice(&password, recommended, true) {
                 eprintln!("{advice}");
             }
             if let Some(user) = store.find_mut(&name) {
                 user.jobs = jobs.clone();
             }
-            let mut details = vec![format!("role: {}", role.name(true))];
+            let mut details = vec![format!("role: {role}")];
             if !jobs.is_empty() {
                 details.push(format!("jobs: {}", jobs.join(", ")));
             }
@@ -3326,22 +3345,23 @@ fn web_user(ctx: &mut Ctx, command: WebUserCommand) -> anyhow::Result<Outcome> {
             message = format!("User {name} removed.");
         }
         WebUserCommand::Role { name, role } => {
-            if store.is_last_admin(&name) && role != Role::Admin {
-                bail!("{name} is the last administrator; make another user administrator first");
+            let permissions = store.role_permissions(&role).ok_or_else(|| {
+                anyhow!("there is no role {role} (see `aeternavault-cli web role list`)")
+            })?;
+            if store.is_last_admin(&name) && !permissions.contains(&Permission::ManageUsers) {
+                bail!(
+                    "{name} is the last user who manages users; give another user that right first"
+                );
             }
             let user = store
                 .find_mut(&name)
                 .ok_or_else(|| anyhow!("there is no user {name}"))?;
-            let details = vec![format!(
-                "role: {} → {}",
-                user.role.name(true),
-                role.name(true)
-            )];
-            user.role = role;
+            let details = vec![format!("role: {} → {role}", user.role)];
+            user.role = role.clone();
             record = Record::local("user-changed")
                 .target(name.clone())
                 .details(details);
-            message = format!("{name} is now {}.", role.name(true));
+            message = format!("{name} now has the role {role}.");
         }
         WebUserCommand::Jobs { name, jobs } => {
             let known: Vec<&str> = ctx.config.schedules.iter().map(|s| s.id.as_str()).collect();
@@ -3512,6 +3532,71 @@ fn web_ldap(ctx: &mut Ctx, command: WebLdapCommand) -> anyhow::Result<Outcome> {
                 Ok(text) => println!("{text}"),
                 Err(err) => bail!(err),
             }
+        }
+    }
+    Ok(Outcome::Ok)
+}
+
+fn web_role(ctx: &mut Ctx, command: WebRoleCommand) -> anyhow::Result<Outcome> {
+    use crate::audit::{self, Record};
+    use crate::web::users::UserStore;
+    let config_file = ctx.paths.config_file.clone();
+    let mut store = UserStore::load(&config_file);
+    match command {
+        WebRoleCommand::List => {
+            let roles: Vec<(String, Vec<crate::web::users::Permission>)> = store
+                .role_names()
+                .into_iter()
+                .map(|n| {
+                    let p = store.role_permissions(&n).unwrap_or_default();
+                    (n, p)
+                })
+                .collect();
+            ctx.print(&roles, || {
+                roles
+                    .iter()
+                    .map(|(n, p)| {
+                        format!(
+                            "{n:<16} {}",
+                            p.iter()
+                                .map(|x| x.name(true))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+            return Ok(Outcome::Ok);
+        }
+        WebRoleCommand::Set { name, permissions } => {
+            store
+                .set_role(&name, permissions.clone())
+                .map_err(|e| anyhow!(e))?;
+            store.save(&config_file)?;
+            audit::record(
+                &config_file,
+                Record::local("role-saved")
+                    .target(name.trim())
+                    .details(vec![format!(
+                        "permissions: {}",
+                        permissions
+                            .iter()
+                            .map(|p| p.name(true))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )]),
+            );
+            println!("Role {} saved.", name.trim());
+        }
+        WebRoleCommand::Remove { name } => {
+            store.remove_role(&name).map_err(|e| anyhow!(e))?;
+            store.save(&config_file)?;
+            audit::record(
+                &config_file,
+                Record::local("role-removed").target(name.clone()),
+            );
+            println!("Role {name} removed.");
         }
     }
     Ok(Outcome::Ok)

@@ -12,7 +12,8 @@ use chrono::{DateTime, Local, Utc};
 
 use super::http::{Request, Response, encode};
 use super::users::{
-    self, EmailCode, Limiter, Role, SecondFactor, Session, Sessions, User, UserSource, UserStore,
+    self, EmailCode, Limiter, Permission, SecondFactor, Session, Sessions, User, UserSource,
+    UserStore,
 };
 use super::{Control, Network};
 use crate::audit::{self, Record};
@@ -23,6 +24,8 @@ use crate::i18n::Lang;
 use crate::paths::AppPaths;
 
 const STYLE: &str = include_str!("style.css");
+/// Changes with every version and with the style sheet itself.
+const ASSET_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-", env!("AV_STYLE_HASH"));
 const LOGO_DARK: &[u8] = include_bytes!("../../assets/logo/logo-dark-256.png");
 const LOGO_LIGHT: &[u8] = include_bytes!("../../assets/logo/logo-light-256.png");
 /// The logo of the window, light or dark like the page.
@@ -81,11 +84,17 @@ struct Ctx<'a> {
     token: String,
     session: Session,
     user: User,
+    /// What the user's role allows.
+    perms: Vec<Permission>,
     config: Config,
     en: bool,
 }
 
 impl Ctx<'_> {
+    fn can(&self, permission: Permission) -> bool {
+        self.perms.contains(&permission)
+    }
+
     fn t<'s>(&self, en: &'s str, de: &'s str) -> &'s str {
         if self.en { en } else { de }
     }
@@ -215,8 +224,11 @@ impl WebApp {
                 .header("Cache-Control", "max-age=86400");
         }
         if req.method == "GET" && req.path == "/style.css" {
+            // The address names the version of the program, so a browser
+            // never combines a new page with a style sheet it kept from an
+            // older version.
             return Response::with_type(200, "text/css; charset=utf-8", STYLE.as_bytes().to_vec())
-                .header("Cache-Control", "max-age=3600");
+                .header("Cache-Control", "no-cache");
         }
         if req.method == "POST" && !Self::same_origin(&req) {
             return Response::text(403, "Forbidden");
@@ -246,11 +258,13 @@ impl WebApp {
             lock(&self.sessions).end(&token);
             return Response::redirect("/login");
         };
+        let perms = store.permissions(&user);
         let ctx = Ctx {
             req: &req,
             token,
             session,
             user,
+            perms,
             config,
             en,
         };
@@ -288,20 +302,17 @@ impl WebApp {
             ("POST", "/account/email/confirm") => self.email_confirm(&ctx),
             ("POST", "/account/email/use") => self.email_use(&ctx),
             ("POST", "/account/email/off") => self.email_off(&ctx),
-            ("POST", path) if ctx.user.may(Role::Operator) => match path {
-                "/jobs/run" => self.job_run(&ctx),
-                "/jobs/cancel" => self.job_cancel(&ctx),
-                "/jobs/switch" => self.job_switch(&ctx),
-                "/backups/check" => self.check_start(&ctx),
-                _ if ctx.user.may(Role::Admin) => match path {
-                    "/users/add" => self.user_add(&ctx),
-                    "/users/change" => self.user_change(&ctx),
-                    _ => self.not_found(&ctx),
-                },
-                _ => self.forbidden(&ctx),
-            },
-            ("GET", "/audit") if ctx.user.may(Role::Admin) => self.audit_page(&ctx),
-            ("GET", "/users") if ctx.user.may(Role::Admin) => self.users_page(&ctx),
+            ("POST", "/jobs/run") if ctx.can(Permission::RunJobs) => self.job_run(&ctx),
+            ("POST", "/jobs/cancel") if ctx.can(Permission::RunJobs) => self.job_cancel(&ctx),
+            ("POST", "/jobs/switch") if ctx.can(Permission::SwitchJobs) => self.job_switch(&ctx),
+            ("POST", "/backups/check") if ctx.can(Permission::CheckBackups) => {
+                self.check_start(&ctx)
+            }
+            ("POST", "/users/add") if ctx.can(Permission::ManageUsers) => self.user_add(&ctx),
+            ("POST", "/users/change") if ctx.can(Permission::ManageUsers) => self.user_change(&ctx),
+            ("POST", "/roles/save") if ctx.can(Permission::ManageUsers) => self.role_save(&ctx),
+            ("GET", "/audit") if ctx.can(Permission::ViewAudit) => self.audit_page(&ctx),
+            ("GET", "/users") if ctx.can(Permission::ManageUsers) => self.users_page(&ctx),
             ("GET", "/audit" | "/users") | ("POST", _) => self.forbidden(&ctx),
             _ => self.not_found(&ctx),
         }
@@ -315,8 +326,10 @@ impl WebApp {
             ("/backups", ctx.t("Backups", "Sicherungen")),
             ("/activity", ctx.t("Activity", "Verlauf")),
         ];
-        if ctx.user.may(Role::Admin) {
+        if ctx.can(Permission::ManageUsers) {
             nav.push(("/users", ctx.t("Users", "Benutzer")));
+        }
+        if ctx.can(Permission::ViewAudit) {
             nav.push(("/audit", ctx.t("Audit log", "Audit-Log")));
         }
         nav.push(("/account", ctx.t("Account", "Konto")));
@@ -337,10 +350,11 @@ impl WebApp {
             ""
         };
         Response::html(format!(
-            r#"<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{refresh}<title>{title} · AeternaVault</title><link rel="stylesheet" href="/style.css"><link rel="icon" href="/logo.png"></head><body><header><div class="bar"><a class="brand" href="/">{logo}<span>AeternaVault</span></a><span class="computer">{computer}</span><div class="account">{user}<form method="post" action="/logout" class="inline">{csrf}<button class="link">{logout}</button></form></div><nav class="main">{links}</nav></div></header><main><h1>{title}</h1>{body}</main></body></html>"#,
+            r#"<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{refresh}<title>{title} · AeternaVault</title><link rel="stylesheet" href="/style.css?v={asset_version}"><link rel="icon" href="/logo.png"></head><body><header><div class="bar"><a class="brand" href="/">{logo}<span>AeternaVault</span></a><span class="computer">{computer}</span><div class="account">{user}<form method="post" action="/logout" class="inline">{csrf}<button class="link">{logout}</button></form></div><nav class="main">{links}</nav></div></header><main><h1>{title}</h1>{body}</main></body></html>"#,
             lang = if ctx.en { "en" } else { "de" },
             title = esc(title),
             logo = LOGO_TAG,
+            asset_version = ASSET_VERSION,
             computer = esc(&crate::platform::computer_name()),
             csrf = csrf_field(&ctx.session),
             logout = ctx.t("Sign out", "Abmelden"),
@@ -348,13 +362,15 @@ impl WebApp {
         ))
     }
 
+    /// Pages before sign-in. They name nothing about the computer or the
+    /// system, so nobody learns anything without an account.
     fn bare(en: bool, title: &str, body: &str) -> Response {
         Response::html(format!(
-            r#"<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} · AeternaVault</title><link rel="stylesheet" href="/style.css"><link rel="icon" href="/logo.png"></head><body class="bare"><div class="login"><div class="brand">{logo}<span>AeternaVault</span></div><span class="computer">{computer}</span>{body}</div></body></html>"#,
+            r#"<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>{title}</title><link rel="stylesheet" href="/style.css?v={asset_version}"><link rel="icon" href="/logo.png"></head><body class="bare"><main class="login"><div class="brand">{logo}<span>AeternaVault</span></div>{body}</main></body></html>"#,
             lang = if en { "en" } else { "de" },
             title = esc(title),
             logo = LOGO_TAG,
-            computer = esc(&crate::platform::computer_name()),
+            asset_version = ASSET_VERSION,
         ))
     }
 
@@ -494,7 +510,8 @@ impl WebApp {
                 }
             }
             None if ldap.enabled && users::valid_name(&name).is_ok() => {
-                match super::ldap::authenticate(ldap, &name, &password) {
+                let rank = |role: &str| store.role_permissions(role).map_or(0, |p| p.len());
+                match super::ldap::authenticate(ldap, &name, &password, &rank) {
                     Ok(found) => Ok(self.directory_user(&mut store, &name, &found)),
                     Err(super::ldap::LdapError::Rejected) => {
                         Err("wrong password or unknown user (directory)")
@@ -554,6 +571,17 @@ impl WebApp {
             failed("user is disabled");
             return self.login_page(req, en, Some(wrong));
         }
+        if store.role_permissions(&user.role).is_none() {
+            failed("no role given yet");
+            return self.login_page(
+                req,
+                en,
+                Some(t(
+                    "Your account has no role yet. An administrator has to give you one.",
+                    "Dein Konto hat noch keine Rolle. Ein Administrator muss dir eine zuweisen.",
+                )),
+            );
+        }
         {
             let mut limiter = lock(&self.limiter);
             limiter.succeeded(&user_key);
@@ -595,8 +623,8 @@ impl WebApp {
             .header("Set-Cookie", &self.session_cookie(req, &token))
     }
 
-    /// The local record of a directory user, made at the first sign-in; the
-    /// role always comes from the directory groups.
+    /// The local record of a directory user, made at the first sign-in. The
+    /// role comes from the directory groups, or is kept here (settings).
     fn directory_user(
         &self,
         store: &mut UserStore,
@@ -606,18 +634,19 @@ impl WebApp {
         let name = name.trim();
         match store.find_mut(name) {
             Some(user) => {
-                if user.role != found.role {
+                if let Some(role) = &found.role
+                    && &user.role != role
+                {
                     audit::record(
                         &self.paths.config_file,
                         Record::new("system", "directory", "user-changed")
                             .target(user.name.clone())
                             .details(vec![format!(
-                                "role from directory groups: {} → {}",
-                                user.role.name(true),
-                                found.role.name(true)
+                                "role from directory groups: {} → {role}",
+                                user.role
                             )]),
                     );
-                    user.role = found.role;
+                    user.role = role.clone();
                 }
                 if let Some(email) = &found.email {
                     user.email = email.clone();
@@ -625,9 +654,13 @@ impl WebApp {
                 user.clone()
             }
             None => {
+                let role = found
+                    .role
+                    .clone()
+                    .unwrap_or_else(|| self.settings.ldap.default_role.trim().to_string());
                 let user = User {
                     name: name.to_string(),
-                    role: found.role,
+                    role: role.clone(),
                     source: UserSource::Directory,
                     password: String::new(),
                     totp: None,
@@ -646,7 +679,7 @@ impl WebApp {
                         .target(name.to_string())
                         .details(vec![
                             format!("from the directory: {}", found.dn),
-                            format!("role: {}", found.role.name(true)),
+                            format!("role: {}", if role.is_empty() { "none yet" } else { &role }),
                         ]),
                 );
                 user
@@ -881,7 +914,8 @@ impl WebApp {
         let lang = ctx.lang();
         let config = &ctx.config;
         let state = crate::state::State::load(&self.paths.config_file);
-        let operator = ctx.user.may(Role::Operator);
+        let operator = ctx.can(Permission::RunJobs);
+        let switcher = ctx.can(Permission::SwitchJobs);
         let csrf = csrf_field(&ctx.session);
         let mut body = Self::message(ctx);
 
@@ -1130,20 +1164,26 @@ impl WebApp {
                     ctx.t("switched off", "ausgeschaltet")
                 )
             };
-            let actions = if operator {
-                format!(
-                    r#"<div class="actions"><form method="post" action="/jobs/run" class="inline">{csrf}<input type="hidden" name="id" value="{id}"><button>{run}</button></form><form method="post" action="/jobs/switch" class="inline">{csrf}<input type="hidden" name="id" value="{id}"><input type="hidden" name="on" value="{on}"><button class="secondary">{switch}</button></form></div>"#,
+            let mut buttons = String::new();
+            if operator {
+                buttons.push_str(&format!(
+                    r#"<form method="post" action="/jobs/run" class="inline">{csrf}<input type="hidden" name="id" value="{id}"><button>{run}</button></form>"#,
                     id = esc(&schedule.id),
                     run = ctx.t("Run now", "Jetzt ausführen"),
+                ));
+            }
+            if switcher {
+                buttons.push_str(&format!(
+                    r#"<form method="post" action="/jobs/switch" class="inline">{csrf}<input type="hidden" name="id" value="{id}"><input type="hidden" name="on" value="{on}"><button class="secondary">{switch}</button></form>"#,
+                    id = esc(&schedule.id),
                     on = if schedule.enabled { "0" } else { "1" },
-                    switch = if schedule.enabled {
-                        ctx.t("Switch off", "Ausschalten")
-                    } else {
-                        ctx.t("Switch on", "Einschalten")
-                    },
-                )
-            } else {
+                    switch = if schedule.enabled { ctx.t("Switch off", "Ausschalten") } else { ctx.t("Switch on", "Einschalten") },
+                ));
+            }
+            let actions = if buttons.is_empty() {
                 String::new()
+            } else {
+                format!(r#"<div class="actions">{buttons}</div>"#)
             };
             cards.push_str(&format!(
                 r#"<section class="card job"><div class="head"><h3>{name}</h3>{badge}</div><dl class="meta"><dt>{l1}</dt><dd>{last_text}</dd><dt>{l2}</dt><dd>{next}</dd><dt>{l3}</dt><dd>{dest}</dd></dl>{problems}{actions}</section>"#,
@@ -1367,7 +1407,7 @@ impl WebApp {
     fn activity(&self, ctx: &Ctx<'_>) -> Response {
         let sign_ins = ctx.req.query.get("tab").is_some_and(|t| t == "sign-ins");
         let mut body = String::new();
-        if ctx.user.may(Role::Admin) {
+        if ctx.can(Permission::ViewSignIns) {
             let current = |on: bool| if on { r#" aria-current="page""# } else { "" };
             body.push_str(&format!(
                 r#"<nav class="tabs"><a href="/activity"{}>{}</a><a href="/activity?tab=sign-ins"{}>{}</a></nav>"#,
@@ -1377,7 +1417,7 @@ impl WebApp {
                 ctx.t("Sign-ins (live)", "Anmeldungen (live)"),
             ));
         }
-        if sign_ins && ctx.user.may(Role::Admin) {
+        if sign_ins && ctx.can(Permission::ViewSignIns) {
             body.push_str(&self.sign_ins(ctx));
             return self.page(ctx, ctx.t("Activity", "Verlauf"), &body, true);
         }
@@ -1685,7 +1725,7 @@ impl WebApp {
                 return self.page(ctx, ctx.t("Backups", "Sicherungen"), &body, false);
             }
         };
-        let operator = ctx.user.may(Role::Operator);
+        let operator = ctx.can(Permission::CheckBackups);
         let rows: String = list
             .iter()
             .map(|s| {
@@ -1907,22 +1947,32 @@ impl WebApp {
         self.page(ctx, ctx.t("Audit log", "Audit-Log"), &body, false)
     }
 
-    fn role_select(ctx: &Ctx<'_>, current: Role) -> String {
-        let options: String = Role::ALL
+    fn role_select(ctx: &Ctx<'_>, store: &UserStore, current: &str) -> String {
+        let options: String = store
+            .role_names()
             .iter()
             .map(|r| {
-                let selected = if *r == current { " selected" } else { "" };
+                let selected = if r.eq_ignore_ascii_case(current) {
+                    " selected"
+                } else {
+                    ""
+                };
                 format!(
                     r#"<option value="{}"{selected}>{}</option>"#,
-                    serde_json::to_value(r)
-                        .ok()
-                        .and_then(|v| v.as_str().map(String::from))
-                        .unwrap_or_default(),
-                    r.name(ctx.en)
+                    esc(r),
+                    esc(&UserStore::role_label(r, ctx.en))
                 )
             })
             .collect();
-        format!(r#"<select name="role">{options}</select>"#)
+        let none = if current.is_empty() {
+            format!(
+                r#"<option value="" selected>{}</option>"#,
+                ctx.t("no role", "keine Rolle")
+            )
+        } else {
+            String::new()
+        };
+        format!(r#"<select name="role">{none}{options}</select>"#)
     }
 
     fn job_boxes(ctx: &Ctx<'_>, chosen: &[String]) -> String {
@@ -1945,106 +1995,215 @@ impl WebApp {
         format!(
             r#"<fieldset><legend>{}</legend>{boxes}</fieldset>"#,
             ctx.t(
-                "Only these jobs (none ticked: all jobs and all destinations)",
-                "Nur diese Aufträge (keiner angehakt: alle Aufträge und Ziele)"
+                "Limited to jobs (none: all)",
+                "Auf Aufträge beschränkt (keiner: alle)"
             )
         )
     }
 
     fn users_page(&self, ctx: &Ctx<'_>) -> Response {
         let store = UserStore::load(&self.paths.config_file);
+        let csrf = csrf_field(&ctx.session);
         let mut body = Self::message(ctx);
         if let Some(password) = lock(&self.flash).remove(&ctx.token) {
             body.push_str(&format!(
                 r#"<p class="notice">{} <code>{}</code></p>"#,
                 ctx.t(
-                    "New password, shown only now. The user must change it after signing in:",
-                    "Neues Passwort, wird nur jetzt angezeigt. Der Benutzer muss es nach der Anmeldung ändern:"
+                    "New password, shown only now:",
+                    "Neues Passwort, nur jetzt sichtbar:"
                 ),
                 esc(&password)
             ));
         }
-        let csrf = csrf_field(&ctx.session);
-        for user in &store.users {
-            let last = user
-                .last_sign_in
-                .map(|t| Self::when(ctx, t))
-                .unwrap_or_else(|| ctx.t("never", "noch nie").into());
-            body.push_str(&format!(
-                r#"<section class="card"><h2>{name} {source} {disabled}</h2><p class="muted">{role_label}: {role} · {twofa} · {last_label}: {last}</p>
-<form method="post" action="/users/change" class="stack">{csrf}<input type="hidden" name="user" value="{name}">
-<label>{role_label} {select}</label>{jobs}
-<div class="row"><button name="do" value="save">{save}</button>
-<button name="do" value="{toggle}" class="secondary">{toggle_label}</button>
-{reset}
-<button name="do" value="2fa" class="secondary">{reset2fa}</button>
-<button name="do" value="remove" class="danger">{remove}</button></div></form></section>"#,
-                name = esc(&user.name),
-                disabled = if user.disabled { format!(r#"<span class="badge bad">{}</span>"#, ctx.t("disabled", "gesperrt")) } else { String::new() },
-                role_label = ctx.t("Role", "Rolle"),
-                role = user.role.name(ctx.en),
-                twofa = if user.totp.is_some() { ctx.t("one-time codes on", "Einmalcodes an") } else { ctx.t("no one-time codes", "keine Einmalcodes") },
-                last_label = ctx.t("last sign-in", "letzte Anmeldung"),
-                select = Self::role_select(ctx, user.role),
-                jobs = Self::job_boxes(ctx, &user.jobs),
-                save = ctx.t("Save", "Speichern"),
-                toggle = if user.disabled { "enable" } else { "disable" },
-                toggle_label = if user.disabled { ctx.t("Unlock", "Entsperren") } else { ctx.t("Lock", "Sperren") },
-                source = if user.source == UserSource::Directory {
-                    r#"<span class="badge muted">LDAP</span>"#.to_string()
+
+        // Users as a table; each row opens its own form.
+        let rows: String = store
+            .users
+            .iter()
+            .map(|user| {
+                let source = if user.source == UserSource::Directory { "LDAP" } else { ctx.t("Local", "Lokal") };
+                let mfa = if user.totp.is_some() {
+                    ctx.t("App", "App")
+                } else if user.email_codes && user.email.contains('@') {
+                    ctx.t("E-mail", "E-Mail")
                 } else {
-                    String::new()
-                },
-                reset = if user.source == UserSource::Directory {
+                    "–"
+                };
+                let last = user
+                    .last_sign_in
+                    .map(|t| Self::when(ctx, t))
+                    .unwrap_or_else(|| ctx.t("never", "noch nie").into());
+                let state = if user.disabled {
+                    format!(r#"<span class="badge bad">{}</span>"#, ctx.t("locked", "gesperrt"))
+                } else if user.role.is_empty() {
+                    format!(r#"<span class="badge warn">{}</span>"#, ctx.t("no role", "keine Rolle"))
+                } else {
+                    format!(r#"<span class="badge good">{}</span>"#, ctx.t("active", "aktiv"))
+                };
+                let password = if user.source == UserSource::Directory {
                     String::new()
                 } else {
-                    format!(
-                        r#"<button name="do" value="password" class="secondary">{}</button>"#,
-                        ctx.t("New password", "Neues Passwort")
-                    )
-                },
-                reset2fa = ctx.t("Reset one-time codes", "Einmalcodes zurücksetzen"),
-                remove = ctx.t("Remove", "Entfernen"),
-            ));
-        }
+                    format!(r#"<button name="do" value="password" class="secondary">{}</button>"#, ctx.t("New password", "Neues Passwort"))
+                };
+                format!(
+                    r#"<tr><td><strong>{name}</strong><div class="muted small">{source} · MFA: {mfa} · {last}</div></td><td>{state}</td><td><form method="post" action="/users/change" class="row">{csrf}<input type="hidden" name="user" value="{name}">{select}<button name="do" value="save" class="secondary">{save}</button><button name="do" value="{toggle}" class="secondary">{toggle_label}</button>{password}<button name="do" value="2fa" class="secondary">{reset2fa}</button><button name="do" value="remove" class="danger">{remove}</button></form></td></tr>"#,
+                    name = esc(&user.name),
+                    select = Self::role_select(ctx, &store, &user.role),
+                    save = ctx.t("Save role", "Rolle speichern"),
+                    toggle = if user.disabled { "enable" } else { "disable" },
+                    toggle_label = if user.disabled { ctx.t("Unlock", "Entsperren") } else { ctx.t("Lock", "Sperren") },
+                    reset2fa = ctx.t("Reset MFA", "MFA zurücksetzen"),
+                    remove = ctx.t("Remove", "Entfernen"),
+                )
+            })
+            .collect();
+        body.push_str(&format!(
+            r#"<section class="card"><h2>{title}</h2><div class="scroll"><table><thead><tr><th>{n}</th><th>{st}</th><th>{r}</th></tr></thead><tbody>{rows}</tbody></table></div></section>"#,
+            title = ctx.t("Users", "Benutzer"),
+            n = ctx.t("User", "Benutzer"),
+            st = ctx.t("Status", "Status"),
+            r = ctx.t("Role and actions", "Rolle und Aktionen"),
+        ));
+
+        body.push_str(r#"<div class="grid">"#);
         body.push_str(&format!(
             r#"<section class="card"><h2>{title}</h2><form method="post" action="/users/add" class="stack">{csrf}
-<label>{name}<input name="user" required></label><label>{pass}<input name="password" type="password" autocomplete="new-password" required></label>
-<label>{role_label} {select}</label>{jobs}<button>{add}</button></form>
-<p class="muted">{roles}</p></section>"#,
+<label>{name}<input name="user" required autocomplete="off"></label><label>{pass}<input name="password" type="password" autocomplete="new-password" required></label>
+<label>{role_label}{select}</label>{jobs}<button>{add}</button></form></section>"#,
             title = ctx.t("Add user", "Benutzer hinzufügen"),
             name = ctx.t("User name", "Benutzername"),
-            pass = if ctx.en {
-                format!("Password (recommended: at least {} characters; the user chooses a new one after the first sign-in)", self.settings.recommended_password_length)
-            } else {
-                format!("Passwort (empfohlen: mindestens {} Zeichen; der Benutzer wählt nach der ersten Anmeldung ein neues)", self.settings.recommended_password_length)
-            },
+            pass = ctx.t("Initial password", "Startpasswort"),
             role_label = ctx.t("Role", "Rolle"),
-            select = Self::role_select(ctx, Role::Viewer),
+            select = Self::role_select(ctx, &store, "viewer"),
             jobs = Self::job_boxes(ctx, &[]),
             add = ctx.t("Add", "Hinzufügen"),
-            roles = ctx.t(
-                "Viewer: overview, backups, activity. Operator: also runs, cancels and switches jobs and checks backups. Administrator: also users and the audit log.",
-                "Betrachter: Übersicht, Sicherungen, Verlauf. Bediener: startet, stoppt und schaltet außerdem Aufträge und prüft Sicherungen. Administrator: außerdem Benutzer und Audit-Log."
-            ),
         ));
+
+        // Roles: the built-in ones as reference, own ones editable.
+        let mut roles = String::new();
+        for name in store.role_names() {
+            let perms = store.role_permissions(&name).unwrap_or_default();
+            let builtin = users::Role::from_id(&name).is_some();
+            let list: String = Permission::ALL
+                .iter()
+                .map(|p| {
+                    let on = perms.contains(p);
+                    if builtin {
+                        format!(
+                            r#"<li class="{}">{}</li>"#,
+                            if on { "good" } else { "muted" },
+                            esc(p.name(ctx.en))
+                        )
+                    } else {
+                        format!(
+                            r#"<label class="check"><input type="checkbox" name="perm" value="{}"{}> {}</label>"#,
+                            serde_json::to_value(p).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
+                            if on { " checked" } else { "" },
+                            esc(p.name(ctx.en))
+                        )
+                    }
+                })
+                .collect();
+            if builtin {
+                roles.push_str(&format!(
+                    r#"<details><summary>{}</summary><ul class="perms">{list}</ul></details>"#,
+                    esc(&UserStore::role_label(&name, ctx.en))
+                ));
+            } else {
+                roles.push_str(&format!(
+                    r#"<details><summary>{n}</summary><form method="post" action="/roles/save" class="stack">{csrf}<input type="hidden" name="name" value="{n}">{list}<div class="row"><button name="do" value="save" class="secondary">{save}</button><button name="do" value="remove" class="danger">{remove}</button></div></form></details>"#,
+                    n = esc(&name),
+                    save = ctx.t("Save", "Speichern"),
+                    remove = ctx.t("Remove", "Entfernen"),
+                ));
+            }
+        }
+        let new_perms: String = Permission::ALL
+            .iter()
+            .map(|p| {
+                format!(
+                    r#"<label class="check"><input type="checkbox" name="perm" value="{}"> {}</label>"#,
+                    serde_json::to_value(p).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
+                    esc(p.name(ctx.en))
+                )
+            })
+            .collect();
+        body.push_str(&format!(
+            r#"<section class="card"><h2>{title}</h2>{roles}<h3>{new}</h3><form method="post" action="/roles/save" class="stack">{csrf}<label>{name}<input name="name" required></label>{new_perms}<button name="do" value="save">{create}</button></form></section>"#,
+            title = ctx.t("Roles", "Rollen"),
+            new = ctx.t("New role", "Neue Rolle"),
+            name = ctx.t("Name", "Name"),
+            create = ctx.t("Create role", "Rolle anlegen"),
+        ));
+        body.push_str("</div>");
         self.page(ctx, ctx.t("Users", "Benutzer"), &body, false)
     }
 
-    fn parse_role(text: &str) -> Option<Role> {
-        serde_json::from_value(serde_json::Value::String(text.to_string())).ok()
+    fn role_save(&self, ctx: &Ctx<'_>) -> Response {
+        let form = ctx.req.form();
+        let name = form.get("name").cloned().unwrap_or_default();
+        let perms: Vec<Permission> = ctx
+            .req
+            .form_all("perm")
+            .iter()
+            .filter_map(|p| serde_json::from_value(serde_json::Value::String(p.clone())).ok())
+            .collect();
+        let mut store = UserStore::load(&self.paths.config_file);
+        let removing = form.get("do").is_some_and(|d| d == "remove");
+        let result = if removing {
+            store.remove_role(&name)
+        } else {
+            store.set_role(&name, perms.clone())
+        };
+        if let Err(err) = result {
+            return Self::back("/users", &err);
+        }
+        // Somebody must still be able to manage users.
+        if store.admins() == 0 {
+            return Self::back(
+                "/users",
+                ctx.t(
+                    "At least one user must keep the right to manage users.",
+                    "Mindestens ein Benutzer muss Benutzer verwalten dürfen.",
+                ),
+            );
+        }
+        if let Err(err) = store.save(&self.paths.config_file) {
+            return Self::back("/users", &err.to_string());
+        }
+        let details = if removing {
+            Vec::new()
+        } else {
+            vec![format!(
+                "permissions: {}",
+                perms
+                    .iter()
+                    .map(|p| p.name(true))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )]
+        };
+        audit::record(
+            &self.paths.config_file,
+            ctx.record(if removing {
+                "role-removed"
+            } else {
+                "role-saved"
+            })
+            .target(name.trim())
+            .details(details),
+        );
+        Self::back("/users", ctx.t("Saved.", "Gespeichert."))
     }
 
     fn user_add(&self, ctx: &Ctx<'_>) -> Response {
         let form = ctx.req.form();
         let name = form.get("user").cloned().unwrap_or_default();
         let password = form.get("password").cloned().unwrap_or_default();
-        let Some(role) = form.get("role").and_then(|r| Self::parse_role(r)) else {
-            return Self::back("/users", "?");
-        };
+        let role = form.get("role").cloned().unwrap_or_default();
         let jobs = ctx.req.form_all("jobs");
         let mut store = UserStore::load(&self.paths.config_file);
-        if let Err(err) = store.add(&name, role, &password) {
+        if let Err(err) = store.add(&name, &role, &password) {
             return Self::back("/users", &err);
         }
         if let Some(user) = store.find_mut(&name) {
@@ -2054,7 +2213,7 @@ impl WebApp {
         if let Err(err) = store.save(&self.paths.config_file) {
             return Self::back("/users", &err.to_string());
         }
-        let mut details = vec![format!("role: {}", role.name(true))];
+        let mut details = vec![format!("role: {role}")];
         if !jobs.is_empty() {
             details.push(format!("jobs: {}", jobs.join(", ")));
         }
@@ -2089,8 +2248,8 @@ impl WebApp {
         };
         let last_admin = store.is_last_admin(&name);
         let refuse_last_admin = ctx.t(
-            "The last administrator cannot be removed, locked or demoted.",
-            "Der letzte Administrator kann nicht entfernt, gesperrt oder herabgestuft werden.",
+            "The last user who manages users cannot be removed, locked or lose that right.",
+            "Der letzte Benutzer mit Benutzerverwaltung kann nicht entfernt, gesperrt oder herabgestuft werden.",
         );
         let mut details = Vec::new();
         let mut end_sessions = false;
@@ -2100,29 +2259,34 @@ impl WebApp {
             "save" => {
                 let role = form
                     .get("role")
-                    .and_then(|r| Self::parse_role(r))
-                    .unwrap_or(before.role);
-                if last_admin && role != Role::Admin {
+                    .cloned()
+                    .unwrap_or_else(|| before.role.clone());
+                if store.role_permissions(&role).is_none() {
+                    return Self::back(
+                        "/users",
+                        ctx.t("There is no such role.", "Diese Rolle gibt es nicht."),
+                    );
+                }
+                let keeps_admin = store
+                    .role_permissions(&role)
+                    .is_some_and(|p| p.contains(&Permission::ManageUsers));
+                if last_admin && !keeps_admin {
                     return Self::back("/users", refuse_last_admin);
                 }
                 let jobs = ctx.req.form_all("jobs");
                 let user = store.find_mut(&name).expect("checked above");
                 if user.role != role {
-                    details.push(format!(
-                        "role: {} → {}",
-                        user.role.name(true),
-                        role.name(true)
-                    ));
+                    details.push(format!("role: {} → {role}", user.role));
                 }
-                if user.jobs != jobs {
+                if form.contains_key("jobs") && user.jobs != jobs {
                     details.push(format!(
                         "jobs: [{}] → [{}]",
                         user.jobs.join(", "),
                         jobs.join(", ")
                     ));
+                    user.jobs = jobs;
                 }
                 user.role = role;
-                user.jobs = jobs;
                 audit_action = "user-changed";
             }
             "disable" | "enable" => {
@@ -2137,7 +2301,7 @@ impl WebApp {
                     "user-unlocked"
                 };
             }
-            "password" => {
+            "password" if before.source == UserSource::Local => {
                 let password = users::random_password();
                 let user = store.find_mut(&name).expect("checked above");
                 user.password = users::hash_password(&password);
@@ -2147,9 +2311,11 @@ impl WebApp {
                 audit_action = "user-password-reset";
             }
             "2fa" => {
-                store.find_mut(&name).expect("checked above").totp = None;
+                let user = store.find_mut(&name).expect("checked above");
+                user.totp = None;
+                user.email_codes = false;
                 end_sessions = true;
-                audit_action = "user-one-time-codes-reset";
+                audit_action = "user-mfa-reset";
             }
             "remove" => {
                 if last_admin {
@@ -2209,7 +2375,7 @@ impl WebApp {
                 r#"<section class="card"><h2>{}</h2><p class="muted">{}: {}</p><p>{}</p></section>"#,
                 ctx.t("Password", "Passwort"),
                 ctx.t("Role", "Rolle"),
-                ctx.user.role.name(ctx.en),
+                UserStore::role_label(&ctx.user.role, ctx.en),
                 ctx.t(
                     "You sign in with your directory account (LDAP / Active Directory). Its password and your role are managed there.",
                     "Du meldest dich mit deinem Verzeichniskonto an (LDAP / Active Directory). Passwort und Rolle werden dort verwaltet."
@@ -2223,7 +2389,7 @@ impl WebApp {
 <label>{again}<input name="again" type="password" autocomplete="new-password" required></label><button>{save}</button></form></section>"#,
             title = ctx.t("Password", "Passwort"),
             role = ctx.t("Role", "Rolle"),
-            r = ctx.user.role.name(ctx.en),
+            r = UserStore::role_label(&ctx.user.role, ctx.en),
             current = ctx.t("Current password", "Aktuelles Passwort"),
             new = if ctx.en {
                 format!("New password (recommended: at least {} characters)", self.settings.recommended_password_length)
@@ -2363,7 +2529,8 @@ impl WebApp {
         match ctx.user.source {
             UserSource::Local => users::verify_password(password, &ctx.user.password),
             UserSource::Directory => {
-                super::ldap::authenticate(&self.settings.ldap, &ctx.user.name, password).is_ok()
+                super::ldap::authenticate(&self.settings.ldap, &ctx.user.name, password, &|_| 0)
+                    .is_ok()
             }
         }
     }

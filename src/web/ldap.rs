@@ -43,6 +43,14 @@ pub struct LdapSettings {
     pub admin_group: String,
     pub operator_group: String,
     pub viewer_group: String,
+    /// More groups and the roles they give, also roles defined in AeternaVault.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_roles: Vec<GroupRole>,
+    /// Where the role of a directory user comes from.
+    pub role_source: RoleSource,
+    /// With roles given in AeternaVault: the role at the first sign-in.
+    /// Empty: no access until an administrator gives one.
+    pub default_role: String,
     /// Active Directory: also count membership through nested groups.
     pub nested_groups: bool,
     pub timeout_seconds: u32,
@@ -66,6 +74,9 @@ impl Default for LdapSettings {
             admin_group: String::new(),
             operator_group: String::new(),
             viewer_group: String::new(),
+            group_roles: Vec::new(),
+            role_source: RoleSource::Directory,
+            default_role: String::new(),
             nested_groups: true,
             timeout_seconds: 10,
         }
@@ -102,13 +113,50 @@ impl LdapSettings {
         if !self.user_filter.contains("{user}") {
             return Err("LDAP: the user filter must contain {user}".into());
         }
-        if [&self.admin_group, &self.operator_group, &self.viewer_group]
-            .iter()
-            .all(|g| g.trim().is_empty())
-        {
+        if self.role_source == RoleSource::Directory && self.mappings().is_empty() {
             return Err("LDAP: name at least one group that gives a role".into());
         }
         Ok(())
+    }
+}
+
+/// A directory group and the role its members get.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GroupRole {
+    pub group: String,
+    pub role: String,
+}
+
+/// Where the roles of directory users come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoleSource {
+    /// From their groups, read again at every sign-in.
+    #[default]
+    Directory,
+    /// Given and changed in AeternaVault; the directory only checks the password.
+    AeternaVault,
+}
+
+impl LdapSettings {
+    /// Every group that gives a role, with that role.
+    pub fn mappings(&self) -> Vec<(String, String)> {
+        let mut list: Vec<(String, String)> = [
+            (&self.viewer_group, "viewer"),
+            (&self.operator_group, "operator"),
+            (&self.admin_group, "admin"),
+        ]
+        .into_iter()
+        .filter(|(g, _)| !g.trim().is_empty())
+        .map(|(g, r)| (g.trim().to_string(), r.to_string()))
+        .collect();
+        list.extend(
+            self.group_roles
+                .iter()
+                .filter(|m| !m.group.trim().is_empty() && !m.role.trim().is_empty())
+                .map(|m| (m.group.trim().to_string(), m.role.trim().to_string())),
+        );
+        list
     }
 }
 
@@ -116,7 +164,8 @@ impl LdapSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryUser {
     pub dn: String,
-    pub role: Role,
+    /// From the groups (`None` with roles given in AeternaVault).
+    pub role: Option<String>,
     /// The `mail` attribute, for sign-in codes by e-mail.
     pub email: Option<String>,
 }
@@ -189,10 +238,13 @@ fn plausible_name(name: &str) -> bool {
 }
 
 /// Checks a user name and password against the directory.
+/// `rank` orders roles (more permissions, higher): a member of several
+/// groups gets the highest role.
 pub fn authenticate(
     settings: &LdapSettings,
     name: &str,
     password: &str,
+    rank: &dyn Fn(&str) -> usize,
 ) -> Result<DirectoryUser, LdapError> {
     // An empty password is an anonymous bind in LDAP, which succeeds: never
     // let it count as a sign-in.
@@ -201,7 +253,7 @@ pub fn authenticate(
     }
     settings.check().map_err(LdapError::Unavailable)?;
     let mut conn = connect(settings)?;
-    let result = sign_in(&mut conn, settings, name, password);
+    let result = sign_in(&mut conn, settings, name, password, rank);
     let _ = conn.unbind();
     result
 }
@@ -211,6 +263,7 @@ fn sign_in(
     settings: &LdapSettings,
     name: &str,
     password: &str,
+    rank: &dyn Fn(&str) -> usize,
 ) -> Result<DirectoryUser, LdapError> {
     let unavailable = |e: ldap3::LdapError| LdapError::Unavailable(e.to_string());
     // 1. Who searches.
@@ -267,23 +320,22 @@ fn sign_in(
         .find(|(k, _)| k.eq_ignore_ascii_case("memberOf"))
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
-    let mut role = None;
-    for (group, r) in [
-        (&settings.viewer_group, Role::Viewer),
-        (&settings.operator_group, Role::Operator),
-        (&settings.admin_group, Role::Admin),
-    ] {
-        let group = group.trim();
-        if group.is_empty() {
-            continue;
-        }
-        let direct = member_of
-            .iter()
-            .any(|g| g.trim().eq_ignore_ascii_case(group));
-        let member = direct
-            || (settings.nested_groups && in_chain(conn, &user.dn, group).map_err(unavailable)?);
-        if member {
-            role = Some(r);
+    let mut role: Option<String> = None;
+    if settings.role_source == RoleSource::Directory {
+        for (group, r) in settings.mappings() {
+            let direct = member_of
+                .iter()
+                .any(|g| g.trim().eq_ignore_ascii_case(&group));
+            let member = direct
+                || (settings.nested_groups
+                    && in_chain(conn, &user.dn, &group).map_err(unavailable)?);
+            if member
+                && role
+                    .as_deref()
+                    .is_none_or(|current| rank(&r) > rank(current))
+            {
+                role = Some(r);
+            }
         }
     }
 
@@ -297,7 +349,9 @@ fn sign_in(
     {
         return Err(LdapError::Rejected);
     }
-    let role = role.ok_or(LdapError::NoGroup)?;
+    if settings.role_source == RoleSource::Directory && role.is_none() {
+        return Err(LdapError::NoGroup);
+    }
     let email = user
         .attrs
         .iter()
@@ -324,8 +378,12 @@ fn in_chain(conn: &mut LdapConn, user_dn: &str, group: &str) -> ldap3::result::R
 /// what the filter finds for `name` (or checks the given user completely).
 pub fn test(settings: &LdapSettings, name: &str, password: &str) -> Result<String, String> {
     if !password.is_empty() {
-        return authenticate(settings, name, password)
-            .map(|u| format!("signed in as {} with the role {}", u.dn, u.role.name(true)))
+        let builtin = |r: &str| Role::from_id(r).map_or(0, |b| b.permissions().len());
+        return authenticate(settings, name, password, &builtin)
+            .map(|u| match u.role {
+                Some(role) => format!("signed in as {} with the role {role}", u.dn),
+                None => format!("signed in as {}; the role is given in AeternaVault", u.dn),
+            })
             .map_err(|e| e.to_string());
     }
     settings.check()?;
@@ -390,6 +448,9 @@ mod tests {
         assert!(!plausible_name("x)(uid=*"));
         assert!(plausible_name("anna.mueller@example.local"));
         // An empty password never reaches the directory.
-        assert_eq!(authenticate(&s, "anna", ""), Err(LdapError::Rejected));
+        assert_eq!(
+            authenticate(&s, "anna", "", &|_| 0),
+            Err(LdapError::Rejected)
+        );
     }
 }

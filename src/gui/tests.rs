@@ -413,17 +413,13 @@ fn web_tab_manages_users() {
     harness
         .state_mut()
         .web
-        .fill_new_user("admin", "short", crate::web::users::Role::Admin);
+        .fill_new_user("admin", "short", "admin");
     harness.run();
     harness.get_by_label("Add").click();
     harness.run();
     let config_file = harness.state().paths.config_file.clone();
     let store = crate::web::users::UserStore::load(&config_file);
-    assert!(
-        store
-            .find("admin")
-            .is_some_and(|u| u.may(crate::web::users::Role::Admin))
-    );
+    assert!(store.find("admin").is_some_and(|u| u.role == "admin"));
     assert!(
         harness.state().web.server.is_none(),
         "no server without a real window"
