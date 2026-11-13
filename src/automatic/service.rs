@@ -288,6 +288,7 @@ fn check_and_run(shared: &Shared) {
             .find(|s| s.id == id)
             .cloned()
             .map(|s| (Some(s), true)),
+        None if !config.jobs_on() => None,
         None => {
             let state = State::load(&shared.paths.config_file);
             let now = Local::now();

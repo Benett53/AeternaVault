@@ -857,3 +857,35 @@ fn optional_parts_show_their_tab_only_when_switched_on() {
     let fresh = Config::first_run();
     assert!(!fresh.notifications_on() && !fresh.applications_on() && !fresh.web_on());
 }
+
+#[test]
+fn message_texts_start_from_the_built_in_text_and_take_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut h = harness(tmp.path(), |c| c.features.notifications = Some(true));
+    // Tall enough that the whole editor is on screen without scrolling.
+    h.set_size(eframe::egui::vec2(1000.0, 1600.0));
+    goto(&mut h, View::Notifications);
+    h.run();
+    let built_in = crate::i18n::Lang::En.t().notify_success_message;
+
+    click(&mut h, "Own text");
+    h.run();
+    assert_eq!(h.state().config.notifications.success_message, built_in);
+
+    // A value goes where the cursor is; without one, at the end.
+    click(&mut h, "Job");
+    h.run();
+    assert_eq!(
+        h.state().config.notifications.success_message,
+        format!("{built_in}{{job}}")
+    );
+
+    click(&mut h, "Restore the built-in text");
+    h.run();
+    assert_eq!(h.state().config.notifications.success_message, built_in);
+
+    // Switched off, the field is empty again and the built-in text applies.
+    click(&mut h, "Own text");
+    h.run();
+    assert!(h.state().config.notifications.success_message.is_empty());
+}

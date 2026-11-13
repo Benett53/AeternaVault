@@ -86,6 +86,7 @@ impl AeternaApp {
             View::Notifications => self.config.notifications_on(),
             View::Apps => self.config.applications_on(),
             View::Web => self.config.web_on(),
+            View::Jobs => self.config.jobs_on(),
             _ => true,
         }
     }

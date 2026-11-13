@@ -450,6 +450,8 @@ pub struct AeternaApp {
     pub updater: crate::update::Updater,
     /// The web interface and the Web tab.
     pub web: views::web::WebUi,
+    /// The help window (keyboard, links) is open.
+    pub help_open: bool,
     config_dirty: bool,
 }
 
@@ -473,6 +475,7 @@ impl AeternaApp {
         let mut app = Self {
             updater,
             web: views::web::WebUi::default(),
+            help_open: false,
             settings: SettingsUi {
                 exclude_text: loaded.config.exclude.join("\n"),
                 invalid_patterns: Vec::new(),
@@ -656,6 +659,17 @@ impl AeternaApp {
                             self.config.appearance = next;
                             theme::apply(ui.ctx(), self.config.appearance);
                             self.mark_dirty();
+                        }
+                        let help = if self.lang == Lang::En {
+                            "Help"
+                        } else {
+                            "Hilfe"
+                        };
+                        if widgets::button(ui, ButtonKind::Quiet, "?", true)
+                            .on_hover_text(help)
+                            .clicked()
+                        {
+                            self.help_open = true;
                         }
                         if widgets::button(ui, ButtonKind::Quiet, t.switch_language, true)
                             .on_hover_text(t.switch_language_hint)
@@ -1033,6 +1047,7 @@ impl eframe::App for AeternaApp {
             });
 
         dialogs::confirmation(self, ui);
+        dialogs::help_dialog(self, ui);
         dialogs::vault_dialog(self, ui);
         dialogs::schedule_dialog(self, ui);
         self.paint_autoscroll(&ctx);

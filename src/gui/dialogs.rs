@@ -369,8 +369,8 @@ pub fn schedule_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                 widgets::secondary_text(ui, t.at_start_hint);
             }
             ui.add_space(4.0);
-            ui.checkbox(&mut schedule.catch_up, t.catch_up);
-            ui.checkbox(&mut schedule.verify_after, t.verify_after)
+            widgets::switch(ui, &mut schedule.catch_up, t.catch_up);
+            widgets::switch(ui, &mut schedule.verify_after, t.verify_after)
                 .on_hover_text(t.verify_after_hint);
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -676,7 +676,7 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                         submit = true;
                     }
                     ui.add_space(4.0);
-                    ui.checkbox(remember, t.remember_on_computer);
+                    widgets::switch(ui, remember, t.remember_on_computer);
                     ui.add_space(8.0);
                     wrapped(
                         ui,
@@ -824,7 +824,7 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                         submit = true;
                     }
                     ui.add_space(4.0);
-                    ui.checkbox(remember, t.remember_on_computer);
+                    widgets::switch(ui, remember, t.remember_on_computer);
                     if busy {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
@@ -989,5 +989,69 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
     // A dialog opened by a follow-up step takes precedence.
     if keep_open && app.vault.dialog.is_none() {
         app.vault.dialog = Some(dialog);
+    }
+}
+
+/// Help: keyboard and mouse, the version, and where to read more.
+pub fn help_dialog(app: &mut AeternaApp, ui: &mut Ui) {
+    if !app.help_open {
+        return;
+    }
+    let t = app.lang.t();
+    let en = app.lang == crate::i18n::Lang::En;
+    let modal = egui::Modal::new(egui::Id::new("help"))
+        .frame(modal_frame(ui))
+        .show(ui.ctx(), |ui| {
+            let p = *palette(ui);
+            ui.set_width(dialog_width(ui, 560.0));
+            widgets::section_title(ui, if en { "Help" } else { "Hilfe" });
+            ui.label(egui::RichText::new(t.shortcuts_title).strong());
+            ui.add_space(6.0);
+            egui::Grid::new("help-shortcuts")
+                .num_columns(2)
+                .spacing([28.0, 8.0])
+                .show(ui, |ui| {
+                    for (keys, what) in t.shortcuts {
+                        ui.label(egui::RichText::new(*keys).monospace());
+                        ui.label(egui::RichText::new(*what).color(p.text_secondary));
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("AeternaVault {}", env!("CARGO_PKG_VERSION")));
+                ui.add_space(12.0);
+                ui.hyperlink_to("GitHub", "https://github.com/Benett53/AeternaVault");
+                ui.add_space(12.0);
+                ui.hyperlink_to(
+                    if en { "Documentation" } else { "Dokumentation" },
+                    "https://github.com/Benett53/AeternaVault/tree/main/docs",
+                );
+                ui.add_space(12.0);
+                ui.hyperlink_to(
+                    if en {
+                        "Report a problem"
+                    } else {
+                        "Problem melden"
+                    },
+                    "https://github.com/Benett53/AeternaVault/issues",
+                );
+            });
+            ui.add_space(16.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                widgets::button(
+                    ui,
+                    ButtonKind::Secondary,
+                    if en { "Close" } else { "Schließen" },
+                    true,
+                )
+                .clicked()
+            })
+            .inner
+        });
+    if modal.inner || modal.should_close() {
+        app.help_open = false;
     }
 }

@@ -480,6 +480,12 @@ pub struct Features {
     /// The web interface (tab and server).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web: Option<bool>,
+    /// Automatic backups (Backup jobs tab and running them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<bool>,
+    /// Health of the destination drive (S.M.A.R.T.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive_health: Option<bool>,
 }
 
 /// How much is written to the technical log, and whether changes of the
@@ -527,6 +533,14 @@ impl Config {
 
     pub fn web_on(&self) -> bool {
         self.features.web.unwrap_or(self.web.enabled)
+    }
+
+    pub fn jobs_on(&self) -> bool {
+        self.features.jobs.unwrap_or(true)
+    }
+
+    pub fn drive_health_on(&self) -> bool {
+        self.features.drive_health.unwrap_or(false)
     }
 }
 
@@ -740,6 +754,8 @@ impl Config {
                 notifications: Some(false),
                 applications: Some(false),
                 web: Some(false),
+                jobs: Some(true),
+                drive_health: Some(false),
             },
             ..Self::default()
         };

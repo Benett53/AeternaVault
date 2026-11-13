@@ -304,17 +304,17 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
             ),
         );
         let mut on = app.config.web.enabled;
-        if ui
-            .checkbox(
-                &mut on,
-                RichText::new(tr(
-                    lang,
-                    "Switch on the web interface",
-                    "Web-Oberfläche einschalten",
-                ))
-                .size(16.0),
-            )
-            .changed()
+        if widgets::switch(
+            ui,
+            &mut on,
+            RichText::new(tr(
+                lang,
+                "Switch on the web interface",
+                "Web-Oberfläche einschalten",
+            ))
+            .size(16.0),
+        )
+        .changed()
         {
             app.config.web.enabled = on;
             if let Some(d) = app.web.draft.as_mut() {
@@ -609,7 +609,7 @@ fn security_card(lang: Lang, ui: &mut Ui, web: &mut WebSettings, email_channels:
 
                 row_label(ui, tr(lang, "Second step", "Zweiter Schritt"));
                 ui.vertical(|ui| {
-                    ui.checkbox(&mut web.require_two_factor, tr(lang, "required for everybody", "für alle verlangen"));
+                    widgets::switch(ui, &mut web.require_two_factor, tr(lang, "required for everybody", "für alle verlangen"));
                     note(
                         ui,
                         tr(lang, "A code from an authenticator app or by e-mail after the password.", "Ein Code aus einer Authenticator-App oder per E-Mail nach dem Passwort."),
@@ -663,7 +663,8 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
             ),
         );
         let l = &mut web.ldap;
-        ui.checkbox(
+        widgets::switch(
+            ui,
             &mut l.enabled,
             tr(
                 lang,
@@ -719,12 +720,14 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                 .desired_width(width),
         );
         if l.url.trim().to_ascii_lowercase().starts_with("ldap://") {
-            ui.checkbox(
+            widgets::switch(
+                ui,
                 &mut l.starttls,
                 tr(lang, "encrypt with StartTLS", "mit StartTLS verschlüsseln"),
             );
             if !l.starttls {
-                ui.checkbox(
+                widgets::switch(
+                    ui,
                     &mut l.allow_unencrypted,
                     tr(
                         lang,
@@ -840,7 +843,8 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                     ui.end_row();
                 }
             });
-        ui.checkbox(
+        widgets::switch(
+            ui,
             &mut l.nested_groups,
             tr(
                 lang,
@@ -1291,7 +1295,7 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                                         let before = user.jobs.clone();
                                         for (id, name) in &schedules {
                                             let mut on = user.jobs.contains(id);
-                                            if ui.checkbox(&mut on, name).changed() {
+                                            if widgets::switch(ui, &mut on, name).changed() {
                                                 if on {
                                                     user.jobs.push(id.clone());
                                                 } else {

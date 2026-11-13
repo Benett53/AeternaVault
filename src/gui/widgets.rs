@@ -202,35 +202,47 @@ pub fn nav_tab(ui: &mut Ui, text: &str, selected: bool, enabled: bool) -> Respon
     }
 }
 
-/// An on/off switch with an accessible `label`. Returns `true` when it was flipped.
-pub fn toggle(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> bool {
+/// Draws an on/off switch into `rect`: green when on, grey when off, the
+/// knob sliding between the two.
+fn paint_switch(ui: &Ui, rect: Rect, id: egui::Id, on: bool, enabled: bool, hovered: bool) {
     let p = *palette(ui);
-    let size = egui::vec2(40.0, 22.0);
-    let (rect, response) = ui.allocate_exact_size(
-        size,
-        if enabled {
-            Sense::click()
-        } else {
-            Sense::hover()
-        },
-    );
-    let t = ui.ctx().animate_bool_responsive(response.id, *on);
-    let track = if *on { p.accent } else { p.raised };
-    let alpha = if enabled { 1.0 } else { 0.5 };
+    let t = ui.ctx().animate_bool_with_time(id, on, 0.14);
+    let off_track = p.raised;
+    let on_track = p.success;
+    let track = lerp_color(off_track, on_track, t);
+    let alpha = if enabled { 1.0 } else { 0.45 };
+    let border = if on {
+        p.success
+    } else if hovered && enabled {
+        p.text_secondary
+    } else {
+        p.border
+    };
+    let radius = (rect.height() / 2.0) as u8;
     ui.painter().rect(
         rect,
-        CornerRadius::same(11),
+        CornerRadius::same(radius),
         track.gamma_multiply(alpha),
-        Stroke::new(1.0, if *on { p.accent } else { p.border }),
+        Stroke::new(1.0, border.gamma_multiply(alpha)),
         egui::StrokeKind::Inside,
     );
-    let x = egui::lerp((rect.left() + 11.0)..=(rect.right() - 11.0), t);
-    let knob = if *on { p.on_accent } else { p.text_secondary };
-    ui.painter().circle_filled(
-        Pos2::new(x, rect.center().y),
-        7.5,
-        knob.gamma_multiply(alpha),
-    );
+    let r = rect.height() / 2.0 - 3.0;
+    let x = egui::lerp((rect.left() + r + 3.0)..=(rect.right() - r - 3.0), t);
+    let knob = if on { Color32::WHITE } else { p.text_secondary };
+    ui.painter()
+        .circle_filled(Pos2::new(x, rect.center().y), r, knob.gamma_multiply(alpha));
+}
+
+/// An on/off switch with an accessible `label` (not drawn). Returns `true`
+/// when it was flipped.
+pub fn toggle(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> bool {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(40.0, 22.0), sense);
+    paint_switch(ui, rect, response.id, *on, enabled, response.hovered());
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *on, label)
     });
@@ -242,6 +254,48 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> bool {
         response.on_hover_cursor(CursorIcon::PointingHand);
     }
     false
+}
+
+/// A setting that is on or off: a switch followed by its label; the label
+/// can be clicked too. Used for settings instead of check boxes.
+pub fn switch(ui: &mut Ui, on: &mut bool, label: impl Into<WidgetText>) -> Response {
+    let p = *palette(ui);
+    let enabled = ui.is_enabled();
+    let galley = label.into().into_galley(
+        ui,
+        Some(egui::TextWrapMode::Wrap),
+        (ui.available_width() - 52.0).max(80.0),
+        egui::TextStyle::Body,
+    );
+    let size = Vec2::new(40.0 + 12.0 + galley.size().x, galley.size().y.max(22.0));
+    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
+    let track = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.top() + (rect.height() - 22.0) / 2.0),
+        Vec2::new(40.0, 22.0),
+    );
+    paint_switch(ui, track, response.id, *on, enabled, response.hovered());
+    let text_pos = Pos2::new(
+        track.right() + 12.0,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    let text = galley.text().to_string();
+    ui.painter().galley(
+        text_pos,
+        galley,
+        if enabled { p.text } else { p.text_secondary },
+    );
+    if enabled && response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *on, &text)
+    });
+    if enabled {
+        response.on_hover_cursor(CursorIcon::PointingHand)
+    } else {
+        response
+    }
 }
 
 /// Small eye symbol next to password fields; crossed out while the text is hidden.
@@ -572,15 +626,54 @@ pub fn number<N: egui::emath::Numeric>(
     value: &mut N,
     range: std::ops::RangeInclusive<N>,
 ) -> Response {
+    number_with_zero(ui, value, range, None)
+}
+
+/// Like [`number`], but 0 is shown as a word (such as “off”) and typing that
+/// word sets 0.
+pub fn number_or<N: egui::emath::Numeric>(
+    ui: &mut Ui,
+    value: &mut N,
+    range: std::ops::RangeInclusive<N>,
+    zero: &str,
+) -> Response {
+    number_with_zero(ui, value, range, Some(zero))
+}
+
+fn number_with_zero<N: egui::emath::Numeric>(
+    ui: &mut Ui,
+    value: &mut N,
+    range: std::ops::RangeInclusive<N>,
+    zero: Option<&str>,
+) -> Response {
     let p = *palette(ui);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        let mut response = ui.add(
-            egui::DragValue::new(value)
-                .range(range.clone())
-                .speed(0.0)
-                .max_decimals(0),
-        );
+        let mut drag = egui::DragValue::new(value)
+            .range(range.clone())
+            .speed(0.0)
+            .max_decimals(0);
+        if let Some(zero) = zero {
+            let shown = zero.to_owned();
+            let typed = zero.to_lowercase();
+            drag = drag
+                .custom_formatter(move |v, _| {
+                    if v == 0.0 {
+                        shown.clone()
+                    } else {
+                        format!("{v:.0}")
+                    }
+                })
+                .custom_parser(move |text| {
+                    let text = text.trim();
+                    if text.to_lowercase() == typed {
+                        Some(0.0)
+                    } else {
+                        text.parse().ok()
+                    }
+                });
+        }
+        let mut response = ui.add(drag);
         if response.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::Text);
         }
@@ -696,10 +789,9 @@ pub fn choice<V: PartialEq>(
         label
             .into()
             .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, font);
-    let check = if selected { 18.0 } else { 0.0 };
-    let padding = Vec2::new(14.0, 7.0);
+    let padding = Vec2::new(16.0, 7.0);
     let size = Vec2::new(
-        galley.size().x + check + padding.x * 2.0,
+        galley.size().x + padding.x * 2.0,
         (galley.size().y + padding.y * 2.0).max(32.0),
     );
     let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
@@ -716,34 +808,36 @@ pub fn choice<V: PartialEq>(
         )
     });
     if ui.is_rect_visible(rect) {
+        // The chosen option fades to the accent colour.
+        let t = ui.ctx().animate_bool_with_time(response.id, selected, 0.12);
         let hovered = response.hovered();
-        let (fill, stroke, text) = if selected {
-            (p.accent, Stroke::new(1.0, p.accent), p.on_accent)
-        } else if hovered {
-            (p.raised, Stroke::new(1.0, p.accent), p.text)
+        let fill = lerp_color(p.raised, p.accent, t);
+        let text = lerp_color(p.text, p.on_accent, t);
+        let border = if selected || hovered {
+            p.accent
         } else {
-            (p.raised, Stroke::new(1.0, p.border), p.text)
+            p.border
         };
         let radius = CornerRadius::same((size.y / 2.0).min(16.0) as u8);
         ui.painter().rect_filled(rect, radius, fill);
-        ui.painter()
-            .rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
-        let mut x = rect.min.x + padding.x;
-        if selected {
-            let c = Pos2::new(x + 6.0, rect.center().y);
-            let mark = vec![
-                Pos2::new(c.x - 5.0, c.y),
-                Pos2::new(c.x - 1.5, c.y + 3.5),
-                Pos2::new(c.x + 5.0, c.y - 4.0),
-            ];
-            ui.painter()
-                .add(egui::Shape::line(mark, Stroke::new(2.0, text)));
-            x += check;
-        }
-        let pos = Pos2::new(x, rect.center().y - galley.size().y / 2.0);
+        ui.painter().rect_stroke(
+            rect,
+            radius,
+            Stroke::new(1.0, border),
+            egui::StrokeKind::Inside,
+        );
+        let pos = Pos2::new(
+            rect.min.x + padding.x,
+            rect.center().y - galley.size().y / 2.0,
+        );
         ui.painter().galley(pos, galley, text);
     }
     response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let mix = |x: u8, y: u8| egui::lerp(f32::from(x)..=f32::from(y), t) as u8;
+    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
 }
 
 /// Two columns side by side when the window is wide enough, else one below
@@ -787,10 +881,102 @@ pub fn split(ui: &mut Ui, mut add: impl FnMut(&mut Ui, usize)) {
     );
 }
 
+/// Cards in two columns of about equal height: each card goes into the
+/// column that is shorter so far (heights from the frame before), so no
+/// large gap is left under one column. The order is kept as long as a new
+/// one would not be clearly better, so cards do not jump while a card grows
+/// or shrinks a little. One column below 1100 points.
+pub fn masonry(ui: &mut Ui, id: &str, count: usize, mut add: impl FnMut(&mut Ui, usize)) {
+    const GAP: f32 = 14.0;
+    if ui.available_width() < 1100.0 {
+        for i in 0..count {
+            if i > 0 {
+                ui.add_space(GAP);
+            }
+            add(ui, i);
+        }
+        return;
+    }
+    let heights_id = ui.id().with(("masonry-heights", id));
+    let columns_id = ui.id().with(("masonry-columns", id));
+    let mut heights: Vec<f32> = ui.data(|d| d.get_temp(heights_id)).unwrap_or_default();
+    heights.resize(count, 0.0);
+    let totals = |assign: &[usize]| {
+        let mut t = [0.0f32; 2];
+        for (i, c) in assign.iter().enumerate() {
+            t[*c] += heights[i] + GAP;
+        }
+        t
+    };
+    let mut greedy = vec![0usize; count];
+    let mut sums = [0.0f32; 2];
+    for (i, h) in heights.iter().enumerate() {
+        let c = usize::from(sums[1] < sums[0]);
+        greedy[i] = c;
+        sums[c] += h + GAP;
+    }
+    let previous: Option<Vec<usize>> = ui.data(|d| d.get_temp(columns_id));
+    let assign = match previous.filter(|p| p.len() == count) {
+        Some(previous) => {
+            let [a, b] = totals(&previous);
+            let [c, d] = totals(&greedy);
+            // Re-sort only when it saves a clear amount of empty space.
+            if (a - b).abs() - (c - d).abs() > 160.0 {
+                greedy
+            } else {
+                previous
+            }
+        }
+        None => greedy,
+    };
+
+    let gap = 16.0;
+    let width = ui.available_width();
+    let column = ((width - gap) / 2.0).floor();
+    let top = ui.cursor().min;
+    let mut bottom = top.y;
+    let mut measured = heights.clone();
+    for c in 0..2 {
+        let rect = Rect::from_min_size(
+            Pos2::new(top.x + c as f32 * (column + gap), top.y),
+            Vec2::new(column, 1.0e6),
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        child.set_width(column);
+        child.set_clip_rect(child.clip_rect().intersect(Rect::from_min_size(
+            rect.min - Vec2::new(0.0, 1.0e6),
+            Vec2::new(column + 2.0, 2.0e6),
+        )));
+        let mut first = true;
+        for (i, _) in assign.iter().enumerate().filter(|(_, a)| **a == c) {
+            if !first {
+                child.add_space(GAP);
+            }
+            first = false;
+            let start = child.cursor().top();
+            add(&mut child, i);
+            measured[i] = child.min_rect().bottom() - start;
+        }
+        bottom = bottom.max(child.min_rect().bottom());
+    }
+    ui.data_mut(|d| {
+        d.insert_temp(heights_id, measured);
+        d.insert_temp(columns_id, assign);
+    });
+    ui.allocate_rect(
+        Rect::from_min_max(top, Pos2::new(top.x + width, bottom)),
+        Sense::hover(),
+    );
+}
+
 /// A bar showing how full something is, e.g. the destination drive.
 pub fn usage_bar(ui: &mut Ui, used_fraction: f32, label: &str) {
     let p = *palette(ui);
-    let width = ui.available_width().min(520.0);
+    let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 10.0), Sense::hover());
     let fraction = used_fraction.clamp(0.0, 1.0);
     ui.painter()
@@ -807,6 +993,117 @@ pub fn usage_bar(ui: &mut Ui, used_fraction: f32, label: &str) {
     ui.painter().rect_filled(used, CornerRadius::same(5), color);
     ui.add_space(2.0);
     secondary_text(ui, label);
+}
+
+/// A labelled row: the label in a fixed column, the content beside it. The
+/// content wraps within the row, and the row grows with it, so nothing below
+/// is overlapped (a grid keeps last frame's row height).
+pub fn field_row<R>(
+    ui: &mut Ui,
+    label_width: f32,
+    label: &str,
+    hint: &str,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let label_width = label_width.min(ui.available_width() * 0.4);
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(
+            Vec2::new(label_width, 36.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(Vec2::new(label_width, 36.0));
+                secondary_text(ui, label).on_hover_text(hint);
+            },
+        );
+        let rest = ui.available_width();
+        ui.allocate_ui_with_layout(
+            Vec2::new(rest, 32.0),
+            egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+            |ui| {
+                // Rows as tall as the tallest control, so everything in a row
+                // is centred on the same line.
+                ui.spacing_mut().interact_size.y = 36.0;
+                add(ui)
+            },
+        )
+        .inner
+    })
+    .inner
+}
+
+/// Shows `add` when `open`, sliding and fading in and out instead of making
+/// the content below jump.
+pub fn reveal<R>(ui: &mut Ui, id: &str, open: bool, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    let id = ui.make_persistent_id(id);
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
+    state.set_open(open);
+    let openness = state.openness(ui.ctx());
+    state
+        .show_body_unindented(ui, |ui| {
+            ui.multiply_opacity(openness);
+            add(ui)
+        })
+        .map(|r| r.inner)
+}
+
+/// A small rounded button for inserting a value, filter tags and the like.
+pub fn chip(ui: &mut Ui, label: &str) -> Response {
+    let p = *palette(ui);
+    let response = ui.add(
+        egui::Button::new(egui::RichText::new(label).size(13.0).color(p.text))
+            .fill(p.raised)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(CornerRadius::same(12))
+            .min_size(Vec2::new(0.0, 24.0)),
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// A notification as it arrives: a coloured edge, the subject in bold and the
+/// message below.
+pub fn preview_message(ui: &mut Ui, title: &str, body: &str, warning: bool) {
+    let p = *palette(ui);
+    let response = Frame::new()
+        .fill(p.raised)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin {
+            left: 18,
+            right: 14,
+            top: 12,
+            bottom: 12,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(title)
+                        .family(egui::FontFamily::Name(SANS_STRONG.into()))
+                        .size(15.0)
+                        .color(p.text),
+                )
+                .wrap(),
+            );
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(egui::RichText::new(body).size(14.0)).wrap());
+        })
+        .response;
+    let mut edge = response.rect;
+    edge.set_width(4.0);
+    ui.painter().rect_filled(
+        edge,
+        CornerRadius {
+            nw: 8,
+            sw: 8,
+            ne: 0,
+            se: 0,
+        },
+        if warning { p.warning } else { p.success },
+    );
 }
 
 /// A tile with a big number and a caption, for overviews.

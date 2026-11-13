@@ -364,6 +364,10 @@ pub fn due_jobs(
     since_start: chrono::DateTime<chrono::Local>,
 ) -> Vec<Schedule> {
     let now = chrono::Local::now();
+    // Backup jobs switched off in the settings: nothing is due.
+    if !config.jobs_on() {
+        return Vec::new();
+    }
     config
         .schedules
         .iter()

@@ -119,144 +119,150 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     features_card(app, ui);
     ui.add_space(14.0);
 
-    // Wide windows: two columns of cards side by side.
-    widgets::split(ui, |ui, column| {
-        if column == 0 {
+    // Cards in two balanced columns on wide windows (each goes where there is
+    // less), one below the other on narrow ones.
+    widgets::masonry(ui, "settings", 8, |ui, item| match item {
+        0 => {
             widgets::card(ui, |ui| {
                 widgets::section_title(ui, t.settings_general);
-                egui::Grid::new("settings-general")
-                    .num_columns(2)
-                    .spacing([28.0, 10.0])
-                    .show(ui, |ui| {
-                        widgets::secondary_text(ui, t.language).on_hover_text(t.tip_language);
-                        ui.horizontal(|ui| {
-                            let before = app.config.language;
-                            widgets::choice(
-                                ui,
-                                &mut app.config.language,
-                                LanguageSetting::Auto,
-                                t.language_auto,
-                            );
-                            widgets::choice(
-                                ui,
-                                &mut app.config.language,
-                                LanguageSetting::En,
-                                "English",
-                            );
-                            widgets::choice(
-                                ui,
-                                &mut app.config.language,
-                                LanguageSetting::De,
-                                "Deutsch",
-                            );
-                            if before != app.config.language {
-                                app.lang = Lang::resolve(app.config.language);
-                                app.mark_dirty();
-                            }
-                        });
-                        ui.end_row();
-
-                        widgets::secondary_text(ui, t.appearance).on_hover_text(t.tip_appearance);
-                        ui.horizontal_wrapped(|ui| {
-                            let before = app.config.appearance;
-                            widgets::choice(
-                                ui,
-                                &mut app.config.appearance,
-                                Appearance::System,
-                                t.appearance_system,
-                            );
-                            widgets::choice(
-                                ui,
-                                &mut app.config.appearance,
-                                Appearance::Light,
-                                t.appearance_light,
-                            );
-                            widgets::choice(
-                                ui,
-                                &mut app.config.appearance,
-                                Appearance::Dark,
-                                t.appearance_dark,
-                            );
-                            widgets::choice(
-                                ui,
-                                &mut app.config.appearance,
-                                Appearance::Black,
-                                t.appearance_black,
-                            )
-                            .on_hover_text(t.tip_black);
-                            if before != app.config.appearance {
-                                theme::apply(&ctx, app.config.appearance);
-                                app.mark_dirty();
-                            }
-                        });
-                        ui.end_row();
-
-                        widgets::secondary_text(ui, t.interface_size)
-                            .on_hover_text(t.tip_interface_size);
-                        ui.horizontal(|ui| {
-                            let before = app.config.interface_scale;
-                            egui::ComboBox::from_id_salt("interface-scale")
-                                .selected_text(format!("{} %", app.config.interface_scale))
-                                .width(100.0)
-                                .show_ui(ui, |ui| {
-                                    for scale in [90u16, 100, 110, 125, 150] {
-                                        ui.selectable_value(
-                                            &mut app.config.interface_scale,
-                                            scale,
-                                            format!("{scale} %"),
-                                        );
-                                    }
-                                });
-                            if before != app.config.interface_scale {
-                                ctx.set_zoom_factor(app.config.zoom_factor());
-                                app.mark_dirty();
-                            }
-                        });
-                        ui.end_row();
+                let label = 150.0;
+                {
+                    widgets::field_row(ui, label, t.language, t.tip_language, |ui| {
+                        let before = app.config.language;
+                        widgets::choice(
+                            ui,
+                            &mut app.config.language,
+                            LanguageSetting::Auto,
+                            t.language_auto,
+                        );
+                        widgets::choice(
+                            ui,
+                            &mut app.config.language,
+                            LanguageSetting::En,
+                            "English",
+                        );
+                        widgets::choice(
+                            ui,
+                            &mut app.config.language,
+                            LanguageSetting::De,
+                            "Deutsch",
+                        );
+                        if before != app.config.language {
+                            app.lang = Lang::resolve(app.config.language);
+                            app.mark_dirty();
+                        }
                     });
+                    ui.add_space(8.0);
+                    widgets::field_row(ui, label, t.appearance, t.tip_appearance, |ui| {
+                        let before = app.config.appearance;
+                        widgets::choice(
+                            ui,
+                            &mut app.config.appearance,
+                            Appearance::System,
+                            t.appearance_system,
+                        );
+                        widgets::choice(
+                            ui,
+                            &mut app.config.appearance,
+                            Appearance::Light,
+                            t.appearance_light,
+                        );
+                        widgets::choice(
+                            ui,
+                            &mut app.config.appearance,
+                            Appearance::Dark,
+                            t.appearance_dark,
+                        );
+                        widgets::choice(
+                            ui,
+                            &mut app.config.appearance,
+                            Appearance::Black,
+                            t.appearance_black,
+                        )
+                        .on_hover_text(t.tip_black);
+                        if before != app.config.appearance {
+                            theme::apply(&ctx, app.config.appearance);
+                            app.mark_dirty();
+                        }
+                    });
+                    ui.add_space(8.0);
+                    widgets::field_row(ui, label, t.interface_size, t.tip_interface_size, |ui| {
+                        let before = app.config.interface_scale;
+                        egui::ComboBox::from_id_salt("interface-scale")
+                            .selected_text(format!("{} %", app.config.interface_scale))
+                            .width(100.0)
+                            .show_ui(ui, |ui| {
+                                for scale in [90u16, 100, 110, 125, 150] {
+                                    ui.selectable_value(
+                                        &mut app.config.interface_scale,
+                                        scale,
+                                        format!("{scale} %"),
+                                    );
+                                }
+                            });
+                        if before != app.config.interface_scale {
+                            ctx.set_zoom_factor(app.config.zoom_factor());
+                            app.mark_dirty();
+                        }
+                    });
+                }
             });
-            ui.add_space(14.0);
-            destination_card(app, ui);
-            ui.add_space(14.0);
+        }
+        1 => destination_card(app, ui),
+        2 => {
             encryption_card(app, ui);
             if app.vault.header.is_some() {
                 ui.add_space(14.0);
                 encryption_info_card(app, ui);
             }
-        } else {
-            background_card(app, ui);
-            ui.add_space(14.0);
-            updates_card(app, ui);
-            ui.add_space(14.0);
-            logging_card(app, ui);
-            ui.add_space(14.0);
+        }
+        3 => background_card(app, ui),
+        4 => updates_card(app, ui),
+        5 => logging_card(app, ui),
+        6 => {
             widgets::card(ui, |ui| {
                 widgets::section_title(ui, t.advanced);
                 let before = app.config.advanced.clone();
-                ui.checkbox(
+                widgets::switch(
+                    ui,
                     &mut app.config.advanced.skip_online_only_files,
                     t.adv_skip_online,
                 )
                 .on_hover_text(t.tip_skip_online);
-                ui.checkbox(&mut app.config.advanced.hardlink_unchanged, t.adv_hardlinks)
-                    .on_hover_text(t.tip_hardlinks);
-                ui.checkbox(&mut app.config.advanced.flush_to_disk, t.adv_flush)
+                widgets::switch(
+                    ui,
+                    &mut app.config.advanced.hardlink_unchanged,
+                    t.adv_hardlinks,
+                )
+                .on_hover_text(t.tip_hardlinks);
+                widgets::switch(ui, &mut app.config.advanced.flush_to_disk, t.adv_flush)
                     .on_hover_text(t.tip_flush);
                 ui.horizontal_wrapped(|ui| {
                     ui.label(t.adv_health_check)
                         .on_hover_text(t.tip_health_check);
-                    widgets::number(ui, &mut app.config.advanced.health_check_days, 0..=365)
-                        .on_hover_text(t.tip_health_check);
+                    widgets::number_or(
+                        ui,
+                        &mut app.config.advanced.health_check_days,
+                        0..=365,
+                        t.zero_never,
+                    )
+                    .on_hover_text(t.tip_health_check);
                     ui.label(t.adv_health_check_days);
                 });
-                ui.checkbox(&mut app.config.advanced.confirm_before_start, t.adv_confirm)
-                    .on_hover_text(t.tip_confirm);
-                ui.checkbox(
+                widgets::switch(
+                    ui,
+                    &mut app.config.advanced.confirm_before_start,
+                    t.adv_confirm,
+                )
+                .on_hover_text(t.tip_confirm);
+                widgets::switch(
+                    ui,
                     &mut app.config.advanced.verify_on_restore,
                     t.verify_checksums,
                 )
                 .on_hover_text(t.tip_verify);
-                ui.checkbox(
+                widgets::switch(
+                    ui,
                     &mut app.config.advanced.compatibility_graphics,
                     t.adv_compatibility_graphics,
                 )
@@ -265,7 +271,8 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                     app.mark_dirty();
                 }
             });
-            ui.add_space(14.0);
+        }
+        _ => {
             widgets::card(ui, |ui| {
                 widgets::section_title_info(ui, t.config_title, t.config_hint);
                 ui.add_space(4.0);
@@ -337,8 +344,6 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             }
         });
     });
-    ui.add_space(14.0);
-    shortcuts_card(app, ui);
     ui.add_space(12.0);
 }
 
@@ -350,25 +355,33 @@ fn tr(lang: Lang, en: &'static str, de: &'static str) -> &'static str {
 /// part disappears with its tab; its settings are kept.
 fn features_card(app: &mut AeternaApp, ui: &mut Ui) {
     let lang = app.lang;
-    let p = *theme::palette(ui);
-    let notifications = app.config.notifications_on();
-    let applications = app.config.applications_on();
-    let web = app.config.web_on();
     widgets::card(ui, |ui| {
         widgets::section_title_info(
             ui,
             tr(lang, "Features", "Funktionen"),
             tr(
                 lang,
-                "Switch on only what you use. A part that is switched off disappears with its tab, and its settings are kept for later.",
-                "Schalte nur ein, was du nutzt. Eine ausgeschaltete Funktion verschwindet mit ihrem Tab; ihre Einstellungen bleiben für später erhalten.",
+                "Switch on only what you use. A part that is off disappears with its tab and keeps its settings.",
+                "Nur einschalten, was genutzt wird. Eine ausgeschaltete Funktion verschwindet mit ihrem Tab und behält ihre Einstellungen.",
             ),
         );
-        ui.add_space(4.0);
-        let tiles = [
+        let mut values = [
+            app.config.jobs_on(),
+            app.config.notifications_on(),
+            app.config.applications_on(),
+            app.config.web_on(),
+            app.config.drive_health_on(),
+        ];
+        let items = [
             (
-                0,
-                notifications,
+                tr(lang, "Backup jobs", "Backup-Jobs"),
+                tr(
+                    lang,
+                    "Automatic backups on a schedule.",
+                    "Automatische Sicherungen nach Zeitplan.",
+                ),
+            ),
+            (
                 tr(lang, "Notifications", "Benachrichtigungen"),
                 tr(
                     lang,
@@ -377,70 +390,63 @@ fn features_card(app: &mut AeternaApp, ui: &mut Ui) {
                 ),
             ),
             (
-                1,
-                applications,
                 tr(lang, "Applications", "Anwendungen"),
                 tr(
                     lang,
-                    "Finds data folders of browsers, mail, games and more. Folders chosen before keep being backed up.",
-                    "Findet Datenordner von Browsern, Mail, Spielen und mehr. Schon gewählte Ordner werden weiter gesichert.",
+                    "Finds data folders of browsers, mail and games. Chosen folders keep being backed up.",
+                    "Findet Datenordner von Browsern, Mail und Spielen. Gewählte Ordner werden weiter gesichert.",
                 ),
             ),
             (
-                2,
-                web,
                 tr(lang, "Web interface", "Web-Oberfläche"),
                 tr(
                     lang,
-                    "Overview and jobs in a browser, with users, roles and an audit log.",
+                    "Overview and jobs in a browser, with users, roles and audit log.",
                     "Übersicht und Aufträge im Browser, mit Benutzern, Rollen und Audit-Log.",
                 ),
             ),
+            (
+                tr(lang, "Drive health", "Laufwerkszustand"),
+                tr(
+                    lang,
+                    "S.M.A.R.T. status of the destination drive, with an alert when it degrades.",
+                    "S.M.A.R.T.-Zustand des Ziellaufwerks, mit Warnung bei Verschlechterung.",
+                ),
+            ),
         ];
+        let before = values;
+        let gap = 24.0;
         let width = ui.available_width();
-        let columns = if width >= 900.0 { 3 } else { 1 };
-        let mut toggled = None;
-        ui.columns(columns, |cols| {
-            for (i, (id, on, title, text)) in tiles.into_iter().enumerate() {
-                let ui = &mut cols[i % columns];
-                egui::Frame::new()
-                    .fill(p.raised)
-                    .stroke(egui::Stroke::new(1.0, if on { p.accent } else { p.border }))
-                    .corner_radius(egui::CornerRadius::same(8))
-                    .inner_margin(egui::Margin::same(14))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(title).strong().size(16.0));
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let mut value = on;
-                                widgets::choice(ui, &mut value, true, tr(lang, "On", "An"));
-                                widgets::choice(ui, &mut value, false, tr(lang, "Off", "Aus"));
-                                if value != on {
-                                    toggled = Some((id, value));
-                                }
-                            });
-                        });
-                        ui.add_space(4.0);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(text).size(13.5).color(p.text_secondary),
-                            )
-                            .wrap(),
-                        );
-                    });
-                if columns == 1 {
-                    ui.add_space(10.0);
+        let columns = (((width + gap) / (190.0 + gap)) as usize).clamp(1, items.len());
+        let cell = (width - gap * (columns - 1) as f32) / columns as f32;
+        for row in items.chunks(columns).enumerate() {
+            let (r, row) = row;
+            if r > 0 {
+                ui.add_space(10.0);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for (c, (name, about)) in row.iter().enumerate() {
+                    let i = r * columns + c;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(cell, 26.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_width(cell);
+                            widgets::switch(ui, &mut values[i], *name).on_hover_text(*about);
+                        },
+                    );
                 }
-            }
-        });
-        if let Some((id, value)) = toggled {
-            let f = &mut app.config.features;
-            match id {
-                0 => f.notifications = Some(value),
-                1 => f.applications = Some(value),
-                _ => f.web = Some(value),
-            }
+            });
+        }
+        if values != before {
+            app.config.features = crate::config::Features {
+                jobs: Some(values[0]),
+                notifications: Some(values[1]),
+                applications: Some(values[2]),
+                web: Some(values[3]),
+                drive_health: Some(values[4]),
+            };
             app.mark_dirty();
         }
     });
@@ -484,7 +490,7 @@ fn logging_card(app: &mut AeternaApp, ui: &mut Ui) {
             );
         });
         ui.add_space(8.0);
-        ui.checkbox(
+        widgets::switch(ui,
             &mut app.config.logging.audit_settings,
             tr(lang, "Write every change of the settings to the audit log", "Jede Änderung der Einstellungen ins Audit-Log schreiben"),
         )
@@ -521,11 +527,12 @@ fn destination_card(app: &mut AeternaApp, ui: &mut Ui) {
         crate::gui::views::backup::destination_status(app, ui);
         ui.add_space(4.0);
         let mut app_folder = app.config.advanced.destination_app_folder;
+        let busy = app.is_busy();
         if ui
-            .add_enabled(
-                !app.is_busy(),
-                egui::Checkbox::new(&mut app_folder, t.destination_app_folder),
-            )
+            .add_enabled_ui(!busy, |ui| {
+                widgets::switch(ui, &mut app_folder, t.destination_app_folder)
+            })
+            .inner
             .on_hover_text(t.tip_app_folder)
             .changed()
         {
@@ -633,8 +640,7 @@ fn encryption_card(app: &mut AeternaApp, ui: &mut Ui) {
         if app.vault.header.is_some() {
             ui.add_space(10.0);
             let mut remembered = app.vault.remembered;
-            if ui
-                .checkbox(&mut remembered, t.remember_on_computer)
+            if widgets::switch(ui, &mut remembered, t.remember_on_computer)
                 .on_hover_text(t.tip_remember)
                 .changed()
             {
@@ -683,8 +689,7 @@ fn encryption_card(app: &mut AeternaApp, ui: &mut Ui) {
         if platform::file_association::supported() {
             ui.add_space(8.0);
             let mut on = app.config.advanced.open_by_double_click;
-            if ui
-                .checkbox(&mut on, t.open_by_double_click)
+            if widgets::switch(ui, &mut on, t.open_by_double_click)
                 .on_hover_text(t.open_by_double_click_hint)
                 .changed()
             {
@@ -704,10 +709,10 @@ fn background_card(app: &mut AeternaApp, ui: &mut Ui) {
             let autostart = app.background.as_ref().map(|b| b.autostart);
             let mut on = autostart.unwrap_or(false);
             if ui
-                .add_enabled(
-                    autostart.is_some(),
-                    egui::Checkbox::new(&mut on, t.start_with_windows),
-                )
+                .add_enabled_ui(autostart.is_some(), |ui| {
+                    widgets::switch(ui, &mut on, t.start_with_windows)
+                })
+                .inner
                 .on_hover_text(t.start_with_windows_hint)
                 .changed()
             {
@@ -716,8 +721,7 @@ fn background_card(app: &mut AeternaApp, ui: &mut Ui) {
         }
         if platform::systemd::supported() {
             let mut on = platform::systemd::is_installed();
-            if ui
-                .checkbox(&mut on, t.systemd_timer)
+            if widgets::switch(ui, &mut on, t.systemd_timer)
                 .on_hover_text(t.systemd_timer_hint)
                 .changed()
             {
@@ -726,18 +730,17 @@ fn background_card(app: &mut AeternaApp, ui: &mut Ui) {
         }
         let before = app.config.background.clone();
         if has_tray {
-            ui.checkbox(&mut app.config.background.keep_running, t.keep_running)
+            widgets::switch(ui, &mut app.config.background.keep_running, t.keep_running)
                 .on_hover_text(t.keep_running_hint);
         }
-        ui.checkbox(&mut app.config.background.only_on_ac_power, t.only_ac)
+        widgets::switch(ui, &mut app.config.background.only_on_ac_power, t.only_ac)
             .on_hover_text(t.only_ac_hint);
         if app.config.background != before {
             app.mark_dirty();
         }
         if platform::file_association::supported() {
             let mut on = app.config.advanced.explorer_menu;
-            if ui
-                .checkbox(&mut on, t.explorer_menu)
+            if widgets::switch(ui, &mut on, t.explorer_menu)
                 .on_hover_text(t.explorer_menu_hint)
                 .changed()
             {
@@ -811,7 +814,8 @@ fn updates_card(app: &mut AeternaApp, ui: &mut Ui) {
         }
         ui.add_space(4.0);
         let before = app.config.updates.check_automatically;
-        ui.checkbox(
+        widgets::switch(
+            ui,
             &mut app.config.updates.check_automatically,
             t.update_automatic,
         );
@@ -820,23 +824,5 @@ fn updates_card(app: &mut AeternaApp, ui: &mut Ui) {
                 .set_automatic(app.config.updates.check_automatically);
             app.mark_dirty();
         }
-    });
-}
-
-/// The keyboard and mouse shortcuts, for reference.
-fn shortcuts_card(app: &AeternaApp, ui: &mut Ui) {
-    let t = app.lang.t();
-    widgets::card(ui, |ui| {
-        widgets::section_title(ui, t.shortcuts_title);
-        egui::Grid::new("shortcuts")
-            .num_columns(2)
-            .spacing([28.0, 6.0])
-            .show(ui, |ui| {
-                for (keys, what) in t.shortcuts {
-                    ui.label(egui::RichText::new(*keys).monospace());
-                    widgets::secondary_text(ui, *what);
-                    ui.end_row();
-                }
-            });
     });
 }

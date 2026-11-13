@@ -2,6 +2,23 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Web interface: own roles as named sets of permissions (view activity, run jobs, switch jobs, check backups, view sign-ins, block addresses, view the audit log, manage users). Viewer, operator and administrator stay as built-in roles; existing users keep theirs. `aeternavault-cli web role list|set|remove`.
+- LDAP: roles from directory groups (any group to any role, the highest wins) or assigned in AeternaVault, with an optional default role for new directory users.
+- Help (the ? at the top right): keyboard shortcuts, version and links to the documentation and the issue tracker.
+- Settings → Features: backup jobs and drive health can be switched like the other parts; all five sit in one row of switches.
+- Notifications → Message texts: one message at a time, starting from the built-in text, values to click in at the cursor, a preview with sample values and a button to restore the built-in text.
+
+### Changed
+
+- Switches instead of check boxes for settings that are on or off (green when on, grey when off, animated); chosen options are marked by their colour only, without a check mark. The same in the web interface.
+- Settings are placed in two balanced columns; cards no longer leave gaps or overlap when options wrap.
+- Shorter labels; number fields show “off” or “never” for 0.
+- Pages before sign-in name nothing about the computer; the style sheet address carries the version, so a browser never mixes old and new.
+
 ## [0.13.0] - 2026-11-13
 
 ### Added

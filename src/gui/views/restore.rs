@@ -231,7 +231,8 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                 widgets::choice(ui, conflict, ConflictPolicy::KeepNewer, t.conflict_newer);
                 widgets::choice(ui, conflict, ConflictPolicy::KeepExisting, t.conflict_keep);
                 ui.add_space(6.0);
-                ui.checkbox(
+                widgets::switch(
+                    ui,
                     &mut app.config.advanced.verify_on_restore,
                     t.verify_checksums,
                 );
