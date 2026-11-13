@@ -207,10 +207,11 @@ pub fn nav_tab(ui: &mut Ui, text: &str, selected: bool, enabled: bool) -> Respon
 fn paint_switch(ui: &Ui, rect: Rect, id: egui::Id, on: bool, enabled: bool, hovered: bool) {
     let p = *palette(ui);
     let t = ui.ctx().animate_bool_with_time(id, on, 0.14);
-    let off_track = p.raised;
+    // Off: a recessed track that shows on cards and on raised frames alike.
+    let off_track = p.background;
     let on_track = p.success;
     let track = lerp_color(off_track, on_track, t);
-    let alpha = if enabled { 1.0 } else { 0.45 };
+    let alpha = if enabled { 1.0 } else { 0.55 };
     let border = if on {
         p.success
     } else if hovered && enabled {
@@ -881,9 +882,8 @@ pub fn split(ui: &mut Ui, mut add: impl FnMut(&mut Ui, usize)) {
     );
 }
 
-/// Cards in two columns of about equal height: each card goes into the
-/// column that is shorter so far (heights from the frame before), so no
-/// large gap is left under one column. The order is kept as long as a new
+/// Cards in two columns of about equal height (heights from the frame
+/// before), so no large gap is left under one column. The order is kept as long as a new
 /// one would not be clearly better, so cards do not jump while a card grows
 /// or shrinks a little. One column below 1100 points.
 pub fn masonry(ui: &mut Ui, id: &str, count: usize, mut add: impl FnMut(&mut Ui, usize)) {
@@ -908,12 +908,35 @@ pub fn masonry(ui: &mut Ui, id: &str, count: usize, mut add: impl FnMut(&mut Ui,
         }
         t
     };
+    // The split with the shortest taller column (the first card stays on
+    // the left; each column keeps the order of its cards). Few cards, so
+    // every split is tried; beyond that, each card goes where there is less.
     let mut greedy = vec![0usize; count];
-    let mut sums = [0.0f32; 2];
-    for (i, h) in heights.iter().enumerate() {
-        let c = usize::from(sums[1] < sums[0]);
-        greedy[i] = c;
-        sums[c] += h + GAP;
+    if count <= 12 {
+        let mut best = f32::INFINITY;
+        for mask in 0..(1u32 << count.saturating_sub(1)) {
+            let assign: Vec<usize> = (0..count)
+                .map(|i| {
+                    if i == 0 {
+                        0
+                    } else {
+                        ((mask >> (i - 1)) & 1) as usize
+                    }
+                })
+                .collect();
+            let [a, b] = totals(&assign);
+            if a.max(b) + 0.5 < best {
+                best = a.max(b);
+                greedy = assign;
+            }
+        }
+    } else {
+        let mut sums = [0.0f32; 2];
+        for (i, h) in heights.iter().enumerate() {
+            let c = usize::from(sums[1] < sums[0]);
+            greedy[i] = c;
+            sums[c] += h + GAP;
+        }
     }
     let previous: Option<Vec<usize>> = ui.data(|d| d.get_temp(columns_id));
     let assign = match previous.filter(|p| p.len() == count) {
@@ -1107,7 +1130,7 @@ pub fn preview_message(ui: &mut Ui, title: &str, body: &str, warning: bool) {
 }
 
 /// A tile with a big number and a caption, for overviews.
-pub fn stat_tile(ui: &mut Ui, value: &str, caption: &str, color: Color32) {
+fn stat_tile_sized(ui: &mut Ui, value: &str, caption: &str, color: Color32, width: f32) {
     let p = *palette(ui);
     Frame::new()
         .fill(p.raised)
@@ -1115,7 +1138,7 @@ pub fn stat_tile(ui: &mut Ui, value: &str, caption: &str, color: Color32) {
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::symmetric(18, 12))
         .show(ui, |ui| {
-            ui.set_min_width(150.0);
+            ui.set_width(width);
             ui.vertical(|ui| {
                 ui.label(
                     egui::RichText::new(value)
@@ -1123,11 +1146,35 @@ pub fn stat_tile(ui: &mut Ui, value: &str, caption: &str, color: Color32) {
                         .color(color)
                         .family(FontFamily::Name(SERIF.into())),
                 );
-                ui.label(
-                    egui::RichText::new(caption)
-                        .size(13.0)
-                        .color(p.text_secondary),
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(caption)
+                            .size(13.0)
+                            .color(p.text_secondary),
+                    )
+                    .truncate(),
                 );
             });
         });
+}
+
+/// Tiles in rows that fill the width: as many per row as fit at about 170
+/// points each (frames do not wrap by themselves).
+pub fn stat_tiles(ui: &mut Ui, tiles: &[(String, &str, Color32)]) {
+    const GAP: f32 = 12.0;
+    const MARGIN: f32 = 2.0 * 18.0 + 2.0;
+    let width = ui.available_width();
+    let per_row = (((width + GAP) / (170.0 + MARGIN + GAP)) as usize).clamp(1, tiles.len().max(1));
+    let inner = ((width - GAP * (per_row - 1) as f32) / per_row as f32 - MARGIN).floor();
+    for (r, row) in tiles.chunks(per_row).enumerate() {
+        if r > 0 {
+            ui.add_space(GAP);
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            for (value, caption, color) in row {
+                stat_tile_sized(ui, value, caption, *color, inner);
+            }
+        });
+    }
 }

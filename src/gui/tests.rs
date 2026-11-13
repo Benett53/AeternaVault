@@ -409,7 +409,7 @@ fn web_tab_manages_users() {
     harness.set_size(eframe::egui::vec2(1000.0, 2600.0));
     goto(&mut harness, View::Web);
     harness.run();
-    harness.get_by_label("Switch on the web interface");
+    harness.get_by_label("Web interface");
     harness
         .state_mut()
         .web

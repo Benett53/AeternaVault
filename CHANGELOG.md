@@ -18,6 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 
 ### Changed
 
+- The Web tab is rebuilt: connection, sign-in with the 2FA policy, access (networks, automatic blocking, countries, administrators, blocked addresses) and LDAP in balanced columns; roles with their permissions as cards; LDAP roles from directory groups (any group to any role) or given in AeternaVault. The self-signed certificate is explained where it is chosen. Failed sign-ins in Activity → Sign-ins (web) can be blocked with one click.
 - Switches instead of check boxes for settings that are on or off (green when on, grey when off, animated); chosen options are marked by their colour only, without a check mark. The same in the web interface.
 - Settings are placed in two balanced columns; cards no longer leave gaps or overlap when options wrap.
 - Shorter labels; number fields show “off” or “never” for 0.

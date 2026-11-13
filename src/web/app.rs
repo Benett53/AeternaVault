@@ -1595,7 +1595,7 @@ impl WebApp {
             .rev()
             .take(300)
             .map(|e| {
-                let action = match Self::blockable(&e.source, own) {
+                let action = match super::access::blockable(&e.source, own) {
                     Some(ip) if may_block && !e.ok => {
                         if blocked.blocking(ip).is_some() {
                             format!(
@@ -1631,14 +1631,6 @@ impl WebApp {
             ctx.t("Details", "Details"),
         ));
         html
-    }
-
-    /// The address at the start of a device label, if it may be blocked:
-    /// not this computer.
-    fn blockable(source: &str, own: Option<IpAddr>) -> Option<IpAddr> {
-        let ip: IpAddr = source.split(" · ").next()?.trim().parse().ok()?;
-        let ip = super::http::canonical(ip);
-        (!ip.is_loopback() && Some(ip) != own).then_some(ip)
     }
 
     // --- access -----------------------------------------------------------------------

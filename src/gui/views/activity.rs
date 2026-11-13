@@ -352,8 +352,11 @@ fn sign_ins(app: &mut AeternaApp, ui: &mut Ui, needle: &str, height: f32) {
         .max_height(height)
         .auto_shrink([false, true])
         .show(ui, |ui| {
+            let mut blocklist = crate::web::access::Blocklist::load(&app.paths.config_file);
+            let own = crate::web::tls::primary_address();
+            let mut block = None;
             egui::Grid::new("sign-ins-grid")
-                .num_columns(5)
+                .num_columns(6)
                 .striped(true)
                 .spacing([14.0, 4.0])
                 .show(ui, |ui| {
@@ -363,6 +366,7 @@ fn sign_ins(app: &mut AeternaApp, ui: &mut Ui, needle: &str, height: f32) {
                         tr("Address", "Adresse"),
                         tr("What", "Was"),
                         tr("Details", "Details"),
+                        "",
                     ] {
                         ui.label(egui::RichText::new(h).color(p.text_secondary).size(13.0));
                     }
@@ -402,8 +406,53 @@ fn sign_ins(app: &mut AeternaApp, ui: &mut Ui, needle: &str, height: f32) {
                                 .size(12.5)
                                 .color(p.text_secondary),
                         );
+                        match crate::web::access::blockable(&e.source, own) {
+                            Some(ip) if !e.ok => {
+                                if blocklist.blocking(ip).is_some() {
+                                    ui.label(
+                                        egui::RichText::new(tr("blocked", "gesperrt"))
+                                            .size(13.0)
+                                            .color(p.error),
+                                    );
+                                } else if widgets::button(
+                                    ui,
+                                    widgets::ButtonKind::Quiet,
+                                    tr("Block", "Sperren"),
+                                    true,
+                                )
+                                .on_hover_text(ip.to_string())
+                                .clicked()
+                                {
+                                    block = Some(ip);
+                                }
+                            }
+                            _ => {
+                                ui.label("");
+                            }
+                        }
                         ui.end_row();
                     }
                 });
+            if let Some(ip) = block {
+                let reason = tr(
+                    "blocked from the sign-in log",
+                    "aus dem Anmeldeprotokoll gesperrt",
+                );
+                if let Ok(true) =
+                    blocklist.add(&ip.to_string(), reason, &crate::audit::process_actor())
+                {
+                    match blocklist.save(&app.paths.config_file) {
+                        Ok(()) => crate::audit::record(
+                            &app.paths.config_file,
+                            crate::audit::Record::local("address-blocked")
+                                .target(ip.to_string())
+                                .details(vec![reason.to_string()]),
+                        ),
+                        Err(err) => {
+                            app.notify(crate::gui::widgets::NoticeKind::Error, err.to_string())
+                        }
+                    }
+                }
+            }
         });
 }

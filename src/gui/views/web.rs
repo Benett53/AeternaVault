@@ -48,6 +48,11 @@ pub struct WebUi {
     confirm_remove: Option<String>,
     /// The e-mail address being edited in a user's menu: (user, text).
     email_edit: Option<(String, String)>,
+    /// Address typed in to block.
+    block_address: String,
+    block_note: Option<Note>,
+    new_role_name: String,
+    role_note: Option<Note>,
     ldap_test_user: String,
     ldap_test_password: String,
     ldap_test: Arc<Mutex<Option<Result<String, String>>>>,
@@ -75,6 +80,10 @@ impl Default for WebUi {
             shown_password: None,
             confirm_remove: None,
             email_edit: None,
+            block_address: String::new(),
+            block_note: None,
+            new_role_name: String::new(),
+            role_note: None,
             ldap_test_user: String::new(),
             ldap_test_password: String::new(),
             ldap_test: Arc::new(Mutex::new(None)),
@@ -214,13 +223,6 @@ fn dot(ui: &mut Ui, color: egui::Color32) {
     ui.painter().circle_filled(rect.center(), 4.5, color);
 }
 
-/// A label in the left column of a settings grid.
-fn row_label(ui: &mut Ui, text: &str) {
-    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-        ui.label(RichText::new(text).strong());
-    });
-}
-
 fn path_field(ui: &mut Ui, path: &mut PathBuf, choose: &str, filter: (&str, &[&str])) {
     ui.horizontal(|ui| {
         let mut text = path.display().to_string();
@@ -243,9 +245,61 @@ fn path_field(ui: &mut Ui, path: &mut PathBuf, choose: &str, filter: (&str, &[&s
     });
 }
 
+/// Width of the label column in the settings cards.
+const LABEL: f32 = 160.0;
+
+/// A list of networks with a field per entry, a remove button and an add
+/// button; wrong entries are marked.
+fn network_list(ui: &mut Ui, lang: Lang, id: &str, list: &mut Vec<String>) {
+    let p = *palette(ui);
+    ui.push_id(id, |ui| {
+        ui.vertical(|ui| {
+            let mut remove = None;
+            for (i, net) in list.iter_mut().enumerate() {
+                ui.push_id(i, |ui| {
+                    ui.horizontal(|ui| {
+                        let bad = !net.trim().is_empty()
+                            && net.trim().parse::<crate::web::Network>().is_err();
+                        let mut edit = egui::TextEdit::singleline(net)
+                            .hint_text("192.168.1.0/24")
+                            .desired_width(190.0);
+                        if bad {
+                            edit = edit.text_color(p.error);
+                        }
+                        ui.add(edit).on_hover_text(if bad {
+                            tr(
+                                lang,
+                                "Not an address or network",
+                                "Keine Adresse und kein Netz",
+                            )
+                        } else {
+                            ""
+                        });
+                        if widgets::button(ui, ButtonKind::Quiet, "×", true).clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                });
+            }
+            if let Some(i) = remove {
+                list.remove(i);
+            }
+            if widgets::button(
+                ui,
+                ButtonKind::Quiet,
+                tr(lang, "+ Add network", "+ Netz hinzufügen"),
+                true,
+            )
+            .clicked()
+            {
+                list.push(String::new());
+            }
+        });
+    });
+}
+
 /// The Web tab.
 pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
-    let lang = app.lang;
     // Start a draft, or follow changes made elsewhere while nothing is edited.
     let unchanged = app.web.draft == app.web.draft_base;
     if app.web.draft.is_none()
@@ -273,19 +327,19 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             }
         })
         .collect();
-    widgets::split(ui, |ui, column| {
-        if column == 0 {
-            connection_card(app, ui, &mut draft);
-            ui.add_space(14.0);
-            security_card(lang, ui, &mut draft, &email_channels);
-        } else {
-            ldap_card(app, ui, &mut draft);
-        }
+    let roles = UserStore::load(&app.paths.config_file).role_names();
+    widgets::masonry(ui, "web", 4, |ui, item| match item {
+        0 => connection_card(app, ui, &mut draft),
+        1 => signin_card(app.lang, ui, &mut draft, &email_channels),
+        2 => access_card(app, ui, &mut draft),
+        _ => ldap_card(app, ui, &mut draft, &roles),
     });
     app.web.draft = Some(draft);
     apply_bar(app, ui, "bottom");
     ui.add_space(14.0);
     users_card(app, ui);
+    ui.add_space(14.0);
+    roles_card(app, ui);
     ui.add_space(14.0);
     audit_card(app, ui);
 }
@@ -299,20 +353,15 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
             tr(lang, "Web interface", "Web-Oberfläche"),
             tr(
                 lang,
-                "Shows jobs, backups and problems in a browser, also from other computers, and starts jobs and checks. Users sign in with their own name and password, or with their directory account; what they may do depends on their role. Restoring, deleting and changing settings stay in this window. The web interface runs while AeternaVault is open (also in the notification area), or with `aeternavault-cli web serve`.",
-                "Zeigt Aufträge, Sicherungen und Probleme im Browser, auch von anderen Computern, und startet Aufträge und Prüfungen. Benutzer melden sich mit eigenem Namen und Passwort oder mit ihrem Verzeichniskonto an; was sie dürfen, hängt von ihrer Rolle ab. Wiederherstellen, Löschen und Einstellungen bleiben in diesem Fenster. Die Web-Oberfläche läuft, solange AeternaVault geöffnet ist (auch im Infobereich), oder mit `aeternavault-cli web serve`.",
+                "Jobs, backups and problems in a browser, also from other computers. Users run jobs and checks as their role allows. Restoring, deleting and settings stay in this window. Runs while AeternaVault is open, or with `aeternavault-cli web serve`.",
+                "Aufträge, Sicherungen und Probleme im Browser, auch von anderen Computern. Benutzer starten Aufträge und Prüfungen, soweit ihre Rolle es erlaubt. Wiederherstellen, Löschen und Einstellungen bleiben in diesem Fenster. Läuft, solange AeternaVault geöffnet ist, oder mit `aeternavault-cli web serve`.",
             ),
         );
         let mut on = app.config.web.enabled;
         if widgets::switch(
             ui,
             &mut on,
-            RichText::new(tr(
-                lang,
-                "Switch on the web interface",
-                "Web-Oberfläche einschalten",
-            ))
-            .size(16.0),
+            RichText::new(tr(lang, "Web interface", "Web-Oberfläche")).size(16.0),
         )
         .changed()
         {
@@ -346,8 +395,8 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
                         p.warning,
                         tr(
                             lang,
-                            "Nobody can sign in yet: add a user below.",
-                            "Noch kann sich niemand anmelden: unten einen Benutzer hinzufügen.",
+                            "Nobody can sign in yet. Add a user below.",
+                            "Noch kann sich niemand anmelden. Unten einen Benutzer hinzufügen.",
                         ),
                     );
                 }
@@ -398,259 +447,599 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
             .server
             .as_ref()
             .map_or(0, |s| s.active_sessions().len());
+        let blocked = crate::web::access::Blocklist::load(&app.paths.config_file)
+            .entries
+            .len();
         ui.add_space(12.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
-            widgets::stat_tile(
-                ui,
-                &users.users.len().to_string(),
-                tr(lang, "users", "Benutzer"),
-                p.text,
-            );
-            widgets::stat_tile(
-                ui,
-                &active.to_string(),
-                tr(lang, "signed in now", "jetzt angemeldet"),
-                p.accent,
-            );
-            widgets::stat_tile(
-                ui,
-                &good.to_string(),
-                tr(lang, "sign-ins in 24 h", "Anmeldungen in 24 h"),
-                p.success,
-            );
-            widgets::stat_tile(
-                ui,
-                &bad.to_string(),
-                tr(lang, "failed in 24 h", "Fehlversuche in 24 h"),
-                if bad > 0 { p.error } else { p.text_secondary },
-            );
-        });
+        widgets::stat_tiles(
+            ui,
+            &[
+                (
+                    users.users.len().to_string(),
+                    tr(lang, "users", "Benutzer"),
+                    p.text,
+                ),
+                (
+                    active.to_string(),
+                    tr(lang, "signed in now", "jetzt angemeldet"),
+                    p.accent,
+                ),
+                (
+                    good.to_string(),
+                    tr(lang, "sign-ins in 24 h", "Anmeldungen in 24 h"),
+                    p.success,
+                ),
+                (
+                    bad.to_string(),
+                    tr(lang, "failed in 24 h", "Fehlversuche in 24 h"),
+                    if bad > 0 { p.error } else { p.text_secondary },
+                ),
+                (
+                    blocked.to_string(),
+                    tr(lang, "blocked addresses", "gesperrte Adressen"),
+                    if blocked > 0 {
+                        p.warning
+                    } else {
+                        p.text_secondary
+                    },
+                ),
+            ],
+        );
     });
 }
 
 fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
     let lang = app.lang;
-    let p = *palette(ui);
     let config_file = app.paths.config_file.clone();
     widgets::card(ui, |ui| {
         widgets::section_title(ui, tr(lang, "Connection", "Verbindung"));
-        egui::Grid::new("web-connection")
-            .num_columns(2)
-            .spacing([24.0, 12.0])
-            .show(ui, |ui| {
-                row_label(ui, tr(lang, "Reachable from", "Erreichbar von"));
+        widgets::field_row(
+            ui,
+            LABEL,
+            tr(lang, "Reachable from", "Erreichbar von"),
+            "",
+            |ui| {
                 let mut network = !web.local_only();
-                ui.vertical(|ui| {
-                    widgets::choice(ui, &mut network, false, tr(lang, "this computer only", "nur diesem Computer"));
-                    widgets::choice(ui, &mut network, true, tr(lang, "other computers in the network", "anderen Computern im Netzwerk"));
-                });
+                widgets::choice(
+                    ui,
+                    &mut network,
+                    false,
+                    tr(lang, "This computer", "Diesem Computer"),
+                );
+                widgets::choice(ui, &mut network, true, tr(lang, "Network", "Netzwerk"));
                 if network && web.local_only() {
                     web.bind = "0.0.0.0".into();
                 } else if !network && !web.local_only() {
                     web.bind = "127.0.0.1".into();
                 }
-                ui.end_row();
-
-                row_label(ui, "Port");
-                widgets::number(ui, &mut web.port, 1..=65535);
-                ui.end_row();
-
-                row_label(ui, tr(lang, "Encryption (HTTPS)", "Verschlüsselung (HTTPS)"));
-                ui.vertical(|ui| {
-                    let own = tr(lang, "certificate made by AeternaVault", "von AeternaVault erstelltes Zertifikat");
-                    if web.local_only() {
-                        if web.tls == TlsMode::Off {
-                            web.tls = TlsMode::Auto;
-                        }
-                        widgets::choice(ui, &mut web.tls, TlsMode::Auto, tr(lang, "none needed (this computer only)", "nicht nötig (nur dieser Computer)"));
-                    } else if matches!(web.tls, TlsMode::Auto | TlsMode::Off) {
-                        web.tls = TlsMode::SelfSigned;
-                    }
-                    widgets::choice(ui, &mut web.tls, TlsMode::SelfSigned, own);
-                    widgets::choice(ui,
-                        &mut web.tls,
-                        TlsMode::Files,
-                        tr(lang, "own certificate (e.g. from the company CA)", "eigenes Zertifikat (z. B. von der Firmen-CA)"),
-                    );
-                });
-                ui.end_row();
-
-                if web.tls == TlsMode::Files {
-                    let choose = tr(lang, "Choose…", "Auswählen…");
-                    row_label(ui, tr(lang, "Certificate (PEM)", "Zertifikat (PEM)"));
-                    path_field(ui, &mut web.cert_file, choose, ("PEM", &["pem", "crt", "cer"]));
-                    ui.end_row();
-                    row_label(ui, tr(lang, "Private key (PEM)", "Privater Schlüssel (PEM)"));
-                    path_field(ui, &mut web.key_file, choose, ("PEM", &["pem", "key"]));
-                    ui.end_row();
+            },
+        );
+        ui.add_space(6.0);
+        widgets::field_row(ui, LABEL, "Port", "", |ui| {
+            widgets::number(ui, &mut web.port, 1..=65535);
+        });
+        ui.add_space(6.0);
+        widgets::field_row(ui, LABEL, "HTTPS", "", |ui| {
+            if web.local_only() {
+                if web.tls == TlsMode::Off {
+                    web.tls = TlsMode::Auto;
                 }
+                widgets::choice(ui, &mut web.tls, TlsMode::Auto, tr(lang, "Off", "Aus"));
+            } else if matches!(web.tls, TlsMode::Auto | TlsMode::Off) {
+                web.tls = TlsMode::SelfSigned;
+            }
+            widgets::choice(
+                ui,
+                &mut web.tls,
+                TlsMode::SelfSigned,
+                tr(lang, "AeternaVault certificate", "AeternaVault-Zertifikat"),
+            );
+            widgets::choice(
+                ui,
+                &mut web.tls,
+                TlsMode::Files,
+                tr(lang, "Own certificate", "Eigenes Zertifikat"),
+            );
+        });
+        if web.local_only() && web.tls == TlsMode::Auto {
+            note(
+                ui,
+                tr(
+                    lang,
+                    "Not needed while only this computer connects: nothing leaves it.",
+                    "Nicht nötig, solange nur dieser Computer sich verbindet: Nichts verlässt ihn.",
+                ),
+            );
+        }
 
-                if web.uses_tls() && web.tls != TlsMode::Files {
-                    row_label(ui, tr(lang, "Fingerprint", "Fingerabdruck"));
-                    ui.vertical(|ui| match crate::web::tls::fingerprint(&config_file, web) {
-                        Some(fp) => {
-                            ui.label(RichText::new(&fp).monospace().size(12.0));
-                            ui.horizontal(|ui| {
-                                if widgets::button(ui, ButtonKind::Quiet, tr(lang, "Copy", "Kopieren"), true).clicked() {
-                                    ui.ctx().copy_text(fp.clone());
-                                }
-                                if widgets::button(ui, ButtonKind::Quiet, tr(lang, "Make a new one", "Neu erstellen"), true).clicked() {
-                                    let _ = crate::web::tls::renew(&config_file);
-                                    audit::record(&config_file, Record::local("web-certificate-renewed"));
-                                    app.web.server = None;
-                                }
-                            });
-                            note(
-                                ui,
-                                tr(lang, "Browsers warn once about this certificate. Compare this fingerprint with the one the browser shows.", "Browser warnen einmal vor diesem Zertifikat. Vergleiche diesen Fingerabdruck mit dem, den der Browser anzeigt."),
-                            );
-                        }
-                        None => {
-                            note(
-                                ui,
-                                tr(lang, "Made when the web interface starts.", "Wird beim Start der Web-Oberfläche erstellt."),
-                            );
-                        }
-                    });
-                    ui.end_row();
-                }
-
-                if !web.local_only() {
-                    row_label(ui, tr(lang, "Allowed networks", "Erlaubte Netze"));
-                    ui.vertical(|ui| {
-                        let mut remove = None;
-                        for (i, net) in web.allowed_networks.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
-                                let valid = net.trim().parse::<crate::web::Network>();
-                                let empty = net.trim().is_empty();
-                                let mut edit = egui::TextEdit::singleline(net)
-                                    .hint_text("192.168.1.0/24")
-                                    .desired_width(200.0);
-                                if valid.is_err() && !empty {
-                                    edit = edit.text_color(p.error);
-                                }
-                                ui.add(edit);
-                                if widgets::button(ui, ButtonKind::Quiet, "×", true).clicked() {
-                                    remove = Some(i);
-                                }
-                                if valid.is_err() && !empty {
-                                    ui.colored_label(
-                                        p.error,
-                                        tr(lang, "not an address or network (e.g. 192.168.1.0/24)", "keine Adresse und kein Netz (z. B. 192.168.1.0/24)"),
-                                    );
-                                }
-                            });
-                        }
-                        if let Some(i) = remove {
-                            web.allowed_networks.remove(i);
-                        }
-                        if widgets::button(ui, ButtonKind::Quiet, tr(lang, "+ Add network", "+ Netz hinzufügen"), true).clicked() {
-                            web.allowed_networks.push(String::new());
-                        }
-                        note(
-                            ui,
-                            if web.allowed_networks.is_empty() {
-                                tr(lang, "None: every network may connect. Example: 192.168.1.0/24 or a single address.", "Keine: jedes Netz darf sich verbinden. Beispiel: 192.168.1.0/24 oder eine einzelne Adresse.")
-                            } else {
-                                tr(lang, "Only these may connect; this computer always may.", "Nur diese dürfen sich verbinden; dieser Computer immer.")
-                            },
-                        );
-                    });
-                    ui.end_row();
-                }
+        let files = web.tls == TlsMode::Files;
+        widgets::reveal(ui, "web-cert-files", files, |ui| {
+            let choose = tr(lang, "Choose…", "Auswählen…");
+            ui.add_space(6.0);
+            widgets::field_row(ui, LABEL, tr(lang, "Certificate", "Zertifikat"), "", |ui| {
+                path_field(
+                    ui,
+                    &mut web.cert_file,
+                    choose,
+                    ("PEM", &["pem", "crt", "cer"]),
+                );
             });
+            widgets::field_row(
+                ui,
+                LABEL,
+                tr(lang, "Private key", "Privater Schlüssel"),
+                "",
+                |ui| {
+                    path_field(ui, &mut web.key_file, choose, ("PEM", &["pem", "key"]));
+                },
+            );
+            note(
+                ui,
+                tr(
+                    lang,
+                    "PEM files from the company CA or from Let's Encrypt (certbot, win-acme). Renewed files are used automatically, without a restart.",
+                    "PEM-Dateien von der Firmen-CA oder von Let's Encrypt (certbot, win-acme). Erneuerte Dateien werden automatisch verwendet, ohne Neustart.",
+                ),
+            );
+        });
+
+        let own = web.uses_tls() && !files;
+        widgets::reveal(ui, "web-cert-own", own, |ui| {
+            ui.add_space(6.0);
+            note(
+                ui,
+                tr(
+                    lang,
+                    "AeternaVault makes and signs this certificate itself. The connection is encrypted, but browsers do not know the issuer and warn once. Compare the fingerprint with the one the browser shows.",
+                    "AeternaVault erstellt und signiert dieses Zertifikat selbst. Die Verbindung ist verschlüsselt, aber Browser kennen den Aussteller nicht und warnen einmal. Vergleiche den Fingerabdruck mit dem, den der Browser anzeigt.",
+                ),
+            );
+            ui.add_space(4.0);
+            match crate::web::tls::fingerprint(&config_file, web) {
+                Some(fp) => {
+                    ui.add(egui::Label::new(RichText::new(&fp).monospace().size(12.0)).wrap());
+                    ui.horizontal(|ui| {
+                        if widgets::button(
+                            ui,
+                            ButtonKind::Quiet,
+                            tr(lang, "Copy", "Kopieren"),
+                            true,
+                        )
+                        .clicked()
+                        {
+                            ui.ctx().copy_text(fp.clone());
+                        }
+                        if widgets::button(
+                            ui,
+                            ButtonKind::Quiet,
+                            tr(lang, "Make a new one", "Neu erstellen"),
+                            true,
+                        )
+                        .on_hover_text(tr(
+                            lang,
+                            "After the computer's name or address changed.",
+                            "Nachdem sich Name oder Adresse des Computers geändert haben.",
+                        ))
+                        .clicked()
+                        {
+                            let _ = crate::web::tls::renew(&config_file);
+                            audit::record(&config_file, Record::local("web-certificate-renewed"));
+                            app.web.server = None;
+                        }
+                    });
+                }
+                None => note(
+                    ui,
+                    tr(
+                        lang,
+                        "Made when the web interface starts.",
+                        "Wird beim Start der Web-Oberfläche erstellt.",
+                    ),
+                ),
+            }
+        });
     });
 }
 
-fn security_card(lang: Lang, ui: &mut Ui, web: &mut WebSettings, email_channels: &[String]) {
+fn signin_card(lang: Lang, ui: &mut Ui, web: &mut WebSettings, email_channels: &[String]) {
+    use crate::web::access::MfaPolicy;
     widgets::card(ui, |ui| {
-        widgets::section_title(
+        widgets::section_title(ui, tr(lang, "Sign-in", "Anmeldung"));
+        widgets::field_row(
             ui,
-            tr(lang, "Sign-in and security", "Anmeldung und Sicherheit"),
+            LABEL,
+            tr(lang, "Sign out after", "Abmelden nach"),
+            "",
+            |ui| {
+                widgets::number(ui, &mut web.session_minutes, 1..=1440);
+                ui.label(tr(lang, "minutes idle", "Minuten Inaktivität"));
+            },
         );
-        egui::Grid::new("web-security")
-            .num_columns(2)
-            .spacing([24.0, 12.0])
-            .show(ui, |ui| {
-                row_label(ui, tr(lang, "Sign out after", "Abmelden nach"));
-                ui.horizontal(|ui| {
-                    widgets::number(ui, &mut web.session_minutes, 1..=1440);
-                    ui.label(tr(lang, "minutes idle", "Min. Inaktivität"));
-                });
-                ui.end_row();
+        ui.add_space(4.0);
+        widgets::field_row(
+            ui,
+            LABEL,
+            tr(lang, "Lock after", "Sperren nach"),
+            "",
+            |ui| {
+                widgets::number(ui, &mut web.lockout_attempts, 1..=100);
+                ui.label(tr(lang, "wrong sign-ins for", "Fehlversuchen für"));
+                widgets::number(ui, &mut web.lockout_minutes, 1..=1440);
+                ui.label(tr(lang, "min", "Min."));
+            },
+        );
+        ui.add_space(4.0);
+        widgets::field_row(
+            ui,
+            LABEL,
+            tr(lang, "Password length", "Passwortlänge"),
+            tr(
+                lang,
+                "A recommendation: shorter passwords are possible.",
+                "Eine Empfehlung: Kürzere Passwörter sind möglich.",
+            ),
+            |ui| {
+                widgets::number(ui, &mut web.recommended_password_length, 1..=128);
+                ui.label(tr(lang, "characters recommended", "Zeichen empfohlen"));
+            },
+        );
 
-                row_label(ui, tr(lang, "Lock after", "Sperre nach"));
-                ui.horizontal(|ui| {
-                    widgets::number(ui, &mut web.lockout_attempts, 1..=100);
-                    ui.label(tr(lang, "wrong sign-ins", "Fehlversuchen"));
-                });
-                ui.end_row();
-
-                row_label(ui, tr(lang, "Locked for", "Sperrdauer"));
-                ui.horizontal(|ui| {
-                    widgets::number(ui, &mut web.lockout_minutes, 1..=1440);
-                    ui.label(tr(lang, "minutes", "Minuten"));
-                });
-                ui.end_row();
-
-                row_label(ui, tr(lang, "Password length", "Passwortlänge"));
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        widgets::number(ui, &mut web.recommended_password_length, 1..=128);
-                        ui.label(tr(lang, "characters recommended", "Zeichen empfohlen"));
-                    });
-                    note(
-                        ui,
-                        tr(lang, "Shorter passwords are accepted with a note.", "Kürzere Passwörter werden mit Hinweis angenommen."),
-                    );
-                });
-                ui.end_row();
-
-                row_label(ui, tr(lang, "Second step", "Zweiter Schritt"));
-                ui.vertical(|ui| {
-                    widgets::switch(ui, &mut web.require_two_factor, tr(lang, "required for everybody", "für alle verlangen"));
-                    note(
-                        ui,
-                        tr(lang, "A code from an authenticator app or by e-mail after the password.", "Ein Code aus einer Authenticator-App oder per E-Mail nach dem Passwort."),
-                    );
-                });
-                ui.end_row();
-
-                row_label(ui, tr(lang, "Codes by e-mail", "Codes per E-Mail"));
-                ui.vertical(|ui| {
+        ui.add_space(14.0);
+        widgets::field_row(
+            ui,
+            LABEL,
+            "2FA",
+            tr(
+                lang,
+                "A second factor after the password: a code from an authenticator app or by e-mail.",
+                "Ein zweiter Faktor nach dem Passwort: ein Code aus einer Authenticator-App oder per E-Mail.",
+            ),
+            |ui| {
+                widgets::choice(
+                    ui,
+                    &mut web.mfa,
+                    MfaPolicy::Optional,
+                    tr(lang, "Optional", "Freiwillig"),
+                );
+                widgets::choice(
+                    ui,
+                    &mut web.mfa,
+                    MfaPolicy::Administrators,
+                    tr(lang, "Administrators", "Administratoren"),
+                );
+                widgets::choice(
+                    ui,
+                    &mut web.mfa,
+                    MfaPolicy::Everyone,
+                    tr(lang, "Everyone", "Alle"),
+                );
+            },
+        );
+        ui.add_space(4.0);
+        widgets::field_row(ui, LABEL, tr(lang, "Methods", "Methoden"), "", |ui| {
+            ui.vertical(|ui| {
+                widgets::switch(
+                    ui,
+                    &mut web.mfa_app,
+                    tr(lang, "Authenticator app", "Authenticator-App"),
+                );
+                widgets::switch(
+                    ui,
+                    &mut web.mfa_email,
+                    tr(lang, "Codes by e-mail", "Codes per E-Mail"),
+                );
+            });
+        });
+        if web.mfa != MfaPolicy::Optional && !web.mfa_app && !web.mfa_email {
+            ui.colored_label(
+                palette(ui).error,
+                tr(
+                    lang,
+                    "Allow at least one method.",
+                    "Mindestens eine Methode erlauben.",
+                ),
+            );
+        }
+        widgets::reveal(ui, "web-mfa-email", web.mfa_email, |ui| {
+            ui.add_space(4.0);
+            widgets::field_row(
+                ui,
+                LABEL,
+                tr(lang, "Sent through", "Gesendet über"),
+                "",
+                |ui| {
                     if email_channels.is_empty() {
                         note(
                             ui,
-                            tr(lang, "Set up an e-mail channel under Notifications to send sign-in codes by e-mail.", "Richte unter Benachrichtigungen einen E-Mail-Kanal ein, um Anmeldecodes per E-Mail zu senden."),
+                            tr(
+                                lang,
+                                "No e-mail channel yet. Set one up under Notifications.",
+                                "Noch kein E-Mail-Kanal. Unter Benachrichtigungen einrichten.",
+                            ),
                         );
                     } else {
-                        let first = tr(lang, "first e-mail channel", "erster E-Mail-Kanal");
-                        let shown = if web.email_channel.trim().is_empty() { first.to_string() } else { web.email_channel.clone() };
-                        ui.horizontal(|ui| {
-                            ui.label(tr(lang, "sent through", "gesendet über"));
-                            egui::ComboBox::from_id_salt("web-email-channel")
-                                .selected_text(shown)
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut web.email_channel, String::new(), first);
-                                    for name in email_channels {
-                                        ui.selectable_value(&mut web.email_channel, name.clone(), name);
-                                    }
-                                });
-                        });
-                        note(
-                            ui,
-                            tr(lang, "Users choose codes by e-mail under Account, or get them when a second step is required and their address is known (directory, or set here).", "Benutzer wählen Codes per E-Mail unter Konto, oder bekommen sie, wenn ein zweiter Schritt verlangt wird und ihre Adresse bekannt ist (Verzeichnis oder hier eingetragen)."),
-                        );
+                        let first = tr(lang, "First e-mail channel", "Erster E-Mail-Kanal");
+                        let shown = if web.email_channel.trim().is_empty() {
+                            first.to_string()
+                        } else {
+                            web.email_channel.clone()
+                        };
+                        egui::ComboBox::from_id_salt("web-email-channel")
+                            .selected_text(shown)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut web.email_channel, String::new(), first);
+                                for name in email_channels {
+                                    ui.selectable_value(&mut web.email_channel, name.clone(), name);
+                                }
+                            });
                     }
-                });
-                ui.end_row();
-            });
+                },
+            );
+        });
     });
 }
 
-fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
+fn access_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
+    use crate::web::access::{AdminAccess, Blocklist, GeoMode};
     let lang = app.lang;
+    let p = *palette(ui);
+    let config_file = app.paths.config_file.clone();
+    widgets::card(ui, |ui| {
+        widgets::section_title(ui, tr(lang, "Access", "Zugriff"));
+        if web.local_only() {
+            note(
+                ui,
+                tr(
+                    lang,
+                    "Only this computer can connect now. These rules apply once the network is allowed.",
+                    "Zurzeit kann sich nur dieser Computer verbinden. Diese Regeln gelten, sobald das Netzwerk erlaubt ist.",
+                ),
+            );
+            ui.add_space(8.0);
+        }
+        widgets::field_row(
+            ui,
+            LABEL,
+            tr(lang, "Allowed networks", "Erlaubte Netze"),
+            tr(
+                lang,
+                "None: every network. This computer always may connect.",
+                "Keine: jedes Netz. Dieser Computer darf sich immer verbinden.",
+            ),
+            |ui| network_list(ui, lang, "allowed", &mut web.allowed_networks),
+        );
+        ui.add_space(6.0);
+        widgets::field_row(
+            ui,
+            LABEL,
+            tr(lang, "Block automatically", "Automatisch sperren"),
+            tr(
+                lang,
+                "An address is blocked after this many wrong sign-ins within 24 hours. This computer is never blocked.",
+                "Eine Adresse wird nach so vielen falschen Anmeldungen innerhalb von 24 Stunden gesperrt. Dieser Computer wird nie gesperrt.",
+            ),
+            |ui| {
+                widgets::number_or(
+                    ui,
+                    &mut web.auto_block_after,
+                    0..=1000,
+                    tr(lang, "off", "aus"),
+                );
+                ui.label(tr(lang, "wrong sign-ins in 24 h", "Fehlversuche in 24 h"));
+            },
+        );
+        ui.add_space(6.0);
+        widgets::field_row(ui, LABEL, tr(lang, "Countries", "Länder"), "", |ui| {
+            widgets::choice(ui, &mut web.geo.mode, GeoMode::Off, tr(lang, "All", "Alle"));
+            widgets::choice(
+                ui,
+                &mut web.geo.mode,
+                GeoMode::Allow,
+                tr(lang, "Only these", "Nur diese"),
+            );
+            widgets::choice(
+                ui,
+                &mut web.geo.mode,
+                GeoMode::Block,
+                tr(lang, "All except these", "Alle außer diesen"),
+            );
+        });
+        widgets::reveal(ui, "web-geo", web.geo.mode != GeoMode::Off, |ui| {
+            ui.add_space(4.0);
+            widgets::field_row(
+                ui,
+                LABEL,
+                tr(lang, "Country codes", "Ländercodes"),
+                "",
+                |ui| {
+                    let mut text = web.geo.countries.join(", ");
+                    let bad = web.geo.codes().is_err();
+                    let mut edit = egui::TextEdit::singleline(&mut text)
+                        .hint_text("DE, AT, CH")
+                        .desired_width(190.0);
+                    if bad {
+                        edit = edit.text_color(p.error);
+                    }
+                    if ui.add(edit).changed() {
+                        web.geo.countries = text
+                            .split([',', ' '])
+                            .map(|c| c.trim().to_string())
+                            .filter(|c| !c.is_empty())
+                            .collect();
+                    }
+                },
+            );
+            widgets::field_row(
+                ui,
+                LABEL,
+                tr(lang, "Country database", "Länderdatenbank"),
+                "",
+                |ui| {
+                    path_field(
+                        ui,
+                        &mut web.geo.database,
+                        tr(lang, "Choose…", "Auswählen…"),
+                        ("MaxMind DB", &["mmdb"]),
+                    );
+                },
+            );
+            ui.horizontal_wrapped(|ui| {
+                note(
+                    ui,
+                    tr(
+                        lang,
+                        "A free .mmdb file: DB-IP IP to Country Lite or MaxMind GeoLite2 Country. Private networks are not checked.",
+                        "Eine kostenlose .mmdb-Datei: DB-IP IP to Country Lite oder MaxMind GeoLite2 Country. Private Netze werden nicht geprüft.",
+                    ),
+                );
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.hyperlink_to(
+                    "DB-IP Lite",
+                    "https://db-ip.com/db/download/ip-to-country-lite",
+                );
+                widgets::secondary_text(ui, "·");
+                ui.hyperlink_to(
+                    "MaxMind GeoLite2",
+                    "https://dev.maxmind.com/geoip/geolite2-free-geolocation-data",
+                );
+            });
+        });
+        ui.add_space(6.0);
+        widgets::field_row(
+            ui,
+            LABEL,
+            tr(lang, "Administrators", "Administratoren"),
+            tr(
+                lang,
+                "Where users may manage users and block addresses. Elsewhere they keep the other permissions of their role.",
+                "Von wo Benutzer verwalten und Adressen sperren dürfen. Anderswo behalten sie die übrigen Rechte ihrer Rolle.",
+            ),
+            |ui| {
+                widgets::choice(
+                    ui,
+                    &mut web.admin_access,
+                    AdminAccess::Anywhere,
+                    tr(lang, "Anywhere", "Überall"),
+                );
+                widgets::choice(
+                    ui,
+                    &mut web.admin_access,
+                    AdminAccess::ThisComputer,
+                    tr(lang, "This computer", "Dieser Computer"),
+                );
+                widgets::choice(
+                    ui,
+                    &mut web.admin_access,
+                    AdminAccess::Networks,
+                    tr(lang, "These networks", "Diese Netze"),
+                );
+            },
+        );
+        widgets::reveal(
+            ui,
+            "web-admin-networks",
+            web.admin_access == AdminAccess::Networks,
+            |ui| {
+                ui.add_space(4.0);
+                widgets::field_row(ui, LABEL, "", "", |ui| {
+                    network_list(ui, lang, "admin", &mut web.admin_networks);
+                });
+            },
+        );
+
+        // Blocked addresses apply at once, not with "Apply".
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(8.0);
+        let mut list = Blocklist::load(&config_file);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} ({})",
+                    tr(lang, "Blocked addresses", "Gesperrte Adressen"),
+                    list.entries.len()
+                ))
+                .strong(),
+            );
+            widgets::secondary_text(ui, tr(lang, "· applies at once", "· gilt sofort"));
+        });
+        ui.add_space(4.0);
+        let mut changed: Option<Record> = None;
+        let mut unblock = None;
+        for entry in list.entries.iter().rev() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&entry.address).monospace());
+                let by = if entry.by == "automatic" {
+                    tr(lang, "automatic", "automatisch").to_string()
+                } else {
+                    entry.by.clone()
+                };
+                let since = lang.relative_time(entry.since.with_timezone(&chrono::Local));
+                widgets::secondary_text(ui, format!("{since} · {by}")).on_hover_text(&entry.reason);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::button(
+                        ui,
+                        ButtonKind::Quiet,
+                        tr(lang, "Allow again", "Wieder zulassen"),
+                        true,
+                    )
+                    .clicked()
+                    {
+                        unblock = Some(entry.address.clone());
+                    }
+                });
+            });
+        }
+        if let Some(address) = unblock {
+            list.remove(&address);
+            changed = Some(Record::local("address-unblocked").target(address));
+        }
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut app.web.block_address)
+                    .hint_text(tr(lang, "Address or network", "Adresse oder Netz"))
+                    .desired_width(190.0),
+            );
+            let ready = !app.web.block_address.trim().is_empty();
+            if widgets::button(
+                ui,
+                ButtonKind::Secondary,
+                tr(lang, "Block", "Sperren"),
+                ready,
+            )
+            .clicked()
+            {
+                let address = app.web.block_address.trim().to_string();
+                match list.add(&address, "", &audit::process_actor()) {
+                    Ok(true) => {
+                        changed = Some(Record::local("address-blocked").target(address));
+                        app.web.block_address.clear();
+                        app.web.block_note = None;
+                    }
+                    Ok(false) => {
+                        app.web.block_note = Some(Note::Warn(
+                            tr(lang, "Blocked already.", "Schon gesperrt.").into(),
+                        ));
+                    }
+                    Err(err) => app.web.block_note = Some(Note::Bad(err)),
+                }
+            }
+        });
+        show_note(ui, &app.web.block_note);
+        if let Some(record) = changed {
+            match list.save(&config_file) {
+                Ok(()) => audit::record(&config_file, record),
+                Err(err) => app.notify(NoticeKind::Error, err.to_string()),
+            }
+        }
+    });
+}
+
+fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[String]) {
+    use crate::web::ldap::{GroupRole, RoleSource};
+    let lang = app.lang;
+    let en = lang == Lang::En;
     let p = *palette(ui);
     widgets::card(ui, |ui| {
         widgets::section_title_info(
@@ -658,8 +1047,8 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
             "LDAP / Active Directory",
             tr(
                 lang,
-                "Users sign in with their directory account. Their role comes from the groups below and is read again at every sign-in; users in none of them cannot sign in. Users created here keep working besides (e.g. as an emergency administrator).",
-                "Benutzer melden sich mit ihrem Verzeichniskonto an. Ihre Rolle kommt aus den Gruppen unten und wird bei jeder Anmeldung neu gelesen; wer in keiner davon ist, kann sich nicht anmelden. Hier angelegte Benutzer funktionieren weiterhin (z. B. als Notfall-Administrator).",
+                "Users sign in with their directory account. Users created here keep working besides, for example as an emergency administrator.",
+                "Benutzer melden sich mit ihrem Verzeichniskonto an. Hier angelegte Benutzer funktionieren weiterhin, zum Beispiel als Notfall-Administrator.",
             ),
         );
         let l = &mut web.ldap;
@@ -668,262 +1057,501 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
             &mut l.enabled,
             tr(
                 lang,
-                "Allow sign-in with the directory",
-                "Anmeldung über das Verzeichnis erlauben",
+                "Sign-in with the directory",
+                "Anmeldung über das Verzeichnis",
             ),
         );
-        if !l.enabled {
-            return;
-        }
-        // Label above field: directory names are long, and so they fit any width.
-        let width = ui.available_width().min(560.0);
-        let field = |ui: &mut Ui, label: &str| {
-            ui.add_space(10.0);
-            ui.label(RichText::new(label).strong());
-            ui.add_space(2.0);
-        };
+        let open = l.enabled;
+        widgets::reveal(ui, "web-ldap", open, |ui| {
+            let width = ui.available_width().min(560.0);
+            let field = |ui: &mut Ui, label: &str| {
+                ui.add_space(10.0);
+                widgets::secondary_text(ui, label);
+                ui.add_space(2.0);
+            };
 
-        field(ui, tr(lang, "Directory", "Verzeichnis"));
-        let mut kind = if l.user_filter == ldap::AD_FILTER {
-            0
-        } else if l.user_filter == ldap::OPENLDAP_FILTER {
-            1
-        } else {
-            2
-        };
-        let before = kind;
-        ui.horizontal_wrapped(|ui| {
-            widgets::choice(ui, &mut kind, 0, "Active Directory");
-            widgets::choice(ui, &mut kind, 1, "OpenLDAP");
-            if kind == 2 {
-                widgets::choice(ui, &mut kind, 2, tr(lang, "own filter", "eigener Filter"));
-            }
-        });
-        if kind != before {
-            match kind {
-                0 => {
-                    l.user_filter = ldap::AD_FILTER.into();
-                    l.nested_groups = true;
+            field(ui, tr(lang, "Directory", "Verzeichnis"));
+            let mut kind = if l.user_filter == ldap::AD_FILTER {
+                0
+            } else if l.user_filter == ldap::OPENLDAP_FILTER {
+                1
+            } else {
+                2
+            };
+            let before = kind;
+            ui.horizontal_wrapped(|ui| {
+                widgets::choice(ui, &mut kind, 0, "Active Directory");
+                widgets::choice(ui, &mut kind, 1, "OpenLDAP");
+                if kind == 2 {
+                    widgets::choice(ui, &mut kind, 2, tr(lang, "Own filter", "Eigener Filter"));
                 }
-                1 => {
-                    l.user_filter = ldap::OPENLDAP_FILTER.into();
-                    l.nested_groups = false;
+            });
+            if kind != before {
+                match kind {
+                    0 => {
+                        l.user_filter = ldap::AD_FILTER.into();
+                        l.nested_groups = true;
+                    }
+                    1 => {
+                        l.user_filter = ldap::OPENLDAP_FILTER.into();
+                        l.nested_groups = false;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
 
-        field(ui, "Server");
-        ui.add(
-            egui::TextEdit::singleline(&mut l.url)
-                .hint_text("ldaps://dc1.firma.local")
-                .desired_width(width),
-        );
-        if l.url.trim().to_ascii_lowercase().starts_with("ldap://") {
-            widgets::switch(
-                ui,
-                &mut l.starttls,
-                tr(lang, "encrypt with StartTLS", "mit StartTLS verschlüsseln"),
+            field(ui, "Server");
+            ui.add(
+                egui::TextEdit::singleline(&mut l.url)
+                    .hint_text("ldaps://dc1.firma.local")
+                    .desired_width(width),
             );
-            if !l.starttls {
-                widgets::switch(
-                    ui,
-                    &mut l.allow_unencrypted,
-                    tr(
+            let plain = l.url.trim().to_ascii_lowercase().starts_with("ldap://");
+            if plain {
+                widgets::switch(ui, &mut l.starttls, "StartTLS");
+                if !l.starttls {
+                    widgets::switch(
+                        ui,
+                        &mut l.allow_unencrypted,
+                        tr(lang, "Allow unencrypted", "Unverschlüsselt erlauben"),
+                    )
+                    .on_hover_text(tr(
                         lang,
-                        "allow unencrypted (tests only)",
-                        "unverschlüsselt erlauben (nur für Tests)",
-                    ),
+                        "For tests only: passwords can be read in the network.",
+                        "Nur für Tests: Passwörter sind im Netz lesbar.",
+                    ));
+                }
+            }
+
+            field(
+                ui,
+                tr(
+                    lang,
+                    "Own certificate authority",
+                    "Eigene Zertifizierungsstelle",
+                ),
+            );
+            path_field(
+                ui,
+                &mut l.ca_file,
+                tr(lang, "Choose…", "Auswählen…"),
+                ("PEM", &["pem", "crt", "cer"]),
+            );
+
+            field(ui, tr(lang, "Search account", "Suchkonto"));
+            ui.add(
+                egui::TextEdit::singleline(&mut l.bind_dn)
+                    .hint_text("CN=svc-backup,OU=Service,DC=firma,DC=local")
+                    .desired_width(width),
+            )
+            .on_hover_text(tr(
+                lang,
+                "Empty: anonymous. With {user}, e.g. {user}@firma.local, users search with their own account.",
+                "Leer: anonym. Mit {user}, z. B. {user}@firma.local, suchen Benutzer mit ihrem eigenen Konto.",
+            ));
+            if !l.bind_dn.trim().is_empty() && !l.binds_as_user() {
+                ui.add(
+                    egui::TextEdit::singleline(&mut l.bind_password)
+                        .password(true)
+                        .hint_text(tr(lang, "Password", "Passwort"))
+                        .desired_width(width.min(300.0)),
                 );
+            }
+
+            field(ui, tr(lang, "Search base", "Suchbasis"));
+            ui.add(
+                egui::TextEdit::singleline(&mut l.base_dn)
+                    .hint_text("DC=firma,DC=local")
+                    .desired_width(width),
+            );
+
+            field(ui, tr(lang, "User filter", "Benutzerfilter"));
+            ui.add(
+                egui::TextEdit::singleline(&mut l.user_filter)
+                    .desired_width(width)
+                    .font(egui::TextStyle::Monospace),
+            );
+
+            field(ui, tr(lang, "Roles from", "Rollen aus"));
+            ui.horizontal_wrapped(|ui| {
+                widgets::choice(
+                    ui,
+                    &mut l.role_source,
+                    RoleSource::Directory,
+                    tr(lang, "Directory groups", "Verzeichnisgruppen"),
+                );
+                widgets::choice(
+                    ui,
+                    &mut l.role_source,
+                    RoleSource::AeternaVault,
+                    "AeternaVault",
+                );
+            });
+            let by_groups = l.role_source == RoleSource::Directory;
+            widgets::reveal(ui, "web-ldap-groups", by_groups, |ui| {
+                ui.add_space(6.0);
                 note(
                     ui,
                     tr(
                         lang,
-                        "Without encryption, passwords can be read in the network.",
-                        "Ohne Verschlüsselung sind Passwörter im Netz lesbar.",
+                        "Read again at every sign-in. Members of several groups get the role with the most permissions; members of none cannot sign in.",
+                        "Bei jeder Anmeldung neu gelesen. Wer in mehreren Gruppen ist, bekommt die Rolle mit den meisten Rechten; wer in keiner ist, kann sich nicht anmelden.",
                     ),
                 );
-            }
-        } else {
-            note(
-                ui,
-                tr(
-                    lang,
-                    "ldaps:// is encrypted. Certificates trusted by this computer are accepted.",
-                    "ldaps:// ist verschlüsselt. Zertifikate, denen dieser Computer vertraut, werden akzeptiert.",
-                ),
-            );
-        }
-
-        field(
-            ui,
-            tr(
-                lang,
-                "Own certificate authority (optional)",
-                "Eigene Zertifizierungsstelle (optional)",
-            ),
-        );
-        path_field(
-            ui,
-            &mut l.ca_file,
-            tr(lang, "Choose…", "Auswählen…"),
-            ("PEM", &["pem", "crt", "cer"]),
-        );
-
-        field(ui, tr(lang, "Search account", "Suchkonto"));
-        ui.add(
-            egui::TextEdit::singleline(&mut l.bind_dn)
-                .hint_text("CN=svc-backup,OU=Service,DC=firma,DC=local")
-                .desired_width(width),
-        );
-        if !l.bind_dn.trim().is_empty() && !l.binds_as_user() {
-            ui.add(
-                egui::TextEdit::singleline(&mut l.bind_password)
-                    .password(true)
-                    .hint_text(tr(
-                        lang,
-                        "Password of the search account",
-                        "Passwort des Suchkontos",
-                    ))
-                    .desired_width(width.min(300.0)),
-            );
-        }
-        note(
-            ui,
-            tr(
-                lang,
-                "Empty: anonymous. With {user}, e.g. {user}@firma.local: users search with their own account.",
-                "Leer: anonym. Mit {user}, z. B. {user}@firma.local: Benutzer suchen mit ihrem eigenen Konto.",
-            ),
-        );
-
-        field(ui, tr(lang, "Search base", "Suchbasis"));
-        ui.add(
-            egui::TextEdit::singleline(&mut l.base_dn)
-                .hint_text("DC=firma,DC=local")
-                .desired_width(width),
-        );
-
-        field(ui, tr(lang, "User filter", "Benutzerfilter"));
-        ui.add(
-            egui::TextEdit::singleline(&mut l.user_filter)
-                .desired_width(width)
-                .font(egui::TextStyle::Monospace),
-        );
-
-        field(ui, tr(lang, "Groups and roles", "Gruppen und Rollen"));
-        egui::Grid::new("web-ldap-groups")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
+                ui.add_space(4.0);
+                let group_width = (width - 190.0).clamp(160.0, 380.0);
                 for (label, group, hint) in [
                     (
-                        tr(lang, "Administrators", "Administratoren"),
+                        users::Role::Admin,
                         &mut l.admin_group,
                         "CN=Backup-Admins,OU=Gruppen,DC=firma,DC=local",
                     ),
                     (
-                        tr(lang, "Operators", "Bediener"),
+                        users::Role::Operator,
                         &mut l.operator_group,
                         "CN=Backup-Operatoren,OU=Gruppen,DC=firma,DC=local",
                     ),
                     (
-                        tr(lang, "Viewers", "Betrachter"),
+                        users::Role::Viewer,
                         &mut l.viewer_group,
                         "CN=Backup-Leser,OU=Gruppen,DC=firma,DC=local",
                     ),
                 ] {
-                    ui.label(label);
-                    let w = (ui.available_width() - 4.0).clamp(160.0, 440.0);
-                    ui.add(
-                        egui::TextEdit::singleline(group)
-                            .hint_text(hint)
-                            .desired_width(w),
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(group)
+                                .hint_text(hint)
+                                .desired_width(group_width),
+                        );
+                        ui.label(label.name(en));
+                    });
+                }
+                let mut remove = None;
+                for (i, mapping) in l.group_roles.iter_mut().enumerate() {
+                    ui.push_id(("group-role", i), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut mapping.group)
+                                    .hint_text("CN=…,OU=Gruppen,DC=firma,DC=local")
+                                    .desired_width(group_width),
+                            );
+                            egui::ComboBox::from_id_salt("role")
+                                .selected_text(UserStore::role_label(&mapping.role, en))
+                                .show_ui(ui, |ui| {
+                                    for role in roles {
+                                        ui.selectable_value(
+                                            &mut mapping.role,
+                                            role.clone(),
+                                            UserStore::role_label(role, en),
+                                        );
+                                    }
+                                });
+                            if widgets::button(ui, ButtonKind::Quiet, "×", true).clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    });
+                }
+                if let Some(i) = remove {
+                    l.group_roles.remove(i);
+                }
+                if widgets::button(
+                    ui,
+                    ButtonKind::Quiet,
+                    tr(lang, "+ Add group", "+ Gruppe hinzufügen"),
+                    true,
+                )
+                .clicked()
+                {
+                    l.group_roles.push(GroupRole {
+                        group: String::new(),
+                        role: "viewer".into(),
+                    });
+                }
+                widgets::switch(
+                    ui,
+                    &mut l.nested_groups,
+                    tr(lang, "Nested groups", "Verschachtelte Gruppen"),
+                )
+                .on_hover_text(tr(
+                    lang,
+                    "Active Directory: membership through groups inside groups counts too.",
+                    "Active Directory: Mitgliedschaft über Gruppen in Gruppen zählt mit.",
+                ));
+            });
+            widgets::reveal(ui, "web-ldap-own-roles", !by_groups, |ui| {
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    widgets::secondary_text(
+                        ui,
+                        tr(
+                            lang,
+                            "Role at the first sign-in",
+                            "Rolle bei der ersten Anmeldung",
+                        ),
                     );
-                    ui.end_row();
+                    egui::ComboBox::from_id_salt("ldap-default-role")
+                        .selected_text(if l.default_role.is_empty() {
+                            tr(lang, "None", "Keine").to_string()
+                        } else {
+                            UserStore::role_label(&l.default_role, en)
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut l.default_role,
+                                String::new(),
+                                tr(lang, "None", "Keine"),
+                            );
+                            for role in roles {
+                                ui.selectable_value(
+                                    &mut l.default_role,
+                                    role.clone(),
+                                    UserStore::role_label(role, en),
+                                );
+                            }
+                        });
+                });
+                note(
+                    ui,
+                    tr(
+                        lang,
+                        "The directory checks only the password. Roles are given and changed under Users; with none, an administrator assigns one first.",
+                        "Das Verzeichnis prüft nur das Passwort. Rollen werden unter Benutzer vergeben und geändert; ohne Rolle vergibt zuerst ein Administrator eine.",
+                    ),
+                );
+            });
+
+            ui.add_space(12.0);
+            ui.separator();
+            field(ui, tr(lang, "Test", "Testen"));
+            ui.horizontal_wrapped(|ui| {
+                let w = ((width - 16.0) / 2.0).clamp(140.0, 220.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.web.ldap_test_user)
+                        .hint_text(tr(lang, "User name", "Benutzername"))
+                        .desired_width(w),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.web.ldap_test_password)
+                        .password(true)
+                        .hint_text(tr(lang, "Password", "Passwort"))
+                        .desired_width(w),
+                );
+            });
+            ui.add_space(6.0);
+            let label = if app.web.ldap_testing {
+                tr(lang, "Testing…", "Teste…")
+            } else {
+                tr(lang, "Test connection", "Verbindung testen")
+            };
+            if widgets::button(ui, ButtonKind::Secondary, label, !app.web.ldap_testing)
+                .on_hover_text(tr(
+                    lang,
+                    "Without a password: connection and search. With user name and password: the whole sign-in including the role. Uses the values above, also before they are applied.",
+                    "Ohne Passwort: Verbindung und Suche. Mit Benutzername und Passwort: die ganze Anmeldung einschließlich Rolle. Nutzt die Werte oben, auch vor dem Übernehmen.",
+                ))
+                .clicked()
+            {
+                let mut settings: LdapSettings = l.clone();
+                settings.enabled = true;
+                let (user, password) = (
+                    app.web.ldap_test_user.clone(),
+                    app.web.ldap_test_password.clone(),
+                );
+                let slot = app.web.ldap_test.clone();
+                let ctx = ui.ctx().clone();
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                app.web.ldap_testing = true;
+                std::thread::spawn(move || {
+                    let result = ldap::test(&settings, &user, &password);
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+                    ctx.request_repaint();
+                });
+            }
+            let result = app
+                .web
+                .ldap_test
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(result) = result {
+                app.web.ldap_testing = false;
+                let (color, text) = match result {
+                    Ok(text) => (p.success, text),
+                    Err(text) => (p.error, text),
+                };
+                ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
+            }
+        });
+    });
+}
+
+/// Roles: the built-in ones for reference, own ones with their permissions.
+fn roles_card(app: &mut AeternaApp, ui: &mut Ui) {
+    let lang = app.lang;
+    let en = lang == Lang::En;
+    let p = *palette(ui);
+    let config_file = app.paths.config_file.clone();
+    let mut store = UserStore::load(&config_file);
+    let mut changed: Option<Record> = None;
+    widgets::card(ui, |ui| {
+        widgets::section_title_info(
+            ui,
+            tr(lang, "Roles", "Rollen"),
+            tr(
+                lang,
+                "What users may do in the web interface. Viewer, Operator and Administrator are built in; own roles combine permissions freely.",
+                "Was Benutzer in der Web-Oberfläche dürfen. Betrachter, Bediener und Administrator sind eingebaut; eigene Rollen kombinieren Rechte frei.",
+            ),
+        );
+        let columns = (((ui.available_width() + 16.0) / 236.0) as usize).clamp(1, 4);
+        let cell = (ui.available_width() - 16.0 * (columns - 1) as f32) / columns as f32;
+        let names = store.role_names();
+        let mut remove = None;
+        for chunk in names.chunks(columns) {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                for name in chunk {
+                    let builtin = users::Role::from_id(name).is_some();
+                    let perms = store.role_permissions(name).unwrap_or_default();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(cell, 0.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_width(cell);
+                            egui::Frame::new()
+                                .fill(p.raised)
+                                .stroke(egui::Stroke::new(1.0, p.border))
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .inner_margin(egui::Margin::same(12))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(UserStore::role_label(name, en)).strong(),
+                                        );
+                                        if builtin {
+                                            widgets::secondary_text(
+                                                ui,
+                                                tr(lang, "built in", "eingebaut"),
+                                            );
+                                        } else {
+                                            ui.with_layout(
+                                                Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    if widgets::button(
+                                                        ui,
+                                                        ButtonKind::Quiet,
+                                                        "×",
+                                                        true,
+                                                    )
+                                                    .on_hover_text(tr(
+                                                        lang,
+                                                        "Remove role",
+                                                        "Rolle entfernen",
+                                                    ))
+                                                    .clicked()
+                                                    {
+                                                        remove = Some(name.clone());
+                                                    }
+                                                },
+                                            );
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                    let mut edited = perms.clone();
+                                    for permission in users::Permission::ALL {
+                                        let mut on = edited.contains(&permission);
+                                        let response = ui
+                                            .add_enabled_ui(!builtin, |ui| {
+                                                ui.push_id((name, permission as u8), |ui| {
+                                                    widgets::switch(
+                                                        ui,
+                                                        &mut on,
+                                                        permission.name(en),
+                                                    )
+                                                })
+                                                .inner
+                                            })
+                                            .inner;
+                                        if response.changed() {
+                                            if on {
+                                                edited.push(permission);
+                                            } else {
+                                                edited.retain(|p| *p != permission);
+                                            }
+                                        }
+                                    }
+                                    if edited != perms {
+                                        match store.set_role(name, edited.clone()) {
+                                            Ok(()) => {
+                                                changed = Some(
+                                                    Record::local("role-changed")
+                                                        .target(name.clone())
+                                                        .details(vec![format!("{edited:?}")]),
+                                                );
+                                            }
+                                            Err(err) => app.web.role_note = Some(Note::Bad(err)),
+                                        }
+                                    }
+                                });
+                        },
+                    );
                 }
             });
-        widgets::switch(
-            ui,
-            &mut l.nested_groups,
-            tr(
-                lang,
-                "count nested groups (Active Directory)",
-                "verschachtelte Gruppen zählen (Active Directory)",
-            ),
-        );
-        note(
-            ui,
-            tr(
-                lang,
-                "At least one group. Members of several get the highest role; members of none cannot sign in.",
-                "Mindestens eine Gruppe. Wer in mehreren ist, bekommt die höchste Rolle; wer in keiner ist, kann sich nicht anmelden.",
-            ),
-        );
-
-        ui.add_space(12.0);
-        ui.separator();
-        field(ui, tr(lang, "Test", "Testen"));
-        ui.horizontal_wrapped(|ui| {
-            let w = ((width - 16.0) / 2.0).clamp(140.0, 220.0);
+            ui.add_space(12.0);
+        }
+        if let Some(name) = remove {
+            match store.remove_role(&name) {
+                Ok(()) => changed = Some(Record::local("role-removed").target(name)),
+                Err(err) => app.web.role_note = Some(Note::Bad(err)),
+            }
+        }
+        ui.horizontal(|ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut app.web.ldap_test_user)
-                    .hint_text(tr(lang, "User name (optional)", "Benutzername (optional)"))
-                    .desired_width(w),
+                egui::TextEdit::singleline(&mut app.web.new_role_name)
+                    .hint_text(tr(lang, "Name of a new role", "Name einer neuen Rolle"))
+                    .desired_width(220.0),
             );
-            ui.add(
-                egui::TextEdit::singleline(&mut app.web.ldap_test_password)
-                    .password(true)
-                    .hint_text(tr(lang, "Password (optional)", "Passwort (optional)"))
-                    .desired_width(w),
-            );
+            let ready = !app.web.new_role_name.trim().is_empty();
+            if widgets::button(
+                ui,
+                ButtonKind::Secondary,
+                tr(lang, "Add role", "Rolle hinzufügen"),
+                ready,
+            )
+            .clicked()
+            {
+                let name = app.web.new_role_name.trim().to_string();
+                if store.role_permissions(&name).is_some() {
+                    app.web.role_note = Some(Note::Bad(
+                        tr(
+                            lang,
+                            "This role exists already.",
+                            "Diese Rolle gibt es schon.",
+                        )
+                        .into(),
+                    ));
+                } else {
+                    match store.set_role(&name, vec![users::Permission::ViewActivity]) {
+                        Ok(()) => {
+                            changed = Some(Record::local("role-added").target(name));
+                            app.web.new_role_name.clear();
+                            app.web.role_note = None;
+                        }
+                        Err(err) => app.web.role_note = Some(Note::Bad(err)),
+                    }
+                }
+            }
         });
-        ui.add_space(6.0);
-        let label = if app.web.ldap_testing {
-            tr(lang, "Testing…", "Teste…")
-        } else {
-            tr(lang, "Test connection", "Verbindung testen")
-        };
-        if widgets::button(ui, ButtonKind::Secondary, label, !app.web.ldap_testing).clicked() {
-            let mut settings: LdapSettings = l.clone();
-            settings.enabled = true;
-            let (user, password) = (
-                app.web.ldap_test_user.clone(),
-                app.web.ldap_test_password.clone(),
-            );
-            let slot = app.web.ldap_test.clone();
-            let ctx = ui.ctx().clone();
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            app.web.ldap_testing = true;
-            std::thread::spawn(move || {
-                let result = ldap::test(&settings, &user, &password);
-                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
-                ctx.request_repaint();
-            });
-        }
-        let result = app
-            .web
-            .ldap_test
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(result) = result {
-            app.web.ldap_testing = false;
-            let (color, text) = match result {
-                Ok(text) => (p.success, text),
-                Err(text) => (p.error, text),
-            };
-            ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
-        }
-        note(
-            ui,
-            tr(
-                lang,
-                "Without a password the connection and the search are checked; with a user name and password the whole sign-in including the role. Tests use the values above, also before they are applied.",
-                "Ohne Passwort werden Verbindung und Suche geprüft; mit Benutzername und Passwort die ganze Anmeldung einschließlich Rolle. Getestet wird mit den Werten oben, auch vor dem Übernehmen.",
-            ),
-        );
+        show_note(ui, &app.web.role_note);
     });
+    if let Some(record) = changed {
+        match store.save(&config_file) {
+            Ok(()) => audit::record(&config_file, record),
+            Err(err) => app.notify(NoticeKind::Error, err.to_string()),
+        }
+    }
 }
 
 /// "Apply" and "Discard" while the draft differs from the saved settings.
@@ -1012,8 +1640,8 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
             tr(lang, "Users", "Benutzer"),
             tr(
                 lang,
-                "Viewer: overview, backups, activity. Operator: also runs, cancels and switches jobs and checks backups. Administrator: also users and the audit log. A user limited to jobs sees only those jobs and their destinations. Directory users appear here after their first sign-in.",
-                "Betrachter: Übersicht, Sicherungen, Verlauf. Bediener: startet, stoppt und schaltet außerdem Aufträge und prüft Sicherungen. Administrator: außerdem Benutzer und Audit-Log. Ein auf Aufträge beschränkter Benutzer sieht nur diese Aufträge und ihre Ziele. Verzeichnisbenutzer erscheinen hier nach ihrer ersten Anmeldung.",
+                "What a user may do comes from the role. A user limited to some jobs sees only those and their destinations. Directory users appear here after their first sign-in.",
+                "Was ein Benutzer darf, bestimmt die Rolle. Ein auf einige Aufträge beschränkter Benutzer sieht nur diese und ihre Ziele. Verzeichnisbenutzer erscheinen hier nach ihrer ersten Anmeldung.",
             ),
         );
 
@@ -1287,8 +1915,8 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                                         ui.label(
                                             RichText::new(tr(
                                                 lang,
-                                                "Only these jobs (none: all)",
-                                                "Nur diese Aufträge (keiner: alle)",
+                                                "Only these jobs",
+                                                "Nur diese Aufträge",
                                             ))
                                             .color(p.text_secondary),
                                         );
@@ -1356,78 +1984,85 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
             }
         }
 
-        ui.add_space(10.0);
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(tr(lang, "Add user", "Benutzer hinzufügen")).strong());
-                ui.add_space(4.0);
-                egui::Grid::new("web-add-user")
-                    .num_columns(2)
-                    .spacing([24.0, 8.0])
-                    .show(ui, |ui| {
-                        row_label(ui, tr(lang, "User name", "Benutzername"));
-                        ui.add(egui::TextEdit::singleline(&mut app.web.new_name).desired_width(220.0));
-                        ui.end_row();
-                        row_label(ui, tr(lang, "Password", "Passwort"));
-                        ui.vertical(|ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut app.web.new_password)
-                                    .password(true)
-                                    .desired_width(220.0),
-                            );
-                            if !app.web.new_password.is_empty() {
-                                crate::gui::dialogs::strength_meter(ui, &app.web.new_password, lang);
-                                let length = app.web.new_password.chars().count();
-                                if length < recommended as usize {
-                                    ui.colored_label(
-                                        p.warning,
-                                        if en {
-                                            format!("{length} of the recommended {recommended} characters. Allowed, but easier to guess.")
-                                        } else {
-                                            format!("{length} von empfohlenen {recommended} Zeichen. Erlaubt, aber leichter zu erraten.")
-                                        },
-                                    );
-                                }
-                            }
-                        });
-                        ui.end_row();
-                        row_label(ui, tr(lang, "Role", "Rolle"));
-                        let names = store.role_names();
-                        egui::ComboBox::from_id_salt("new-role")
-                            .selected_text(UserStore::role_label(&app.web.new_role, en))
-                            .show_ui(ui, |ui| {
-                                for role in &names {
-                                    ui.selectable_value(&mut app.web.new_role, role.clone(), UserStore::role_label(role, en));
-                                }
-                            });
-                        ui.end_row();
-                    });
-                ui.add_space(4.0);
-                let ready = !app.web.new_name.trim().is_empty() && !app.web.new_password.is_empty();
-                if widgets::button(ui, ButtonKind::Secondary, tr(lang, "Add", "Hinzufügen"), ready).clicked() {
-                    let name = app.web.new_name.trim().to_string();
-                    match store.add(&name, &app.web.new_role, &app.web.new_password) {
-                        Ok(()) => {
-                            changed = Some(
-                                Record::local("user-added")
-                                    .target(name.clone())
-                                    .details(vec![format!("role: {}", app.web.new_role)]),
-                            );
-                            let text = format!("{} {name}.", tr(lang, "Added:", "Hinzugefügt:"));
-                            app.web.user_note = Some(match users::password_advice(&app.web.new_password, recommended, en) {
-                                Some(advice) => Note::Warn(format!("{text} {advice}")),
-                                None => Note::Good(text),
-                            });
-                            app.web.new_name.clear();
-                            app.web.new_password.clear();
-                        }
-                        Err(err) => app.web.user_note = Some(Note::Bad(err)),
+        ui.add_space(12.0);
+        ui.label(RichText::new(tr(lang, "Add user", "Benutzer hinzufügen")).strong());
+        ui.add_space(4.0);
+        let mut add = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(10.0, 8.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut app.web.new_name)
+                    .hint_text(tr(lang, "User name", "Benutzername"))
+                    .desired_width(200.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut app.web.new_password)
+                    .password(true)
+                    .hint_text(tr(lang, "Initial password", "Startpasswort"))
+                    .desired_width(200.0),
+            );
+            let names = store.role_names();
+            egui::ComboBox::from_id_salt("new-role")
+                .selected_text(UserStore::role_label(&app.web.new_role, en))
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for role in &names {
+                        ui.selectable_value(
+                            &mut app.web.new_role,
+                            role.clone(),
+                            UserStore::role_label(role, en),
+                        );
                     }
-                }
-                show_note(ui, &app.web.user_note);
+                });
+            let ready = !app.web.new_name.trim().is_empty() && !app.web.new_password.is_empty();
+            add = widgets::button(
+                ui,
+                ButtonKind::Secondary,
+                tr(lang, "Add", "Hinzufügen"),
+                ready,
+            )
+            .clicked();
+        });
+        if !app.web.new_password.is_empty() {
+            ui.add_space(4.0);
+            ui.allocate_ui(egui::vec2(420.0_f32.min(ui.available_width()), 0.0), |ui| {
+                crate::gui::dialogs::strength_meter(ui, &app.web.new_password, lang);
             });
+            let length = app.web.new_password.chars().count();
+            if length < recommended as usize {
+                note(
+                    ui,
+                    if en {
+                        format!("{length} of {recommended} recommended characters")
+                    } else {
+                        format!("{length} von {recommended} empfohlenen Zeichen")
+                    },
+                );
+            }
+        }
+        if add {
+            let name = app.web.new_name.trim().to_string();
+            match store.add(&name, &app.web.new_role, &app.web.new_password) {
+                Ok(()) => {
+                    changed = Some(
+                        Record::local("user-added")
+                            .target(name.clone())
+                            .details(vec![format!("role: {}", app.web.new_role)]),
+                    );
+                    let text = format!("{} {name}.", tr(lang, "Added:", "Hinzugefügt:"));
+                    app.web.user_note = Some(
+                        match users::password_advice(&app.web.new_password, recommended, en) {
+                            Some(advice) => Note::Warn(format!("{text} {advice}")),
+                            None => Note::Good(text),
+                        },
+                    );
+                    app.web.new_name.clear();
+                    app.web.new_password.clear();
+                }
+                Err(err) => app.web.user_note = Some(Note::Bad(err)),
+            }
+        }
+        show_note(ui, &app.web.user_note);
     });
     if let Some(record) = changed {
         match store.save(&config_file) {

@@ -134,6 +134,14 @@ impl BlockCache {
     }
 }
 
+/// The address at the start of a device label (`203.0.113.7 · name · mac`)
+/// if it may be blocked: not this computer (`own`: its network address).
+pub fn blockable(source: &str, own: Option<IpAddr>) -> Option<IpAddr> {
+    let ip: IpAddr = source.split(" · ").next()?.trim().parse().ok()?;
+    let ip = canonical(ip);
+    (!ip.is_loopback() && Some(ip) != own).then_some(ip)
+}
+
 /// Wrong sign-ins per address over the last 24 hours, for automatic blocking.
 #[derive(Default)]
 pub struct FailureLog {
