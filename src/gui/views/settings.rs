@@ -265,7 +265,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label(t.adv_health_check)
                 .on_hover_text(t.tip_health_check);
-            ui.add(egui::DragValue::new(&mut app.config.advanced.health_check_days).range(0..=365))
+            widgets::number(ui, &mut app.config.advanced.health_check_days, 0..=365)
                 .on_hover_text(t.tip_health_check);
             ui.label(t.adv_health_check_days);
         });

@@ -2,6 +2,12 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Number fields in the window (retention, health check, notifications, Web tab) have arrows beside them: a click steps by one, held down it keeps counting, a click into the field lets you type the number. Dragging no longer changes a value, so a slip of the mouse cannot change a setting.
+
 ## [0.12.0] - 2026-11-13
 
 ### Added

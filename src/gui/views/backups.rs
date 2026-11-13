@@ -389,7 +389,7 @@ fn retention_card(app: &mut AeternaApp, ui: &mut Ui) {
                 (&mut retention.keep_weekly, t.retention_weeks),
                 (&mut retention.keep_monthly, t.retention_months),
             ] {
-                ui.add(egui::DragValue::new(value).range(0..=999).speed(0.2));
+                widgets::number(ui, value, 0..=999);
                 ui.label(egui::RichText::new(label).color(p.text_secondary));
                 ui.add_space(6.0);
             }

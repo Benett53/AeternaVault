@@ -28,15 +28,15 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         ui.checkbox(&mut n.on_skipped, t.notify_on_skipped);
         ui.horizontal_wrapped(|ui| {
             ui.label(t.notify_low_space);
-            ui.add(egui::DragValue::new(&mut n.low_space_percent).range(0..=99));
+            widgets::number(ui, &mut n.low_space_percent, 0..=99);
             ui.label(t.notify_low_space_or);
-            ui.add(egui::DragValue::new(&mut n.low_space_gb).range(0..=100_000));
+            widgets::number(ui, &mut n.low_space_gb, 0..=100_000);
             ui.label(t.notify_low_space_gb);
         });
         let open = ui
             .horizontal_wrapped(|ui| {
                 ui.label(t.notify_overdue);
-                ui.add(egui::DragValue::new(&mut n.overdue_days).range(0..=365));
+                widgets::number(ui, &mut n.overdue_days, 0..=365);
                 ui.label(t.notify_overdue_days);
                 widgets::info_icon(ui, "overdue", t.tip_overdue)
             })
@@ -215,7 +215,7 @@ fn channel_fields(ui: &mut Ui, channel: &mut crate::notify::Channel, lang: Lang)
                 );
                 widgets::secondary_text(ui, t.notify_field_port);
                 ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut channel.smtp_port).range(1..=65535));
+                    widgets::number(ui, &mut channel.smtp_port, 1..=65535);
                     ui.add_space(12.0);
                     widgets::secondary_text(ui, t.notify_field_security);
                     for (value, name) in [

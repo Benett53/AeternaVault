@@ -760,3 +760,63 @@ fn notices_disappear_on_their_own() {
     harness.step();
     assert!(harness.state().notices.is_empty());
 }
+
+/// Number fields: the arrows step by one within the range, typing works,
+/// and dragging does not change the value.
+#[test]
+fn number_fields_step_with_arrows_and_take_typed_values() {
+    use eframe::egui;
+    let mut harness = Harness::new_ui_state(
+        |ui, value: &mut u32| {
+            super::widgets::number(ui, value, 1..=5);
+        },
+        4u32,
+    );
+    harness.run();
+    let field = harness
+        .get_by_role(egui::accesskit::Role::SpinButton)
+        .rect();
+    // The arrows sit right of the field: upper half +1, lower half -1.
+    let x = field.max.x + 3.0 + 9.0;
+    let up = egui::pos2(x, field.top() + field.height() * 0.25);
+    let down = egui::pos2(x, field.top() + field.height() * 0.75);
+    let click = |h: &mut Harness<'_, u32>, pos: egui::Pos2| {
+        h.hover_at(pos);
+        h.step();
+        h.drag_at(pos);
+        h.step();
+        h.drop_at(pos);
+        h.step();
+        h.step();
+    };
+    click(&mut harness, up);
+    assert_eq!(*harness.state(), 5);
+    click(&mut harness, up);
+    assert_eq!(*harness.state(), 5, "not above the range");
+    click(&mut harness, down);
+    click(&mut harness, down);
+    assert_eq!(*harness.state(), 3);
+
+    // Dragging the field up does not change it.
+    let center = field.center();
+    harness.drag_at(center);
+    harness.step();
+    harness.hover_at(center - egui::vec2(0.0, 80.0));
+    harness.step();
+    harness.drop_at(center - egui::vec2(0.0, 80.0));
+    harness.step();
+    assert_eq!(*harness.state(), 3);
+
+    // Click into it and type.
+    harness
+        .get_by_role(egui::accesskit::Role::SpinButton)
+        .click();
+    harness.run();
+    harness.key_press(egui::Key::Backspace);
+    harness
+        .get_by_role(egui::accesskit::Role::SpinButton)
+        .type_text("2");
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(*harness.state(), 2);
+}

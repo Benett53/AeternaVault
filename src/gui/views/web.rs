@@ -378,7 +378,7 @@ fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                 ui.end_row();
 
                 row_label(ui, "Port");
-                ui.add(egui::DragValue::new(&mut web.port).range(1..=65535));
+                widgets::number(ui, &mut web.port, 1..=65535);
                 ui.end_row();
 
                 row_label(ui, tr(lang, "Encryption (HTTPS)", "Verschlüsselung (HTTPS)"));
@@ -500,7 +500,7 @@ fn security_card(lang: Lang, ui: &mut Ui, web: &mut WebSettings, email_channels:
             .show(ui, |ui| {
                 row_label(ui, tr(lang, "Sign out after", "Abmelden nach"));
                 ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut web.session_minutes).range(1..=1440));
+                    widgets::number(ui, &mut web.session_minutes, 1..=1440);
                     ui.label(tr(
                         lang,
                         "minutes without activity",
@@ -512,9 +512,9 @@ fn security_card(lang: Lang, ui: &mut Ui, web: &mut WebSettings, email_channels:
                 row_label(ui, tr(lang, "Wrong sign-ins", "Falsche Anmeldungen"));
                 ui.horizontal(|ui| {
                     ui.label(tr(lang, "after", "nach"));
-                    ui.add(egui::DragValue::new(&mut web.lockout_attempts).range(1..=100));
+                    widgets::number(ui, &mut web.lockout_attempts, 1..=100);
                     ui.label(tr(lang, "attempts wait", "Versuchen"));
-                    ui.add(egui::DragValue::new(&mut web.lockout_minutes).range(1..=1440));
+                    widgets::number(ui, &mut web.lockout_minutes, 1..=1440);
                     ui.label(tr(lang, "minutes", "Minuten warten"));
                 });
                 ui.end_row();
@@ -528,9 +528,7 @@ fn security_card(lang: Lang, ui: &mut Ui, web: &mut WebSettings, email_channels:
                     ),
                 );
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut web.recommended_password_length).range(1..=128),
-                    );
+                    widgets::number(ui, &mut web.recommended_password_length, 1..=128);
                     ui.label(tr(
                         lang,
                         "characters (a recommendation; shorter ones get a note)",

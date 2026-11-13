@@ -563,3 +563,119 @@ pub fn section_title_info(ui: &mut Ui, title: &str, info: &str) {
         .inner;
     info_text(ui, open, info);
 }
+
+/// A whole number: type it after a click into the field, or step it by one
+/// with the arrows beside it (held down, it keeps counting). Dragging does
+/// not change it, so a slip of the mouse never changes a setting.
+pub fn number<N: egui::emath::Numeric>(
+    ui: &mut Ui,
+    value: &mut N,
+    range: std::ops::RangeInclusive<N>,
+) -> Response {
+    let p = *palette(ui);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        let mut response = ui.add(
+            egui::DragValue::new(value)
+                .range(range.clone())
+                .speed(0.0)
+                .max_decimals(0),
+        );
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::Text);
+        }
+
+        let height = response.rect.height().max(20.0);
+        let (rect, arrows) =
+            ui.allocate_exact_size(Vec2::new(18.0, height), Sense::click_and_drag());
+        let center = rect.center().y;
+        let up = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, center));
+        let down = Rect::from_min_max(Pos2::new(rect.min.x, center), rect.max);
+        let pointer = arrows.interact_pointer_pos().or(arrows.hover_pos());
+        let direction = |pos: Pos2| if pos.y < center { 1.0 } else { -1.0 };
+
+        // One step per click; after holding for a moment, several per second.
+        let now = ui.input(|i| i.time);
+        let state = arrows.id.with("repeat");
+        let mut delta = 0.0;
+        if arrows.is_pointer_button_down_on() {
+            let (start, last, repeated) = ui
+                .data(|d| d.get_temp::<(f64, f64, bool)>(state))
+                .unwrap_or((now, now, false));
+            let mut next = (start, last, repeated);
+            if now - start > 0.45
+                && now - last > 0.07
+                && let Some(pos) = pointer
+            {
+                delta = direction(pos);
+                next = (start, now, true);
+            }
+            ui.data_mut(|d| d.insert_temp(state, next));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        if arrows.clicked() {
+            let repeated = ui
+                .data(|d| d.get_temp::<(f64, f64, bool)>(state))
+                .is_some_and(|s| s.2);
+            if !repeated && let Some(pos) = pointer {
+                delta = direction(pos);
+            }
+        }
+        if !arrows.is_pointer_button_down_on() {
+            ui.data_mut(|d| d.remove::<(f64, f64, bool)>(state));
+        }
+        if delta != 0.0 {
+            let stepped =
+                (value.to_f64() + delta).clamp(range.start().to_f64(), range.end().to_f64());
+            if stepped != value.to_f64() {
+                *value = N::from_f64(stepped);
+                response.mark_changed();
+            }
+        }
+
+        // Two small buttons with a triangle each.
+        let painter = ui.painter();
+        let visuals = ui.visuals().widgets.inactive;
+        painter.rect_filled(rect, CornerRadius::same(3), visuals.weak_bg_fill);
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(3),
+            Stroke::new(1.0, p.border),
+            egui::StrokeKind::Inside,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(rect.min.x + 2.0, center),
+                Pos2::new(rect.max.x - 2.0, center),
+            ],
+            Stroke::new(1.0, p.border),
+        );
+        for (half, pointing_up) in [(up, true), (down, false)] {
+            let hot = pointer.is_some_and(|pos| half.contains(pos)) && arrows.hovered();
+            if hot {
+                painter.rect_filled(half.shrink(1.0), CornerRadius::same(2), visuals.bg_fill);
+            }
+            let c = half.center();
+            let (w, h) = (4.0, 3.0);
+            let points = if pointing_up {
+                vec![
+                    Pos2::new(c.x - w, c.y + h / 2.0),
+                    Pos2::new(c.x + w, c.y + h / 2.0),
+                    Pos2::new(c.x, c.y - h),
+                ]
+            } else {
+                vec![
+                    Pos2::new(c.x - w, c.y - h / 2.0),
+                    Pos2::new(c.x + w, c.y - h / 2.0),
+                    Pos2::new(c.x, c.y + h),
+                ]
+            };
+            let color = if hot { p.text } else { p.text_secondary };
+            painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+        }
+        let arrows = arrows.on_hover_cursor(CursorIcon::PointingHand);
+        response | arrows
+    })
+    .inner
+}
