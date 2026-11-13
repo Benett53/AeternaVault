@@ -1676,9 +1676,10 @@ impl WebApp {
                     e.by.clone()
                 };
                 format!(
-                    r#"<tr><td><strong>{address}</strong></td><td class="nowrap">{since}</td><td>{by}</td><td>{reason}</td><td><form method="post" action="/access/unblock" class="inline">{csrf}<input type="hidden" name="address" value="{address}"><button class="secondary">{label}</button></form></td></tr>"#,
+                    r#"<tr><td class="nowrap"><strong>{address}</strong></td><td class="nowrap">{since}</td><td>{by}</td><td>{reason}</td><td><form method="post" action="/access/unblock" class="inline">{csrf}<input type="hidden" name="address" value="{address}"><button class="secondary">{label}</button></form></td></tr>"#,
                     address = esc(&e.address),
-                    since = esc(&Self::when(ctx, e.since)),
+                    // Already HTML with the exact time as title.
+                    since = Self::when(ctx, e.since),
                     by = esc(&by),
                     reason = esc(&e.reason),
                     label = ctx.t("Allow again", "Wieder zulassen"),
