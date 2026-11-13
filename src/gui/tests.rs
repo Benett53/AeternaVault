@@ -404,7 +404,7 @@ fn demo_schedules(config: &Config) -> Vec<crate::config::Schedule> {
 #[test]
 fn web_tab_manages_users() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut harness = harness(tmp.path(), |_| {});
+    let mut harness = harness(tmp.path(), |c| c.features.web = Some(true));
     // The tab is long; everything should be on screen for the clicks.
     harness.set_size(eframe::egui::vec2(1000.0, 2600.0));
     goto(&mut harness, View::Web);
@@ -819,4 +819,45 @@ fn number_fields_step_with_arrows_and_take_typed_values() {
     harness.key_press(egui::Key::Enter);
     harness.run();
     assert_eq!(*harness.state(), 2);
+}
+
+/// Optional parts appear only when switched on; existing settings keep what
+/// they use, a new installation starts lean.
+#[test]
+fn optional_parts_show_their_tab_only_when_switched_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut harness = harness(tmp.path(), |c| {
+        c.features.web = Some(false);
+        c.features.applications = Some(false);
+        c.notifications
+            .channels
+            .push(crate::notify::Channel::default());
+    });
+    harness.run();
+    let views = harness.state().visible_views();
+    assert!(!views.contains(&View::Web) && !views.contains(&View::Apps));
+    assert!(
+        views.contains(&View::Notifications),
+        "channels exist: still used"
+    );
+    goto(&mut harness, View::Web);
+    harness.run();
+    assert_ne!(
+        harness.state().view,
+        View::Web,
+        "a hidden tab cannot be opened"
+    );
+    harness.state_mut().config.features.web = Some(true);
+    harness.run();
+    assert!(harness.state().visible_views().contains(&View::Web));
+    goto(&mut harness, View::Web);
+    harness.run();
+    assert_eq!(harness.state().view, View::Web);
+    // Switched off while shown: back to the settings, where it was switched.
+    harness.state_mut().config.features.web = Some(false);
+    harness.run();
+    assert_eq!(harness.state().view, View::Settings);
+
+    let fresh = Config::first_run();
+    assert!(!fresh.notifications_on() && !fresh.applications_on() && !fresh.web_on());
 }

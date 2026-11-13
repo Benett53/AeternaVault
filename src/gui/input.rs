@@ -78,7 +78,16 @@ impl AeternaApp {
 
     /// Tabs that exist right now (the viewer shows only the backups).
     pub fn view_available(&self, view: View) -> bool {
-        self.viewer.is_none() || matches!(view, View::Restore | View::Backups)
+        if self.viewer.is_some() {
+            return matches!(view, View::Restore | View::Backups);
+        }
+        // Optional parts appear once switched on (Settings → Features).
+        match view {
+            View::Notifications => self.config.notifications_on(),
+            View::Apps => self.config.applications_on(),
+            View::Web => self.config.web_on(),
+            _ => true,
+        }
     }
 
     pub fn visible_views(&self) -> Vec<View> {

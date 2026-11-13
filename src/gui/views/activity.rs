@@ -56,9 +56,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                 (1, sign_ins),
                 (2, t.show_technical_log),
             ] {
-                if ui.selectable_label(mode == n, label).clicked() {
-                    mode = n;
-                }
+                widgets::choice(ui, &mut mode, n, label);
             }
         });
         ui.add_space(4.0);
@@ -300,7 +298,8 @@ fn sign_ins(app: &mut AeternaApp, ui: &mut Ui, needle: &str, height: f32) {
             );
             for (user, ip, since, idle) in active {
                 ui.label(format!(
-                    "{user} · {ip} · {} {} · {} {}",
+                    "{user} · {} · {} {} · {} {}",
+                    crate::web::device::describe(ip),
                     tr("signed in for", "angemeldet seit"),
                     lang.duration(since),
                     tr("idle for", "inaktiv seit"),

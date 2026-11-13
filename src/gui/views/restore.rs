@@ -190,9 +190,9 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
 
     widgets::card(ui, |ui| {
         widgets::section_title(ui, t.restore_target_title);
-        ui.radio_value(&mut app.restore.to_folder, false, t.restore_original);
+        widgets::choice(ui, &mut app.restore.to_folder, false, t.restore_original);
         ui.horizontal(|ui| {
-            ui.radio_value(&mut app.restore.to_folder, true, t.restore_folder);
+            widgets::choice(ui, &mut app.restore.to_folder, true, t.restore_folder);
             if app.restore.to_folder {
                 ui.add_space(8.0);
                 if widgets::button(ui, ButtonKind::Secondary, t.choose, true).clicked()
@@ -222,9 +222,14 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                 );
                 widgets::secondary_text(ui, t.conflict_title);
                 let conflict = &mut app.config.advanced.restore_conflict;
-                ui.radio_value(conflict, ConflictPolicy::ReplaceChanged, t.conflict_replace);
-                ui.radio_value(conflict, ConflictPolicy::KeepNewer, t.conflict_newer);
-                ui.radio_value(conflict, ConflictPolicy::KeepExisting, t.conflict_keep);
+                widgets::choice(
+                    ui,
+                    conflict,
+                    ConflictPolicy::ReplaceChanged,
+                    t.conflict_replace,
+                );
+                widgets::choice(ui, conflict, ConflictPolicy::KeepNewer, t.conflict_newer);
+                widgets::choice(ui, conflict, ConflictPolicy::KeepExisting, t.conflict_keep);
                 ui.add_space(6.0);
                 ui.checkbox(
                     &mut app.config.advanced.verify_on_restore,

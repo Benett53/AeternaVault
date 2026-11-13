@@ -53,6 +53,8 @@ pub struct WebUi {
     ldap_test: Arc<Mutex<Option<Result<String, String>>>>,
     ldap_testing: bool,
     audit_filter: String,
+    /// Audit entries shown (more after "Show more").
+    audit_shown: usize,
     /// When the configuration file was last read or written by this window.
     config_mtime: Option<SystemTime>,
     last_check: Instant,
@@ -78,6 +80,7 @@ impl Default for WebUi {
             ldap_test: Arc::new(Mutex::new(None)),
             ldap_testing: false,
             audit_filter: String::new(),
+            audit_shown: 50,
             config_mtime: None,
             last_check: Instant::now(),
         }
@@ -134,7 +137,10 @@ impl AeternaApp {
             }
         }
 
-        let wanted = self.background.is_some() && self.viewer.is_none() && self.config.web.enabled;
+        let wanted = self.background.is_some()
+            && self.viewer.is_none()
+            && self.config.web_on()
+            && self.config.web.enabled;
         let settings = &self.config.web;
         let matches = self
             .web
@@ -184,6 +190,24 @@ fn show_note(ui: &mut Ui, note: &Option<Note>) {
     }
 }
 
+/// A secondary text that wraps within its column (also in grid cells,
+/// where text would otherwise run past the edge).
+fn note(ui: &mut Ui, text: impl Into<String>) {
+    let p = *palette(ui);
+    let width = ui.available_width().max(160.0);
+    ui.allocate_ui(egui::vec2(width, 0.0), |ui| {
+        ui.set_max_width(width);
+        ui.add(
+            egui::Label::new(
+                RichText::new(text.into())
+                    .size(13.0)
+                    .color(p.text_secondary),
+            )
+            .wrap(),
+        );
+    });
+}
+
 /// A small coloured status dot (the fonts have no "●").
 fn dot(ui: &mut Ui, color: egui::Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
@@ -201,7 +225,10 @@ fn path_field(ui: &mut Ui, path: &mut PathBuf, choose: &str, filter: (&str, &[&s
     ui.horizontal(|ui| {
         let mut text = path.display().to_string();
         if ui
-            .add(egui::TextEdit::singleline(&mut text).desired_width(320.0))
+            .add(
+                egui::TextEdit::singleline(&mut text)
+                    .desired_width((ui.available_width() - 120.0).clamp(160.0, 320.0)),
+            )
             .changed()
         {
             *path = text.trim().into();
@@ -232,8 +259,6 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     apply_bar(app, ui, "top");
     ui.add_space(14.0);
     let mut draft = app.web.draft.take().expect("set above");
-    connection_card(app, ui, &mut draft);
-    ui.add_space(14.0);
     let email_channels: Vec<String> = app
         .config
         .notifications
@@ -248,9 +273,15 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             }
         })
         .collect();
-    security_card(lang, ui, &mut draft, &email_channels);
-    ui.add_space(14.0);
-    ldap_card(app, ui, &mut draft);
+    widgets::split(ui, |ui, column| {
+        if column == 0 {
+            connection_card(app, ui, &mut draft);
+            ui.add_space(14.0);
+            security_card(lang, ui, &mut draft, &email_channels);
+        } else {
+            ldap_card(app, ui, &mut draft);
+        }
+    });
     app.web.draft = Some(draft);
     apply_bar(app, ui, "bottom");
     ui.add_space(14.0);
@@ -331,7 +362,7 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
                 });
             }
             _ if app.config.web.enabled && app.background.is_none() => {
-                widgets::secondary_text(
+                note(
                     ui,
                     tr(
                         lang,
@@ -341,7 +372,7 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
                 );
             }
             _ => {
-                widgets::secondary_text(
+                note(
                     ui,
                     tr(
                         lang,
@@ -351,6 +382,50 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
                 );
             }
         }
+
+        // At a glance.
+        let day = chrono::Utc::now() - chrono::Duration::hours(24);
+        let log = audit::load(&app.paths.config_file);
+        let (good, bad) = log
+            .iter()
+            .filter(|e| e.at > day && e.action == "sign-in")
+            .fold(
+                (0, 0),
+                |(g, b), e| if e.ok { (g + 1, b) } else { (g, b + 1) },
+            );
+        let active = app
+            .web
+            .server
+            .as_ref()
+            .map_or(0, |s| s.active_sessions().len());
+        ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            widgets::stat_tile(
+                ui,
+                &users.users.len().to_string(),
+                tr(lang, "users", "Benutzer"),
+                p.text,
+            );
+            widgets::stat_tile(
+                ui,
+                &active.to_string(),
+                tr(lang, "signed in now", "jetzt angemeldet"),
+                p.accent,
+            );
+            widgets::stat_tile(
+                ui,
+                &good.to_string(),
+                tr(lang, "sign-ins in 24 h", "Anmeldungen in 24 h"),
+                p.success,
+            );
+            widgets::stat_tile(
+                ui,
+                &bad.to_string(),
+                tr(lang, "failed in 24 h", "Fehlversuche in 24 h"),
+                if bad > 0 { p.error } else { p.text_secondary },
+            );
+        });
     });
 }
 
@@ -367,8 +442,8 @@ fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                 row_label(ui, tr(lang, "Reachable from", "Erreichbar von"));
                 let mut network = !web.local_only();
                 ui.vertical(|ui| {
-                    ui.radio_value(&mut network, false, tr(lang, "this computer only", "nur diesem Computer"));
-                    ui.radio_value(&mut network, true, tr(lang, "other computers in the network", "anderen Computern im Netzwerk"));
+                    widgets::choice(ui, &mut network, false, tr(lang, "this computer only", "nur diesem Computer"));
+                    widgets::choice(ui, &mut network, true, tr(lang, "other computers in the network", "anderen Computern im Netzwerk"));
                 });
                 if network && web.local_only() {
                     web.bind = "0.0.0.0".into();
@@ -388,12 +463,12 @@ fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                         if web.tls == TlsMode::Off {
                             web.tls = TlsMode::Auto;
                         }
-                        ui.radio_value(&mut web.tls, TlsMode::Auto, tr(lang, "none needed (this computer only)", "nicht nötig (nur dieser Computer)"));
+                        widgets::choice(ui, &mut web.tls, TlsMode::Auto, tr(lang, "none needed (this computer only)", "nicht nötig (nur dieser Computer)"));
                     } else if matches!(web.tls, TlsMode::Auto | TlsMode::Off) {
                         web.tls = TlsMode::SelfSigned;
                     }
-                    ui.radio_value(&mut web.tls, TlsMode::SelfSigned, own);
-                    ui.radio_value(
+                    widgets::choice(ui, &mut web.tls, TlsMode::SelfSigned, own);
+                    widgets::choice(ui,
                         &mut web.tls,
                         TlsMode::Files,
                         tr(lang, "own certificate (e.g. from the company CA)", "eigenes Zertifikat (z. B. von der Firmen-CA)"),
@@ -426,13 +501,13 @@ fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                                     app.web.server = None;
                                 }
                             });
-                            widgets::secondary_text(
+                            note(
                                 ui,
                                 tr(lang, "Browsers warn once about this certificate. Compare this fingerprint with the one the browser shows.", "Browser warnen einmal vor diesem Zertifikat. Vergleiche diesen Fingerabdruck mit dem, den der Browser anzeigt."),
                             );
                         }
                         None => {
-                            widgets::secondary_text(
+                            note(
                                 ui,
                                 tr(lang, "Made when the web interface starts.", "Wird beim Start der Web-Oberfläche erstellt."),
                             );
@@ -473,7 +548,7 @@ fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                         if widgets::button(ui, ButtonKind::Quiet, tr(lang, "+ Add network", "+ Netz hinzufügen"), true).clicked() {
                             web.allowed_networks.push(String::new());
                         }
-                        widgets::secondary_text(
+                        note(
                             ui,
                             if web.allowed_networks.is_empty() {
                                 tr(lang, "None: every network may connect. Example: 192.168.1.0/24 or a single address.", "Keine: jedes Netz darf sich verbinden. Beispiel: 192.168.1.0/24 oder eine einzelne Adresse.")
@@ -501,57 +576,51 @@ fn security_card(lang: Lang, ui: &mut Ui, web: &mut WebSettings, email_channels:
                 row_label(ui, tr(lang, "Sign out after", "Abmelden nach"));
                 ui.horizontal(|ui| {
                     widgets::number(ui, &mut web.session_minutes, 1..=1440);
-                    ui.label(tr(
-                        lang,
-                        "minutes without activity",
-                        "Minuten ohne Aktivität",
-                    ));
+                    ui.label(tr(lang, "minutes idle", "Min. Inaktivität"));
                 });
                 ui.end_row();
 
-                row_label(ui, tr(lang, "Wrong sign-ins", "Falsche Anmeldungen"));
+                row_label(ui, tr(lang, "Lock after", "Sperre nach"));
                 ui.horizontal(|ui| {
-                    ui.label(tr(lang, "after", "nach"));
                     widgets::number(ui, &mut web.lockout_attempts, 1..=100);
-                    ui.label(tr(lang, "attempts wait", "Versuchen"));
-                    widgets::number(ui, &mut web.lockout_minutes, 1..=1440);
-                    ui.label(tr(lang, "minutes", "Minuten warten"));
+                    ui.label(tr(lang, "wrong sign-ins", "Fehlversuchen"));
                 });
                 ui.end_row();
 
-                row_label(
-                    ui,
-                    tr(
-                        lang,
-                        "Recommended password length",
-                        "Empfohlene Passwortlänge",
-                    ),
-                );
+                row_label(ui, tr(lang, "Locked for", "Sperrdauer"));
                 ui.horizontal(|ui| {
-                    widgets::number(ui, &mut web.recommended_password_length, 1..=128);
-                    ui.label(tr(
-                        lang,
-                        "characters (a recommendation; shorter ones get a note)",
-                        "Zeichen (Empfehlung; kürzere bekommen einen Hinweis)",
-                    ));
+                    widgets::number(ui, &mut web.lockout_minutes, 1..=1440);
+                    ui.label(tr(lang, "minutes", "Minuten"));
                 });
                 ui.end_row();
 
-                row_label(ui, tr(lang, "One-time codes", "Einmalcodes"));
-                ui.checkbox(
-                    &mut web.require_two_factor,
-                    tr(
-                        lang,
-                        "required for every user (authenticator app or e-mail)",
-                        "für jeden Benutzer verlangen (Authenticator-App oder E-Mail)",
-                    ),
-                );
+                row_label(ui, tr(lang, "Password length", "Passwortlänge"));
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        widgets::number(ui, &mut web.recommended_password_length, 1..=128);
+                        ui.label(tr(lang, "characters recommended", "Zeichen empfohlen"));
+                    });
+                    note(
+                        ui,
+                        tr(lang, "Shorter passwords are accepted with a note.", "Kürzere Passwörter werden mit Hinweis angenommen."),
+                    );
+                });
+                ui.end_row();
+
+                row_label(ui, tr(lang, "Second step", "Zweiter Schritt"));
+                ui.vertical(|ui| {
+                    ui.checkbox(&mut web.require_two_factor, tr(lang, "required for everybody", "für alle verlangen"));
+                    note(
+                        ui,
+                        tr(lang, "A code from an authenticator app or by e-mail after the password.", "Ein Code aus einer Authenticator-App oder per E-Mail nach dem Passwort."),
+                    );
+                });
                 ui.end_row();
 
                 row_label(ui, tr(lang, "Codes by e-mail", "Codes per E-Mail"));
                 ui.vertical(|ui| {
                     if email_channels.is_empty() {
-                        widgets::secondary_text(
+                        note(
                             ui,
                             tr(lang, "Set up an e-mail channel under Notifications to send sign-in codes by e-mail.", "Richte unter Benachrichtigungen einen E-Mail-Kanal ein, um Anmeldecodes per E-Mail zu senden."),
                         );
@@ -569,7 +638,7 @@ fn security_card(lang: Lang, ui: &mut Ui, web: &mut WebSettings, email_channels:
                                     }
                                 });
                         });
-                        widgets::secondary_text(
+                        note(
                             ui,
                             tr(lang, "Users choose codes by e-mail under Account, or get them when a second step is required and their address is known (directory, or set here).", "Benutzer wählen Codes per E-Mail unter Konto, oder bekommen sie, wenn ein zweiter Schritt verlangt wird und ihre Adresse bekannt ist (Verzeichnis oder hier eingetragen)."),
                         );
@@ -605,150 +674,229 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
         if !l.enabled {
             return;
         }
-        ui.add_space(6.0);
-        egui::Grid::new("web-ldap")
-            .num_columns(2)
-            .spacing([24.0, 10.0])
-            .show(ui, |ui| {
-                row_label(ui, tr(lang, "Directory", "Verzeichnis"));
-                ui.horizontal(|ui| {
-                    let ad = l.user_filter == ldap::AD_FILTER;
-                    let open = l.user_filter == ldap::OPENLDAP_FILTER;
-                    if ui.selectable_label(ad, "Active Directory").clicked() {
-                        l.user_filter = ldap::AD_FILTER.into();
-                        l.nested_groups = true;
-                    }
-                    if ui.selectable_label(open, "OpenLDAP").clicked() {
-                        l.user_filter = ldap::OPENLDAP_FILTER.into();
-                        l.nested_groups = false;
-                    }
-                    if !ad && !open {
-                        widgets::secondary_text(ui, tr(lang, "own filter", "eigener Filter"));
-                    }
-                });
-                ui.end_row();
+        // Label above field: directory names are long, and so they fit any width.
+        let width = ui.available_width().min(560.0);
+        let field = |ui: &mut Ui, label: &str| {
+            ui.add_space(10.0);
+            ui.label(RichText::new(label).strong());
+            ui.add_space(2.0);
+        };
 
-                row_label(ui, "Server");
-                ui.vertical(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut l.url).hint_text("ldaps://dc1.firma.local").desired_width(320.0));
-                    let plain = l.url.trim().to_ascii_lowercase().starts_with("ldap://");
-                    if plain {
-                        ui.checkbox(&mut l.starttls, tr(lang, "encrypt with StartTLS", "mit StartTLS verschlüsseln"));
-                        if !l.starttls {
-                            ui.checkbox(
-                                &mut l.allow_unencrypted,
-                                tr(lang, "allow unencrypted (passwords readable in the network; tests only)", "unverschlüsselt erlauben (Passwörter im Netz lesbar; nur für Tests)"),
-                            );
-                        }
-                    } else {
-                        widgets::secondary_text(
-                            ui,
-                            tr(lang, "ldaps:// is encrypted. Certificates trusted by this computer are accepted.", "ldaps:// ist verschlüsselt. Zertifikate, denen dieser Computer vertraut, werden akzeptiert."),
-                        );
-                    }
-                });
-                ui.end_row();
+        field(ui, tr(lang, "Directory", "Verzeichnis"));
+        let mut kind = if l.user_filter == ldap::AD_FILTER {
+            0
+        } else if l.user_filter == ldap::OPENLDAP_FILTER {
+            1
+        } else {
+            2
+        };
+        let before = kind;
+        ui.horizontal_wrapped(|ui| {
+            widgets::choice(ui, &mut kind, 0, "Active Directory");
+            widgets::choice(ui, &mut kind, 1, "OpenLDAP");
+            if kind == 2 {
+                widgets::choice(ui, &mut kind, 2, tr(lang, "own filter", "eigener Filter"));
+            }
+        });
+        if kind != before {
+            match kind {
+                0 => {
+                    l.user_filter = ldap::AD_FILTER.into();
+                    l.nested_groups = true;
+                }
+                1 => {
+                    l.user_filter = ldap::OPENLDAP_FILTER.into();
+                    l.nested_groups = false;
+                }
+                _ => {}
+            }
+        }
 
-                row_label(ui, tr(lang, "Own CA (optional)", "Eigene CA (optional)"));
-                path_field(ui, &mut l.ca_file, tr(lang, "Choose…", "Auswählen…"), ("PEM", &["pem", "crt", "cer"]));
-                ui.end_row();
-
-                row_label(ui, tr(lang, "Search account", "Suchkonto"));
-                ui.vertical(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut l.bind_dn)
-                            .hint_text("CN=svc-backup,OU=Service,DC=firma,DC=local")
-                            .desired_width(420.0),
-                    );
-                    if !l.bind_dn.trim().is_empty() && !l.binds_as_user() {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut l.bind_password)
-                                .password(true)
-                                .hint_text(tr(lang, "Password of the search account", "Passwort des Suchkontos"))
-                                .desired_width(240.0),
-                        );
-                    }
-                    widgets::secondary_text(
-                        ui,
-                        tr(lang, "Empty: anonymous. With {user}, e.g. {user}@firma.local: the user signing in searches with their own account.", "Leer: anonym. Mit {user}, z. B. {user}@firma.local: der Benutzer sucht mit seinem eigenen Konto."),
-                    );
-                });
-                ui.end_row();
-
-                row_label(ui, tr(lang, "Search base", "Suchbasis"));
-                ui.add(egui::TextEdit::singleline(&mut l.base_dn).hint_text("DC=firma,DC=local").desired_width(420.0));
-                ui.end_row();
-
-                row_label(ui, tr(lang, "User filter", "Benutzerfilter"));
-                ui.add(
-                    egui::TextEdit::singleline(&mut l.user_filter)
-                        .desired_width(420.0)
-                        .font(egui::TextStyle::Monospace),
+        field(ui, "Server");
+        ui.add(
+            egui::TextEdit::singleline(&mut l.url)
+                .hint_text("ldaps://dc1.firma.local")
+                .desired_width(width),
+        );
+        if l.url.trim().to_ascii_lowercase().starts_with("ldap://") {
+            ui.checkbox(
+                &mut l.starttls,
+                tr(lang, "encrypt with StartTLS", "mit StartTLS verschlüsseln"),
+            );
+            if !l.starttls {
+                ui.checkbox(
+                    &mut l.allow_unencrypted,
+                    tr(
+                        lang,
+                        "allow unencrypted (tests only)",
+                        "unverschlüsselt erlauben (nur für Tests)",
+                    ),
                 );
-                ui.end_row();
+                note(
+                    ui,
+                    tr(
+                        lang,
+                        "Without encryption, passwords can be read in the network.",
+                        "Ohne Verschlüsselung sind Passwörter im Netz lesbar.",
+                    ),
+                );
+            }
+        } else {
+            note(
+                ui,
+                tr(
+                    lang,
+                    "ldaps:// is encrypted. Certificates trusted by this computer are accepted.",
+                    "ldaps:// ist verschlüsselt. Zertifikate, denen dieser Computer vertraut, werden akzeptiert.",
+                ),
+            );
+        }
 
+        field(
+            ui,
+            tr(
+                lang,
+                "Own certificate authority (optional)",
+                "Eigene Zertifizierungsstelle (optional)",
+            ),
+        );
+        path_field(
+            ui,
+            &mut l.ca_file,
+            tr(lang, "Choose…", "Auswählen…"),
+            ("PEM", &["pem", "crt", "cer"]),
+        );
+
+        field(ui, tr(lang, "Search account", "Suchkonto"));
+        ui.add(
+            egui::TextEdit::singleline(&mut l.bind_dn)
+                .hint_text("CN=svc-backup,OU=Service,DC=firma,DC=local")
+                .desired_width(width),
+        );
+        if !l.bind_dn.trim().is_empty() && !l.binds_as_user() {
+            ui.add(
+                egui::TextEdit::singleline(&mut l.bind_password)
+                    .password(true)
+                    .hint_text(tr(
+                        lang,
+                        "Password of the search account",
+                        "Passwort des Suchkontos",
+                    ))
+                    .desired_width(width.min(300.0)),
+            );
+        }
+        note(
+            ui,
+            tr(
+                lang,
+                "Empty: anonymous. With {user}, e.g. {user}@firma.local: users search with their own account.",
+                "Leer: anonym. Mit {user}, z. B. {user}@firma.local: Benutzer suchen mit ihrem eigenen Konto.",
+            ),
+        );
+
+        field(ui, tr(lang, "Search base", "Suchbasis"));
+        ui.add(
+            egui::TextEdit::singleline(&mut l.base_dn)
+                .hint_text("DC=firma,DC=local")
+                .desired_width(width),
+        );
+
+        field(ui, tr(lang, "User filter", "Benutzerfilter"));
+        ui.add(
+            egui::TextEdit::singleline(&mut l.user_filter)
+                .desired_width(width)
+                .font(egui::TextStyle::Monospace),
+        );
+
+        field(ui, tr(lang, "Groups and roles", "Gruppen und Rollen"));
+        egui::Grid::new("web-ldap-groups")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
                 for (label, group, hint) in [
-                    (tr(lang, "Group: administrators", "Gruppe: Administratoren"), &mut l.admin_group, "CN=Backup-Admins,OU=Gruppen,DC=firma,DC=local"),
-                    (tr(lang, "Group: operators", "Gruppe: Bediener"), &mut l.operator_group, "CN=Backup-Operatoren,OU=Gruppen,DC=firma,DC=local"),
-                    (tr(lang, "Group: viewers", "Gruppe: Betrachter"), &mut l.viewer_group, "CN=Backup-Leser,OU=Gruppen,DC=firma,DC=local"),
+                    (
+                        tr(lang, "Administrators", "Administratoren"),
+                        &mut l.admin_group,
+                        "CN=Backup-Admins,OU=Gruppen,DC=firma,DC=local",
+                    ),
+                    (
+                        tr(lang, "Operators", "Bediener"),
+                        &mut l.operator_group,
+                        "CN=Backup-Operatoren,OU=Gruppen,DC=firma,DC=local",
+                    ),
+                    (
+                        tr(lang, "Viewers", "Betrachter"),
+                        &mut l.viewer_group,
+                        "CN=Backup-Leser,OU=Gruppen,DC=firma,DC=local",
+                    ),
                 ] {
-                    row_label(ui, label);
-                    ui.add(egui::TextEdit::singleline(group).hint_text(hint).desired_width(420.0));
+                    ui.label(label);
+                    let w = (ui.available_width() - 4.0).clamp(160.0, 440.0);
+                    ui.add(
+                        egui::TextEdit::singleline(group)
+                            .hint_text(hint)
+                            .desired_width(w),
+                    );
                     ui.end_row();
                 }
-                row_label(ui, "");
-                widgets::secondary_text(
-                    ui,
-                    tr(lang, "At least one group. Members of several get the highest role; members of none cannot sign in.", "Mindestens eine Gruppe. Wer in mehreren ist, bekommt die höchste Rolle; wer in keiner ist, kann sich nicht anmelden."),
-                );
-                ui.end_row();
-
-                row_label(ui, "");
-                ui.checkbox(
-                    &mut l.nested_groups,
-                    tr(lang, "count nested groups (Active Directory)", "verschachtelte Gruppen berücksichtigen (Active Directory)"),
-                );
-                ui.end_row();
             });
+        ui.checkbox(
+            &mut l.nested_groups,
+            tr(
+                lang,
+                "count nested groups (Active Directory)",
+                "verschachtelte Gruppen zählen (Active Directory)",
+            ),
+        );
+        note(
+            ui,
+            tr(
+                lang,
+                "At least one group. Members of several get the highest role; members of none cannot sign in.",
+                "Mindestens eine Gruppe. Wer in mehreren ist, bekommt die höchste Rolle; wer in keiner ist, kann sich nicht anmelden.",
+            ),
+        );
 
-        ui.add_space(8.0);
+        ui.add_space(12.0);
         ui.separator();
-        ui.label(RichText::new(tr(lang, "Test", "Testen")).strong());
+        field(ui, tr(lang, "Test", "Testen"));
         ui.horizontal_wrapped(|ui| {
+            let w = ((width - 16.0) / 2.0).clamp(140.0, 220.0);
             ui.add(
                 egui::TextEdit::singleline(&mut app.web.ldap_test_user)
                     .hint_text(tr(lang, "User name (optional)", "Benutzername (optional)"))
-                    .desired_width(220.0),
+                    .desired_width(w),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut app.web.ldap_test_password)
                     .password(true)
                     .hint_text(tr(lang, "Password (optional)", "Passwort (optional)"))
-                    .desired_width(220.0),
+                    .desired_width(w),
             );
-            let label = if app.web.ldap_testing {
-                tr(lang, "Testing…", "Teste…")
-            } else {
-                tr(lang, "Test connection", "Verbindung testen")
-            };
-            if widgets::button(ui, ButtonKind::Secondary, label, !app.web.ldap_testing).clicked() {
-                let mut settings: LdapSettings = l.clone();
-                settings.enabled = true;
-                let (user, password) = (
-                    app.web.ldap_test_user.clone(),
-                    app.web.ldap_test_password.clone(),
-                );
-                let slot = app.web.ldap_test.clone();
-                let ctx = ui.ctx().clone();
-                *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                app.web.ldap_testing = true;
-                std::thread::spawn(move || {
-                    let result = ldap::test(&settings, &user, &password);
-                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
-                    ctx.request_repaint();
-                });
-            }
         });
+        ui.add_space(6.0);
+        let label = if app.web.ldap_testing {
+            tr(lang, "Testing…", "Teste…")
+        } else {
+            tr(lang, "Test connection", "Verbindung testen")
+        };
+        if widgets::button(ui, ButtonKind::Secondary, label, !app.web.ldap_testing).clicked() {
+            let mut settings: LdapSettings = l.clone();
+            settings.enabled = true;
+            let (user, password) = (
+                app.web.ldap_test_user.clone(),
+                app.web.ldap_test_password.clone(),
+            );
+            let slot = app.web.ldap_test.clone();
+            let ctx = ui.ctx().clone();
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            app.web.ldap_testing = true;
+            std::thread::spawn(move || {
+                let result = ldap::test(&settings, &user, &password);
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+                ctx.request_repaint();
+            });
+        }
         let result = app
             .web
             .ldap_test
@@ -757,12 +905,13 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
             .clone();
         if let Some(result) = result {
             app.web.ldap_testing = false;
-            match result {
-                Ok(text) => ui.colored_label(p.success, text),
-                Err(text) => ui.colored_label(p.error, text),
+            let (color, text) = match result {
+                Ok(text) => (p.success, text),
+                Err(text) => (p.error, text),
             };
+            ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
         }
-        widgets::secondary_text(
+        note(
             ui,
             tr(
                 lang,
@@ -879,7 +1028,7 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                             app.web.shown_password = None;
                         }
                     });
-                    widgets::secondary_text(
+                    note(
                         ui,
                         tr(lang, "Shown only now. The user chooses a new one after signing in.", "Wird nur jetzt angezeigt. Der Benutzer wählt nach der Anmeldung ein neues."),
                     );
@@ -888,7 +1037,7 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
         }
 
         if store.users.is_empty() {
-            widgets::secondary_text(
+            note(
                 ui,
                 tr(
                     lang,
@@ -1168,7 +1317,7 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                                 });
                             });
                             if !user.jobs.is_empty() {
-                                widgets::secondary_text(
+                                note(
                                     ui,
                                     format!("{} {}", user.jobs.len(), tr(lang, "jobs", "Aufträge")),
                                 );
@@ -1280,7 +1429,7 @@ fn audit_card(app: &mut AeternaApp, ui: &mut Ui) {
             match audit::verify(&app.paths.config_file) {
                 Ok(v) if v.broken.is_empty() => {
                     dot(ui, p.success);
-                    widgets::secondary_text(
+                    note(
                         ui,
                         format!(
                             "{} {}",
@@ -1325,65 +1474,83 @@ fn audit_card(app: &mut AeternaApp, ui: &mut Ui) {
         });
         ui.add_space(6.0);
         let filter = app.web.audit_filter.to_lowercase();
-        let entries = audit::load(&app.paths.config_file);
-        egui::ScrollArea::vertical()
-            .max_height(360.0)
-            .id_salt("audit")
+        let entries: Vec<audit::AuditEntry> = audit::load(&app.paths.config_file)
+            .into_iter()
+            .rev()
+            .filter(|e| {
+                filter.is_empty()
+                    || [&e.actor, &e.source, &e.action, &e.target]
+                        .iter()
+                        .any(|f| f.to_lowercase().contains(&filter))
+                    || e.details.iter().any(|d| d.to_lowercase().contains(&filter))
+            })
+            .collect();
+        let shown = app.web.audit_shown.max(50);
+        // A plain table in the page (no scroll area of its own, which would
+        // shrink to a single line inside the scrolling page).
+        egui::Grid::new("audit-grid")
+            .num_columns(5)
+            .striped(true)
+            .spacing([20.0, 6.0])
+            .min_col_width(80.0)
             .show(ui, |ui| {
-                egui::Grid::new("audit-grid")
-                    .num_columns(4)
-                    .striped(true)
-                    .spacing([14.0, 4.0])
-                    .show(ui, |ui| {
-                        for h in [
-                            tr(lang, "When", "Wann"),
-                            tr(lang, "Who", "Wer"),
-                            tr(lang, "From", "Von wo"),
-                            tr(lang, "What", "Was"),
-                        ] {
-                            ui.label(RichText::new(h).color(p.text_secondary).size(13.0));
-                        }
-                        ui.end_row();
-                        for e in entries
-                            .iter()
-                            .rev()
-                            .filter(|e| {
-                                filter.is_empty()
-                                    || [&e.actor, &e.source, &e.action, &e.target]
-                                        .iter()
-                                        .any(|f| f.to_lowercase().contains(&filter))
-                                    || e.details.iter().any(|d| d.to_lowercase().contains(&filter))
-                            })
-                            .take(300)
-                        {
-                            ui.label(
-                                RichText::new(
-                                    e.at.with_timezone(&chrono::Local)
-                                        .format("%Y-%m-%d %H:%M:%S")
-                                        .to_string(),
-                                )
-                                .size(13.0),
-                            );
-                            ui.label(RichText::new(&e.actor).size(13.0));
-                            ui.label(RichText::new(&e.source).size(13.0).color(p.text_secondary));
-                            ui.vertical(|ui| {
-                                let what = format!("{} {}", e.action, e.target);
-                                if e.ok {
-                                    ui.label(RichText::new(what).size(13.0));
-                                } else {
-                                    ui.label(
-                                        RichText::new(format!("{what} ✗"))
-                                            .size(13.0)
-                                            .color(p.error),
-                                    );
-                                }
-                                for d in &e.details {
-                                    ui.label(RichText::new(d).size(12.0).color(p.text_secondary));
-                                }
-                            });
-                            ui.end_row();
-                        }
+                for h in [
+                    tr(lang, "When", "Wann"),
+                    tr(lang, "Who", "Wer"),
+                    tr(lang, "From", "Von wo"),
+                    tr(lang, "What", "Was"),
+                    tr(lang, "Details", "Details"),
+                ] {
+                    ui.label(RichText::new(h).color(p.text_secondary).size(13.0));
+                }
+                ui.end_row();
+                for e in entries.iter().take(shown) {
+                    ui.label(
+                        RichText::new(
+                            e.at.with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %H:%M:%S")
+                                .to_string(),
+                        )
+                        .size(13.5),
+                    );
+                    ui.label(RichText::new(&e.actor).size(13.5));
+                    ui.label(RichText::new(&e.source).size(13.5).color(p.text_secondary));
+                    ui.horizontal(|ui| {
+                        dot(ui, if e.ok { p.success } else { p.error });
+                        let what = format!("{} {}", e.action, e.target);
+                        ui.label(RichText::new(what).size(13.5).color(if e.ok {
+                            p.text
+                        } else {
+                            p.error
+                        }));
                     });
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(e.details.join(" · "))
+                                .size(13.0)
+                                .color(p.text_secondary),
+                        )
+                        .wrap(),
+                    );
+                    ui.end_row();
+                }
             });
+        if entries.len() > shown {
+            ui.add_space(6.0);
+            if widgets::button(
+                ui,
+                ButtonKind::Quiet,
+                &format!(
+                    "{} ({})",
+                    tr(lang, "Show more", "Mehr anzeigen"),
+                    entries.len() - shown
+                ),
+                true,
+            )
+            .clicked()
+            {
+                app.web.audit_shown = shown + 100;
+            }
+        }
     });
 }

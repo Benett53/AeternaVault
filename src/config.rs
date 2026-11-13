@@ -465,6 +465,82 @@ impl Default for Updates {
     }
 }
 
+/// Optional parts of the program. `None` (settings from before these
+/// switches existed): on if the part is already in use, so nothing an
+/// existing installation relies on disappears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Features {
+    /// Notifications after backups (tab and sending).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<bool>,
+    /// Detecting application data folders (tab).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applications: Option<bool>,
+    /// The web interface (tab and server).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web: Option<bool>,
+}
+
+/// How much is written to the technical log, and whether changes of the
+/// settings go to the audit log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoggingSettings {
+    pub level: LogLevel,
+    /// Every saved change of the settings, with the changed fields. Sign-ins
+    /// and changes of users of the web interface are always written.
+    pub audit_settings: bool,
+}
+
+impl Default for LoggingSettings {
+    fn default() -> Self {
+        Self {
+            level: LogLevel::Normal,
+            audit_settings: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogLevel {
+    /// Problems only.
+    Errors,
+    /// What happens, and problems.
+    #[default]
+    Normal,
+    /// Also details for finding faults.
+    Detailed,
+}
+
+impl Config {
+    pub fn notifications_on(&self) -> bool {
+        self.features
+            .notifications
+            .unwrap_or(!self.notifications.channels.is_empty())
+    }
+
+    pub fn applications_on(&self) -> bool {
+        self.features.applications.unwrap_or(true)
+    }
+
+    pub fn web_on(&self) -> bool {
+        self.features.web.unwrap_or(self.web.enabled)
+    }
+}
+
+/// The log level in the configuration file, read before the rest of the
+/// program starts (the log is set up first).
+pub fn log_level(paths: &AppPaths) -> LogLevel {
+    std::fs::read_to_string(&paths.config_file)
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(text.trim_start_matches('\u{feff}')).ok())
+        .and_then(|t| t.get("logging")?.get("level")?.as_str().map(String::from))
+        .and_then(|l| serde_json::from_value(serde_json::Value::String(l)).ok())
+        .unwrap_or_default()
+}
+
 /// How the web interface is reached. Users and their roles are kept apart
 /// from these settings, in `web-users.json` (see [`crate::web::users`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -589,6 +665,10 @@ pub struct Config {
     pub notifications: crate::notify::Notifications,
     /// The web interface (off unless switched on).
     pub web: WebSettings,
+    /// Which optional parts of the program are shown and used.
+    pub features: Features,
+    /// What is written to the logs.
+    pub logging: LoggingSettings,
     /// Name for the next backup (set from a job, not saved).
     #[serde(skip)]
     pub backup_label: Option<String>,
@@ -622,6 +702,8 @@ impl Default for Config {
             updates: Updates::default(),
             notifications: crate::notify::Notifications::default(),
             web: WebSettings::default(),
+            features: Features::default(),
+            logging: LoggingSettings::default(),
             backup_label: None,
             fonts: Fonts::default(),
             schedules: Vec::new(),
@@ -652,6 +734,13 @@ impl Config {
     pub fn first_run() -> Self {
         let mut config = Self {
             destination: platform::default_destination(),
+            // A new installation starts lean: optional parts are switched on
+            // in the settings when wanted.
+            features: Features {
+                notifications: Some(false),
+                applications: Some(false),
+                web: Some(false),
+            },
             ..Self::default()
         };
 
@@ -785,7 +874,10 @@ impl Config {
                 config
             });
         self.write(path)?;
-        if let Some(before) = before {
+        // Switching the audit of settings off is itself always recorded.
+        let audit = self.logging.audit_settings
+            || before.as_ref().is_some_and(|b| b.logging.audit_settings);
+        if let Some(before) = before.filter(|_| audit) {
             let changes = crate::audit::config_changes(&before, self);
             if !changes.is_empty() {
                 crate::audit::record(path, record.details(changes));

@@ -2,6 +2,20 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Settings → Features: notifications, applications and the web interface are switched on there; a part that is off disappears with its tab and keeps its settings. A new installation starts with all three off; existing settings keep what they use (notifications with channels, the applications tab, a web interface that was on). Adding a notification channel on the command line switches notifications on.
+- Settings → Logging: how much goes to the technical log (problems only, normal, detailed; from the next start) and whether changes of the settings go to the audit log.
+- Web interface: the overview shows tiles (jobs, last backup, share of complete backups, failures, free space), a chart of the backups of the last 30 days and a ring of the results, and jobs and destinations as cards.
+- Web interface: sign-ins, sessions and the audit log name the device with its network address, name (reverse DNS) and MAC address; a browser on the computer itself appears with the computer's address instead of 127.0.0.1.
+
+### Changed
+
+- The web interface looks like the window: the same colours (dark, or light when the browser prefers it), the logo, serif headings, gold buttons, sub-tabs as buttons, and layouts that adapt from phone to wide screen.
+- The window uses wide screens: content up to 1640 px wide, settings, notifications and the Web tab in two columns side by side when there is room, one below the other otherwise. Choices are buttons (the chosen one gold with a check mark) instead of radio circles. The destination shows how full the drive is. The Web tab shows tiles for users and sign-ins, its LDAP settings with the label above each field, and the audit log as a full table instead of a box of one line.
+
 ## [0.12.1] - 2026-11-13
 
 ### Changed

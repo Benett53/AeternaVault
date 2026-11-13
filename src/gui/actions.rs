@@ -234,8 +234,11 @@ impl AeternaApp {
         let key = self.vault.key.clone();
         self.snapshots_job = Some(Job::spawn(ctx, move |_, send| {
             let list = snapshots::list(&destination, key.as_ref());
-            let free = platform::free_space(&destination);
-            send((list, free));
+            let space = match platform::disk_space(&destination) {
+                Some((free, total)) => Some((free, Some(total))),
+                None => platform::free_space(&destination).map(|free| (free, None)),
+            };
+            send((list, space));
         }));
     }
 
@@ -383,7 +386,8 @@ impl AeternaApp {
                     }
                 }
                 self.snapshots = Some(list);
-                self.destination_free = free;
+                self.destination_free = free.map(|f| f.0);
+                self.destination_total = free.and_then(|f| f.1);
             }
             if finished {
                 self.snapshots_job = None;

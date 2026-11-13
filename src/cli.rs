@@ -2974,6 +2974,8 @@ fn notify_command(ctx: &mut Ctx, command: NotifyCommand) -> anyhow::Result<Outco
             }
             let label = channel.label();
             ctx.config.notifications.channels.push(channel);
+            // Adding a channel means notifications are wanted.
+            ctx.config.features.notifications = Some(true);
             ctx.save()?;
             ctx.print(&serde_json::json!({ "added": label }), || {
                 format!(
@@ -3127,6 +3129,9 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
                 crate::web::check_settings(&ctx.config.web).map_err(|e| anyhow!(e))?;
             }
             ctx.config.web.enabled = on;
+            if on {
+                ctx.config.features.web = Some(true);
+            }
             ctx.save()?;
             if on {
                 println!(

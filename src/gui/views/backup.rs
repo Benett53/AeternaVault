@@ -581,11 +581,20 @@ pub fn destination_status(app: &AeternaApp, ui: &mut Ui) {
                     .size(13.0),
             );
         }
-        Some(true) => {
-            if let Some(free) = app.destination_free {
+        Some(true) => match (app.destination_free, app.destination_total) {
+            (Some(free), Some(total)) if total > 0 => {
+                let used = 1.0 - free as f32 / total as f32;
+                widgets::usage_bar(
+                    ui,
+                    used,
+                    &format!("{} · {}", app.lang.free_space(free), app.lang.bytes(total)),
+                );
+            }
+            (Some(free), _) => {
                 widgets::secondary_text(ui, app.lang.free_space(free));
             }
-        }
+            _ => {}
+        },
         None => {}
     }
     if app.destination_shares_drive() {

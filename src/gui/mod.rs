@@ -263,7 +263,10 @@ impl Notice {
 
 /// Folder path with (bytes, files), or `None` if the folder is missing.
 type SizeLoad = (PathBuf, Option<(u64, u64)>);
-type SnapshotLoad = (Result<Vec<SnapshotInfo>, EngineError>, Option<u64>);
+type SnapshotLoad = (
+    Result<Vec<SnapshotInfo>, EngineError>,
+    Option<(u64, Option<u64>)>,
+);
 
 #[derive(Default)]
 pub struct RestoreUi {
@@ -428,6 +431,8 @@ pub struct AeternaApp {
     pub snapshots: Option<Result<Vec<SnapshotInfo>, EngineError>>,
     snapshots_job: Option<Job<SnapshotLoad>>,
     pub destination_free: Option<u64>,
+    /// Size of the destination drive, when known.
+    pub destination_total: Option<u64>,
 
     pub restore: RestoreUi,
     pub apps: AppsUi,
@@ -490,6 +495,7 @@ impl AeternaApp {
             snapshots: None,
             snapshots_job: None,
             destination_free: None,
+            destination_total: None,
             restore: RestoreUi::default(),
             apps: AppsUi::default(),
             tree: TreeUi::default(),
@@ -964,6 +970,10 @@ impl eframe::App for AeternaApp {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // A part switched off in the settings takes its tab with it.
+        if !self.view_available(self.view) {
+            self.view = View::Settings;
+        }
         self.handle_dropped_folders(&ctx);
         self.handle_shortcuts(&ctx);
 

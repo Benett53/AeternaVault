@@ -23,6 +23,10 @@ use crate::i18n::Lang;
 use crate::paths::AppPaths;
 
 const STYLE: &str = include_str!("style.css");
+const LOGO_DARK: &[u8] = include_bytes!("../../assets/logo/logo-dark-256.png");
+const LOGO_LIGHT: &[u8] = include_bytes!("../../assets/logo/logo-light-256.png");
+/// The logo of the window, light or dark like the page.
+const LOGO_TAG: &str = r#"<picture><source srcset="/logo-light.png" media="(prefers-color-scheme: light)"><img src="/logo.png" alt=""></picture>"#;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -91,7 +95,7 @@ impl Ctx<'_> {
     }
 
     fn record(&self, action: &str) -> Record {
-        Record::new(self.actor(), self.req.peer.to_string(), action)
+        Record::new(self.actor(), super::device::describe(self.req.peer), action)
     }
 
     fn lang(&self) -> Lang {
@@ -200,6 +204,15 @@ impl WebApp {
         }
         if !self.host_ok(&req) {
             return Response::text(403, "Forbidden");
+        }
+        if req.method == "GET" && (req.path == "/logo.png" || req.path == "/logo-light.png") {
+            let bytes = if req.path == "/logo.png" {
+                LOGO_DARK
+            } else {
+                LOGO_LIGHT
+            };
+            return Response::with_type(200, "image/png", bytes.to_vec())
+                .header("Cache-Control", "max-age=86400");
         }
         if req.method == "GET" && req.path == "/style.css" {
             return Response::with_type(200, "text/css; charset=utf-8", STYLE.as_bytes().to_vec())
@@ -324,9 +337,10 @@ impl WebApp {
             ""
         };
         Response::html(format!(
-            r#"<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{refresh}<title>{title} · AeternaVault</title><link rel="stylesheet" href="/style.css"></head><body><header><strong>AeternaVault</strong><span class="computer">{computer}</span><nav>{links}</nav><form method="post" action="/logout" class="inline">{csrf}<button class="link">{logout} ({user})</button></form></header><main><h1>{title}</h1>{body}</main></body></html>"#,
+            r#"<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{refresh}<title>{title} · AeternaVault</title><link rel="stylesheet" href="/style.css"><link rel="icon" href="/logo.png"></head><body><header><div class="bar"><a class="brand" href="/">{logo}<span>AeternaVault</span></a><span class="computer">{computer}</span><div class="account">{user}<form method="post" action="/logout" class="inline">{csrf}<button class="link">{logout}</button></form></div><nav class="main">{links}</nav></div></header><main><h1>{title}</h1>{body}</main></body></html>"#,
             lang = if ctx.en { "en" } else { "de" },
             title = esc(title),
+            logo = LOGO_TAG,
             computer = esc(&crate::platform::computer_name()),
             csrf = csrf_field(&ctx.session),
             logout = ctx.t("Sign out", "Abmelden"),
@@ -336,9 +350,10 @@ impl WebApp {
 
     fn bare(en: bool, title: &str, body: &str) -> Response {
         Response::html(format!(
-            r#"<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} · AeternaVault</title><link rel="stylesheet" href="/style.css"></head><body class="bare"><main class="narrow"><h1>AeternaVault</h1><p class="muted">{computer}</p>{body}</main></body></html>"#,
+            r#"<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} · AeternaVault</title><link rel="stylesheet" href="/style.css"><link rel="icon" href="/logo.png"></head><body class="bare"><div class="login"><div class="brand">{logo}<span>AeternaVault</span></div><span class="computer">{computer}</span>{body}</div></body></html>"#,
             lang = if en { "en" } else { "de" },
             title = esc(title),
+            logo = LOGO_TAG,
             computer = esc(&crate::platform::computer_name()),
         ))
     }
@@ -426,6 +441,8 @@ impl WebApp {
             .unwrap_or_default();
         let password = form.get("password").cloned().unwrap_or_default();
         let ip = req.peer.to_string();
+        // Address, name and MAC of the device, for the audit log.
+        let from = super::device::describe(req.peer);
         let user_key = format!("user:{}", name.to_lowercase());
         let wrong = t(
             "User name or password is not correct.",
@@ -434,7 +451,7 @@ impl WebApp {
         let failed = |reason: &str| {
             audit::record(
                 &self.paths.config_file,
-                Record::new(format!("web:{name}"), ip.clone(), "sign-in")
+                Record::new(format!("web:{name}"), from.clone(), "sign-in")
                     .details(vec![reason.to_string()])
                     .failed(),
             );
@@ -548,7 +565,7 @@ impl WebApp {
         let pending = factor.is_some();
         let (token, _) = lock(&self.sessions).create(&user.name, req.peer, pending);
         if factor == Some(SecondFactor::Email)
-            && let Err(err) = self.send_sign_in_code(&config, &token, &user, &ip)
+            && let Err(err) = self.send_sign_in_code(&config, &token, &user, &from)
         {
             lock(&self.sessions).end(&token);
             tracing::warn!(
@@ -571,7 +588,7 @@ impl WebApp {
             let _ = store.save(&self.paths.config_file);
             audit::record(
                 &self.paths.config_file,
-                Record::new(format!("web:{}", user.name), ip, "sign-in"),
+                Record::new(format!("web:{}", user.name), from, "sign-in"),
             );
         }
         Response::redirect(if pending { "/login/code" } else { "/" })
@@ -741,7 +758,12 @@ impl WebApp {
         if !lock(&self.email_codes).contains_key(&token) {
             return Response::redirect("/login/code");
         }
-        match self.send_sign_in_code(&self.config(), &token, &user, &req.peer.to_string()) {
+        match self.send_sign_in_code(
+            &self.config(),
+            &token,
+            &user,
+            &super::device::describe(req.peer),
+        ) {
             Ok(()) => self.code_page(req, en, None),
             Err(_) => self.code_page(
                 req,
@@ -761,7 +783,7 @@ impl WebApp {
         };
         let mut store = UserStore::load(&self.paths.config_file);
         let user_key = format!("code:{}", session.user.to_lowercase());
-        let ip = req.peer.to_string();
+        let ip = super::device::describe(req.peer);
         let code = req.form().get("code").cloned().unwrap_or_default();
         let by_mail = lock(&self.email_codes)
             .get_mut(&token)
@@ -860,6 +882,7 @@ impl WebApp {
         let config = &ctx.config;
         let state = crate::state::State::load(&self.paths.config_file);
         let operator = ctx.user.may(Role::Operator);
+        let csrf = csrf_field(&ctx.session);
         let mut body = Self::message(ctx);
 
         // Running now.
@@ -869,16 +892,15 @@ impl WebApp {
                 .unwrap_or(0);
             let cancel = if operator {
                 format!(
-                    r#"<form method="post" action="/jobs/cancel" class="inline">{}<button class="secondary">{}</button></form>"#,
-                    csrf_field(&ctx.session),
+                    r#"<form method="post" action="/jobs/cancel" class="inline">{csrf}<button class="secondary">{}</button></form>"#,
                     ctx.t("Cancel", "Abbrechen")
                 )
             } else {
                 String::new()
             };
             body.push_str(&format!(
-                r#"<section class="card running"><h2>{now}: {label}</h2><progress max="100" value="{percent}"></progress><p>{files} · {bytes} {cancel}</p></section>"#,
-                now = ctx.t("Running", "Läuft"),
+                r#"<section class="card"><h2>{now}</h2><h3>{label}</h3><p class="muted">{files} · {bytes} · {percent} %</p><progress max="100" value="{percent}"></progress><div class="row">{cancel}</div></section>"#,
+                now = ctx.t("Running now", "Läuft gerade"),
                 label = esc(&label),
                 files = esc(&format!("{} / {}", lang.count(progress.files_done), lang.count(progress.files_total))),
                 bytes = esc(&lang.bytes_of(progress.bytes_done, progress.bytes_total)),
@@ -886,8 +908,7 @@ impl WebApp {
         }
 
         // Overdue.
-        let overdue = crate::notify::overdue_jobs(config, &state, Utc::now());
-        for (schedule, last) in overdue
+        for (schedule, last) in crate::notify::overdue_jobs(config, &state, Utc::now())
             .iter()
             .filter(|(s, _)| ctx.user.may_use_job(Some(&s.id)))
         {
@@ -895,7 +916,7 @@ impl WebApp {
                 .map(|l| Self::when(ctx, l))
                 .unwrap_or_else(|| ctx.t("never", "noch nie").into());
             body.push_str(&format!(
-                r#"<p class="error">{}: {} ({} {})</p>"#,
+                r#"<p class="error"><strong>{}:</strong> {} · {} {}</p>"#,
                 ctx.t("Overdue", "Überfällig"),
                 esc(&crate::automatic::describe(schedule, config, lang)),
                 ctx.t("last successful backup", "letzte erfolgreiche Sicherung"),
@@ -903,26 +924,185 @@ impl WebApp {
             ));
         }
 
-        // Jobs.
-        let mut rows = String::new();
-        let now = Local::now();
-        for schedule in config
+        // Backups of the last 30 days, from the history (only the user's jobs).
+        let jobs: Vec<&crate::config::Schedule> = config
             .schedules
             .iter()
             .filter(|s| ctx.user.may_use_job(Some(&s.id)))
-        {
-            let entry = state.schedules.get(&schedule.id);
-            let last = entry.and_then(|e| e.last_run.as_ref());
-            let last_text = match last {
-                Some(run) => format!(
-                    r#"<span class="badge {}">{}</span> {} · {}"#,
-                    Self::outcome_class(run.outcome),
-                    esc(lang.notify_status(run.outcome)),
-                    Self::when(ctx, run.at),
-                    esc(&lang.files(run.files)),
-                ),
-                None => ctx.t("not yet", "noch nicht").into(),
+            .collect();
+        let labels: Option<std::collections::HashSet<String>> =
+            (!ctx.user.jobs.is_empty()).then(|| {
+                jobs.iter()
+                    .map(|s| crate::automatic::job_label(Some(s), config, lang))
+                    .collect()
+            });
+        const DAYS: usize = 30;
+        let today = Local::now().date_naive();
+        let mut per_day = [(0u32, 0u32, 0u32); DAYS];
+        let mut last_backup: Option<(DateTime<Utc>, crate::history::Outcome)> = None;
+        for entry in crate::history::load(&self.paths.config_file) {
+            let crate::history::Event::Backup { job, outcome, .. } = &entry.event else {
+                continue;
             };
+            if labels.as_ref().is_some_and(|l| !l.contains(job)) {
+                continue;
+            }
+            use crate::history::Outcome as O;
+            if matches!(
+                outcome,
+                O::Complete | O::Notes | O::Failed | O::NeedsPassphrase
+            ) {
+                last_backup = Some((entry.at, *outcome));
+            }
+            let age = (today - entry.at.with_timezone(&Local).date_naive()).num_days();
+            if !(0..DAYS as i64).contains(&age) {
+                continue;
+            }
+            let day = &mut per_day[DAYS - 1 - age as usize];
+            match outcome {
+                O::Complete => day.0 += 1,
+                O::Notes => day.1 += 1,
+                O::Failed | O::NeedsPassphrase => day.2 += 1,
+                O::Cancelled | O::Skipped => {}
+            }
+        }
+        let (good, notes, bad) = per_day
+            .iter()
+            .fold((0, 0, 0), |a, d| (a.0 + d.0, a.1 + d.1, a.2 + d.2));
+        let total = good + notes + bad;
+
+        // Tiles.
+        let problem_jobs = jobs
+            .iter()
+            .filter(|s| {
+                state
+                    .schedules
+                    .get(&s.id)
+                    .and_then(|e| e.last_run.as_ref())
+                    .is_some_and(|r| r.outcome != crate::state::AutomaticOutcome::Complete)
+            })
+            .count();
+        let destinations = self.destinations(ctx);
+        let lowest_free = destinations
+            .iter()
+            .filter_map(|c| crate::platform::disk_space(&c.destination))
+            .min_by_key(|(free, _)| *free);
+        let tile = |class: &str, value: String, caption: String| {
+            format!(
+                r#"<div class="tile {class}"><span class="value">{}</span><span class="caption">{}</span></div>"#,
+                esc(&value),
+                esc(&caption)
+            )
+        };
+        let mut tiles = String::new();
+        tiles.push_str(&tile(
+            if problem_jobs > 0 { "warn" } else { "accent" },
+            jobs.len().to_string(),
+            if problem_jobs > 0 {
+                format!(
+                    "{} · {problem_jobs} {}",
+                    ctx.t("jobs", "Aufträge"),
+                    ctx.t("with problems", "mit Problemen")
+                )
+            } else {
+                ctx.t("jobs, all fine", "Aufträge, alle in Ordnung").into()
+            },
+        ));
+        tiles.push_str(&match last_backup {
+            Some((at, outcome)) => tile(
+                match outcome {
+                    crate::history::Outcome::Complete => "good",
+                    crate::history::Outcome::Notes => "warn",
+                    _ => "bad",
+                },
+                lang.relative_time(at.with_timezone(&Local)),
+                ctx.t("last backup", "letzte Sicherung").into(),
+            ),
+            None => tile(
+                "",
+                "–".into(),
+                ctx.t("no backup yet", "noch keine Sicherung").into(),
+            ),
+        });
+        tiles.push_str(&tile(
+            if total == 0 {
+                ""
+            } else if bad > 0 {
+                "warn"
+            } else {
+                "good"
+            },
+            (good * 100)
+                .checked_div(total)
+                .map_or_else(|| "–".to_string(), |p| format!("{p} %")),
+            ctx.t("complete in 30 days", "vollständig in 30 Tagen")
+                .into(),
+        ));
+        tiles.push_str(&tile(
+            if bad > 0 { "bad" } else { "" },
+            bad.to_string(),
+            ctx.t("failed in 30 days", "fehlgeschlagen in 30 Tagen")
+                .into(),
+        ));
+        if let Some((free, size)) = lowest_free {
+            let percent = (free * 100).checked_div(size).unwrap_or(0);
+            tiles.push_str(&tile(
+                if percent < 10 {
+                    "bad"
+                } else if percent < 20 {
+                    "warn"
+                } else {
+                    ""
+                },
+                lang.bytes(free),
+                format!(
+                    "{} ({percent} %)",
+                    ctx.t("free at the destination", "frei am Ziel")
+                ),
+            ));
+        }
+        body.push_str(&format!(r#"<div class="tiles">{tiles}</div>"#));
+
+        // Chart and ring.
+        let chart = Self::bar_chart(&per_day, today, ctx);
+        let ring = Self::ring(good, notes, bad, ctx);
+        body.push_str(&format!(
+            r#"<div class="split"><section class="card"><h2>{t1}</h2>{chart}<div class="legend"><span><span class="dot good"></span>{g}</span><span><span class="dot warn"></span>{n}</span><span><span class="dot bad"></span>{b}</span></div></section><section class="card"><h2>{t2}</h2><div class="summary">{ring}<div><p><span class="dot good"></span>{good} {g}</p><p><span class="dot warn"></span>{notes} {n}</p><p><span class="dot bad"></span>{bad} {b}</p></div></div></section></div>"#,
+            t1 = ctx.t("Backups, last 30 days", "Sicherungen, letzte 30 Tage"),
+            t2 = ctx.t("Result", "Ergebnis"),
+            g = ctx.t("complete", "vollständig"),
+            n = ctx.t("with notes", "mit Hinweisen"),
+            b = ctx.t("failed", "fehlgeschlagen"),
+        ));
+
+        // Jobs as cards.
+        let now = Local::now();
+        let mut cards = String::new();
+        for schedule in &jobs {
+            let last = state
+                .schedules
+                .get(&schedule.id)
+                .and_then(|e| e.last_run.as_ref());
+            let badge = match last {
+                Some(run) => format!(
+                    r#"<span class="badge {}">{}</span>"#,
+                    Self::outcome_class(run.outcome),
+                    esc(lang.notify_status(run.outcome))
+                ),
+                None => format!(
+                    r#"<span class="badge muted">{}</span>"#,
+                    ctx.t("not run yet", "noch nicht gelaufen")
+                ),
+            };
+            let last_text = last
+                .map(|run| {
+                    format!(
+                        "{} · {}",
+                        Self::when(ctx, run.at),
+                        esc(&lang.files(run.files))
+                    )
+                })
+                .unwrap_or_else(|| "–".into());
             let problems = last
                 .filter(|r| !r.problems.is_empty())
                 .map(|r| {
@@ -947,18 +1127,12 @@ impl WebApp {
             } else {
                 format!(
                     r#"<span class="badge muted">{}</span>"#,
-                    ctx.t("off", "aus")
+                    ctx.t("switched off", "ausgeschaltet")
                 )
             };
-            let destination = config
-                .for_schedule(schedule)
-                .destination
-                .display()
-                .to_string();
             let actions = if operator {
-                let csrf = csrf_field(&ctx.session);
                 format!(
-                    r#"<form method="post" action="/jobs/run" class="inline">{csrf}<input type="hidden" name="id" value="{id}"><button>{run}</button></form> <form method="post" action="/jobs/switch" class="inline">{csrf}<input type="hidden" name="id" value="{id}"><input type="hidden" name="on" value="{on}"><button class="secondary">{switch}</button></form>"#,
+                    r#"<div class="actions"><form method="post" action="/jobs/run" class="inline">{csrf}<input type="hidden" name="id" value="{id}"><button>{run}</button></form><form method="post" action="/jobs/switch" class="inline">{csrf}<input type="hidden" name="id" value="{id}"><input type="hidden" name="on" value="{on}"><button class="secondary">{switch}</button></form></div>"#,
                     id = esc(&schedule.id),
                     run = ctx.t("Run now", "Jetzt ausführen"),
                     on = if schedule.enabled { "0" } else { "1" },
@@ -971,16 +1145,18 @@ impl WebApp {
             } else {
                 String::new()
             };
-            rows.push_str(&format!(
-                r#"<tr><td><strong>{name}</strong><br><span class="muted">{dest}</span></td><td>{last_text}{problems}</td><td class="nowrap">{next}</td><td class="actions">{actions}</td></tr>"#,
+            cards.push_str(&format!(
+                r#"<section class="card job"><div class="head"><h3>{name}</h3>{badge}</div><dl class="meta"><dt>{l1}</dt><dd>{last_text}</dd><dt>{l2}</dt><dd>{next}</dd><dt>{l3}</dt><dd>{dest}</dd></dl>{problems}{actions}</section>"#,
                 name = esc(&crate::automatic::describe(schedule, config, lang)),
-                dest = esc(&destination),
+                l1 = ctx.t("Last run", "Letzter Lauf"),
+                l2 = ctx.t("Next run", "Nächster Lauf"),
+                l3 = ctx.t("Destination", "Ziel"),
+                dest = esc(&config.for_schedule(schedule).destination.display().to_string()),
             ));
         }
         let all_now = if operator && ctx.user.jobs.is_empty() {
             format!(
-                r#"<form method="post" action="/jobs/run" class="inline">{}<button>{}</button></form>"#,
-                csrf_field(&ctx.session),
+                r#"<form method="post" action="/jobs/run" class="inline">{csrf}<button class="secondary">{}</button></form>"#,
                 ctx.t(
                     "Back up all ticked folders now",
                     "Alle ausgewählten Ordner jetzt sichern"
@@ -989,42 +1165,25 @@ impl WebApp {
         } else {
             String::new()
         };
-        body.push_str(&format!(
-            r#"<section class="card"><h2>{jobs}</h2>{table}{all_now}</section>"#,
-            jobs = ctx.t("Jobs", "Aufträge"),
-            table = if rows.is_empty() {
-                format!("<p class=\"muted\">{}</p>", ctx.t("No jobs.", "Keine Aufträge."))
-            } else {
-                format!(
-                    r#"<table><thead><tr><th>{}</th><th>{}</th><th>{}</th><th></th></tr></thead><tbody>{rows}</tbody></table>"#,
-                    ctx.t("Job", "Auftrag"),
-                    ctx.t("Last run", "Letzter Lauf"),
-                    ctx.t("Next run", "Nächster Lauf"),
-                )
-            },
-        ));
+        body.push_str(&format!(r#"<h2>{}</h2>"#, ctx.t("Jobs", "Aufträge")));
+        if cards.is_empty() {
+            body.push_str(&format!(
+                r#"<p class="muted">{}</p>"#,
+                ctx.t("No jobs.", "Keine Aufträge.")
+            ));
+        } else {
+            body.push_str(&format!(r#"<div class="grid">{cards}</div>"#));
+        }
+        if !all_now.is_empty() {
+            body.push_str(&format!(r#"<p>{all_now}</p>"#));
+        }
 
-        // Destinations.
-        let mut destinations: Vec<PathBuf> = Vec::new();
-        if ctx.user.jobs.is_empty() && !config.destination.as_os_str().is_empty() {
-            destinations.push(config.destination.clone());
-        }
-        for s in config
-            .schedules
-            .iter()
-            .filter(|s| ctx.user.may_use_job(Some(&s.id)))
-        {
-            let d = config.for_schedule(s).destination;
-            if !d.as_os_str().is_empty() && !destinations.contains(&d) {
-                destinations.push(d);
-            }
-        }
-        let mut dest_rows = String::new();
-        for (n, d) in destinations.iter().enumerate() {
+        // Destinations as cards.
+        let mut dest_cards = String::new();
+        for (n, c) in destinations.iter().enumerate() {
+            let d = &c.destination;
             let reachable = snapshots::destination_reachable(d);
-            let space = crate::platform::disk_space(d)
-                .map(|(free, total)| format!("{} / {}", lang.bytes(free), lang.bytes(total)))
-                .unwrap_or_else(|| "?".into());
+            let space = crate::platform::disk_space(d);
             let list = snapshots::list(d, None).unwrap_or_default();
             let newest = list
                 .first()
@@ -1036,35 +1195,136 @@ impl WebApp {
                     )
                 })
                 .unwrap_or_else(|| "–".into());
-            dest_rows.push_str(&format!(
-                r#"<tr><td><a href="/backups?d={n}">{path}</a></td><td>{state}</td><td>{space}</td><td>{count}</td><td>{newest}</td></tr>"#,
+            let meter = space
+                .map(|(free, size)| {
+                    let used = (size - free.min(size)) * 100 / size.max(1);
+                    format!(
+                        r#"<meter min="0" max="100" low="75" high="90" optimum="10" value="{used}"></meter><p class="muted small">{} {} · {used} % {}</p>"#,
+                        esc(&lang.bytes(free)),
+                        ctx.t("free", "frei"),
+                        ctx.t("used", "belegt"),
+                    )
+                })
+                .unwrap_or_default();
+            let size_note = space
+                .map(|(_, size)| esc(&lang.bytes(size)))
+                .unwrap_or_default();
+            dest_cards.push_str(&format!(
+                r#"<section class="card job"><div class="head"><h3><a href="/backups?d={n}">{path}</a></h3>{state}</div>{meter}<dl class="meta"><dt>{l1}</dt><dd>{size_note}</dd><dt>{l2}</dt><dd>{count}</dd><dt>{l3}</dt><dd>{newest}</dd></dl></section>"#,
                 path = esc(&d.display().to_string()),
                 state = if reachable {
                     format!(r#"<span class="badge good">{}</span>"#, ctx.t("reachable", "erreichbar"))
                 } else {
                     format!(r#"<span class="badge bad">{}</span>"#, ctx.t("not reachable", "nicht erreichbar"))
                 },
-                space = esc(&space),
+                l1 = ctx.t("Size", "Größe"),
+                l2 = ctx.t("Backups", "Sicherungen"),
+                l3 = ctx.t("Newest", "Neueste"),
                 count = list.len(),
             ));
         }
-        body.push_str(&format!(
-            r#"<section class="card"><h2>{}</h2><table><thead><tr><th>{}</th><th></th><th>{}</th><th>{}</th><th>{}</th></tr></thead><tbody>{dest_rows}</tbody></table></section>"#,
-            ctx.t("Destinations", "Ziele"),
-            ctx.t("Folder", "Ordner"),
-            ctx.t("Free / size", "Frei / Größe"),
-            ctx.t("Backups", "Sicherungen"),
-            ctx.t("Newest", "Neueste"),
-        ));
+        if !dest_cards.is_empty() {
+            body.push_str(&format!(
+                r#"<h2>{}</h2><div class="grid">{dest_cards}</div>"#,
+                ctx.t("Destinations", "Ziele")
+            ));
+        }
 
         // Recent activity.
         body.push_str(&format!(
-            r#"<section class="card"><h2>{}</h2>{}<p><a href="/activity">{}</a></p></section>"#,
+            r#"<section class="card"><h2>{}</h2><div class="scroll">{}</div><p><a href="/activity">{} →</a></p></section>"#,
             ctx.t("Recent activity", "Letzte Aktivität"),
             self.activity_table(ctx, 8),
             ctx.t("All activity", "Gesamter Verlauf")
         ));
         self.page(ctx, ctx.t("Overview", "Übersicht"), &body, true)
+    }
+
+    /// Stacked bars per day: complete, with notes, failed.
+    fn bar_chart(days: &[(u32, u32, u32)], today: chrono::NaiveDate, ctx: &Ctx<'_>) -> String {
+        let (width, height, left, bottom, top) = (900.0, 230.0, 34.0, 26.0, 10.0);
+        let plot_w = width - left - 6.0;
+        let plot_h = height - bottom - top;
+        let max = days
+            .iter()
+            .map(|d| d.0 + d.1 + d.2)
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let slot = plot_w / days.len() as f64;
+        let bar = (slot * 0.62).max(2.0);
+        let mut svg = format!(
+            r#"<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-label="{}">"#,
+            ctx.t("Backups per day", "Sicherungen pro Tag")
+        );
+        for step in [0.0, 0.5, 1.0] {
+            let y = top + plot_h * (1.0 - step);
+            let value = (f64::from(max) * step).round();
+            svg.push_str(&format!(
+                r#"<line class="axis" x1="{left}" y1="{y:.1}" x2="{:.1}" y2="{y:.1}"/><text x="{:.1}" y="{:.1}" text-anchor="end">{value}</text>"#,
+                width - 6.0,
+                left - 6.0,
+                y + 4.0
+            ));
+        }
+        for (i, (good, notes, bad)) in days.iter().enumerate() {
+            let x = left + slot * i as f64 + (slot - bar) / 2.0;
+            let mut y = top + plot_h;
+            for (count, class) in [(good, "good"), (notes, "warn"), (bad, "bad")] {
+                if *count == 0 {
+                    continue;
+                }
+                let h = plot_h * f64::from(*count) / f64::from(max);
+                y -= h;
+                svg.push_str(&format!(
+                    r#"<rect class="{class}" x="{x:.1}" y="{y:.1}" width="{bar:.1}" height="{h:.1}" rx="2"/>"#
+                ));
+            }
+            let age = days.len() - 1 - i;
+            if age.is_multiple_of(5) {
+                let date = today - chrono::Duration::days(age as i64);
+                svg.push_str(&format!(
+                    r#"<text x="{:.1}" y="{:.1}" text-anchor="middle">{}</text>"#,
+                    x + bar / 2.0,
+                    height - 8.0,
+                    date.format("%d.%m.")
+                ));
+            }
+        }
+        svg.push_str("</svg>");
+        svg
+    }
+
+    /// A ring of the shares, with the share of complete backups in the middle.
+    fn ring(good: u32, notes: u32, bad: u32, ctx: &Ctx<'_>) -> String {
+        let total = good + notes + bad;
+        let r = 60.0_f64;
+        let circumference = 2.0 * std::f64::consts::PI * r;
+        let mut svg = format!(
+            r#"<svg class="ring" viewBox="0 0 150 150" role="img" aria-label="{}"><circle class="track" cx="75" cy="75" r="{r}"/><g transform="rotate(-90 75 75)">"#,
+            ctx.t("Share of results", "Anteile der Ergebnisse")
+        );
+        let mut offset = 0.0;
+        for (count, class) in [(good, "good"), (notes, "warn"), (bad, "bad")] {
+            if count == 0 || total == 0 {
+                continue;
+            }
+            let length = circumference * f64::from(count) / f64::from(total);
+            svg.push_str(&format!(
+                r#"<circle class="{class}" cx="75" cy="75" r="{r}" stroke-dasharray="{length:.2} {:.2}" stroke-dashoffset="{:.2}"/>"#,
+                circumference - length,
+                -offset
+            ));
+            offset += length;
+        }
+        let share = (good * 100)
+            .checked_div(total)
+            .map_or_else(|| "–".to_string(), |p| format!("{p} %"));
+        svg.push_str(&format!(
+            r#"</g><text x="75" y="80" text-anchor="middle">{share}</text><text class="sub" x="75" y="100" text-anchor="middle">{}</text></svg>"#,
+            ctx.t("complete", "vollständig")
+        ));
+        svg
     }
 
     fn activity_table(&self, ctx: &Ctx<'_>, limit: usize) -> String {
@@ -1136,7 +1396,7 @@ impl WebApp {
                 format!(
                     "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                     esc(user),
-                    esc(&ip.to_string()),
+                    esc(&super::device::describe(*ip)),
                     esc(&lang.duration(*since)),
                     esc(&lang.duration(*idle)),
                 )

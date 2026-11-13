@@ -406,8 +406,13 @@ pub fn schedule_dialog(app: &mut AeternaApp, ui: &mut Ui) {
 
             ui.add_space(12.0);
             widgets::secondary_text(ui, t.schedule_what);
-            ui.radio_value(&mut schedule.all_folders, true, t.scope_radio_everything);
-            ui.radio_value(&mut schedule.all_folders, false, t.scope_radio_only);
+            widgets::choice(
+                ui,
+                &mut schedule.all_folders,
+                true,
+                t.scope_radio_everything,
+            );
+            widgets::choice(ui, &mut schedule.all_folders, false, t.scope_radio_only);
             if !schedule.all_folders {
                 ui.indent("schedule-folders", |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -521,7 +526,8 @@ pub(super) fn encryption_method(
         (CipherSetting::XChaCha20Poly1305, Cipher::XChaCha20Poly1305),
         (CipherSetting::Aes256Gcm, Cipher::Aes256Gcm),
     ] {
-        ui.radio_value(
+        widgets::choice(
+            ui,
             &mut encryption.cipher,
             setting,
             format!(
@@ -546,7 +552,7 @@ pub(super) fn encryption_method(
         (KeyStrength::Strong, t.kdf_strong),
         (KeyStrength::VeryStrong, t.kdf_very_strong),
     ] {
-        ui.radio_value(&mut encryption.key_strength, strength, label);
+        widgets::choice(ui, &mut encryption.key_strength, strength, label);
     }
 }
 

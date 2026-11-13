@@ -13,6 +13,7 @@
 //! or settings, and entering passphrases.
 
 pub mod app;
+pub mod device;
 pub mod http;
 pub mod ldap;
 #[cfg(test)]

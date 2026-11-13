@@ -14,103 +14,122 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     let lang = app.lang;
     let ctx = ui.ctx().clone();
     let before = app.config.notifications.clone();
-    widgets::card(ui, |ui| {
-        let open = ui
-            .horizontal(|ui| {
-                widgets::section_title(ui, t.notifications_title);
-                widgets::info_icon(ui, "notifications", t.tip_notifications)
-            })
-            .inner;
-        widgets::info_text(ui, open, t.tip_notifications);
-        let n = &mut app.config.notifications;
-        ui.checkbox(&mut n.on_success, t.notify_on_success);
-        ui.checkbox(&mut n.on_problem, t.notify_on_problem);
-        ui.checkbox(&mut n.on_skipped, t.notify_on_skipped);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(t.notify_low_space);
-            widgets::number(ui, &mut n.low_space_percent, 0..=99);
-            ui.label(t.notify_low_space_or);
-            widgets::number(ui, &mut n.low_space_gb, 0..=100_000);
-            ui.label(t.notify_low_space_gb);
-        });
-        let open = ui
-            .horizontal_wrapped(|ui| {
-                ui.label(t.notify_overdue);
-                widgets::number(ui, &mut n.overdue_days, 0..=365);
-                ui.label(t.notify_overdue_days);
-                widgets::info_icon(ui, "overdue", t.tip_overdue)
-            })
-            .inner;
-        widgets::info_text(ui, open, t.tip_overdue);
-    });
-    ui.add_space(14.0);
-    widgets::card(ui, |ui| {
-        let n = &mut app.config.notifications;
-        widgets::section_title(ui, t.notify_channels);
-        if n.channels.is_empty() {
-            widgets::secondary_text(ui, t.notify_no_channels);
-        }
-        let mut remove = None;
-        for (i, channel) in n.channels.iter_mut().enumerate() {
-            let result_id = egui::Id::new(("notify-test", i));
-            let mut test = None;
-            ui.push_id(("channel", i), |ui| {
-                egui::Frame::group(ui.style())
-                    .inner_margin(egui::Margin::same(10))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut channel.enabled, "");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut channel.name)
-                                    .hint_text(channel.kind.name())
-                                    .desired_width(180.0),
-                            );
-                            egui::ComboBox::from_id_salt("kind")
-                                .selected_text(channel.kind.name())
-                                .show_ui(ui, |ui| {
-                                    for kind in ChannelKind::ALL {
-                                        ui.selectable_value(&mut channel.kind, kind, kind.name());
-                                    }
+    widgets::split(ui, |ui, column| {
+        if column == 0 {
+            widgets::card(ui, |ui| {
+                let open = ui
+                    .horizontal(|ui| {
+                        widgets::section_title(ui, t.notifications_title);
+                        widgets::info_icon(ui, "notifications", t.tip_notifications)
+                    })
+                    .inner;
+                widgets::info_text(ui, open, t.tip_notifications);
+                let n = &mut app.config.notifications;
+                ui.checkbox(&mut n.on_success, t.notify_on_success);
+                ui.checkbox(&mut n.on_problem, t.notify_on_problem);
+                ui.checkbox(&mut n.on_skipped, t.notify_on_skipped);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(t.notify_low_space);
+                    widgets::number(ui, &mut n.low_space_percent, 0..=99);
+                    ui.label(t.notify_low_space_or);
+                    widgets::number(ui, &mut n.low_space_gb, 0..=100_000);
+                    ui.label(t.notify_low_space_gb);
+                });
+                let open = ui
+                    .horizontal_wrapped(|ui| {
+                        ui.label(t.notify_overdue);
+                        widgets::number(ui, &mut n.overdue_days, 0..=365);
+                        ui.label(t.notify_overdue_days);
+                        widgets::info_icon(ui, "overdue", t.tip_overdue)
+                    })
+                    .inner;
+                widgets::info_text(ui, open, t.tip_overdue);
+            });
+        } else {
+            widgets::card(ui, |ui| {
+                let n = &mut app.config.notifications;
+                widgets::section_title(ui, t.notify_channels);
+                if n.channels.is_empty() {
+                    widgets::secondary_text(ui, t.notify_no_channels);
+                }
+                let mut remove = None;
+                for (i, channel) in n.channels.iter_mut().enumerate() {
+                    let result_id = egui::Id::new(("notify-test", i));
+                    let mut test = None;
+                    ui.push_id(("channel", i), |ui| {
+                        egui::Frame::group(ui.style())
+                            .inner_margin(egui::Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut channel.enabled, "");
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut channel.name)
+                                            .hint_text(channel.kind.name())
+                                            .desired_width(180.0),
+                                    );
+                                    egui::ComboBox::from_id_salt("kind")
+                                        .selected_text(channel.kind.name())
+                                        .show_ui(ui, |ui| {
+                                            for kind in ChannelKind::ALL {
+                                                ui.selectable_value(
+                                                    &mut channel.kind,
+                                                    kind,
+                                                    kind.name(),
+                                                );
+                                            }
+                                        });
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if widgets::button(
+                                            ui,
+                                            ButtonKind::Quiet,
+                                            t.notify_remove,
+                                            true,
+                                        )
+                                        .clicked()
+                                        {
+                                            remove = Some(i);
+                                        }
+                                        if widgets::button(
+                                            ui,
+                                            ButtonKind::Secondary,
+                                            t.notify_test,
+                                            true,
+                                        )
+                                        .clicked()
+                                        {
+                                            test = Some(channel.clone());
+                                        }
+                                    });
                                 });
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if widgets::button(ui, ButtonKind::Quiet, t.notify_remove, true)
-                                    .clicked()
+                                channel_fields(ui, channel, lang);
+                                if let Some(result) = ctx.data(|d| d.get_temp::<String>(result_id))
                                 {
-                                    remove = Some(i);
-                                }
-                                if widgets::button(ui, ButtonKind::Secondary, t.notify_test, true)
-                                    .clicked()
-                                {
-                                    test = Some(channel.clone());
+                                    widgets::secondary_text(ui, result);
                                 }
                             });
-                        });
-                        channel_fields(ui, channel, lang);
-                        if let Some(result) = ctx.data(|d| d.get_temp::<String>(result_id)) {
-                            widgets::secondary_text(ui, result);
-                        }
                     });
+                    ui.add_space(4.0);
+                    if let Some(channel) = test {
+                        let ctx = ctx.clone();
+                        let sent = t.notify_test_sent;
+                        std::thread::spawn(move || {
+                            let text = match notify::send(&channel, &notify::test_message(lang)) {
+                                Ok(()) => sent.to_string(),
+                                Err(err) => format!("{err:#}"),
+                            };
+                            ctx.data_mut(|d| d.insert_temp(result_id, text));
+                            ctx.request_repaint();
+                        });
+                    }
+                }
+                if let Some(i) = remove {
+                    n.channels.remove(i);
+                }
+                if widgets::button(ui, ButtonKind::Secondary, t.notify_add, true).clicked() {
+                    n.channels.push(Channel::default());
+                }
             });
-            ui.add_space(4.0);
-            if let Some(channel) = test {
-                let ctx = ctx.clone();
-                let sent = t.notify_test_sent;
-                std::thread::spawn(move || {
-                    let text = match notify::send(&channel, &notify::test_message(lang)) {
-                        Ok(()) => sent.to_string(),
-                        Err(err) => format!("{err:#}"),
-                    };
-                    ctx.data_mut(|d| d.insert_temp(result_id, text));
-                    ctx.request_repaint();
-                });
-            }
-        }
-        if let Some(i) = remove {
-            n.channels.remove(i);
-        }
-        if widgets::button(ui, ButtonKind::Secondary, t.notify_add, true).clicked() {
-            n.channels.push(Channel::default());
         }
     });
     ui.add_space(14.0);
@@ -223,7 +242,7 @@ fn channel_fields(ui: &mut Ui, channel: &mut crate::notify::Channel, lang: Lang)
                         (SmtpSecurity::Tls, "TLS"),
                         (SmtpSecurity::None, "-"),
                     ] {
-                        ui.radio_value(&mut channel.smtp_security, value, name);
+                        widgets::choice(ui, &mut channel.smtp_security, value, name);
                     }
                 });
                 ui.end_row();

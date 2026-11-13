@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::theme::{Palette, SANS_STRONG, SERIF, palette};
 
 /// Width of the content column. Wide screens get some air on both sides.
-pub const COLUMN: f32 = 1180.0;
+pub const COLUMN: f32 = 1640.0;
 
 /// A quiet panel with a hairline border.
 pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
@@ -678,4 +678,159 @@ pub fn number<N: egui::emath::Numeric>(
         response | arrows
     })
     .inner
+}
+
+/// One option of a choice, drawn as a button: the chosen one is filled with
+/// the accent colour and carries a check mark, the others are outlined. Used
+/// instead of radio circles, so it is obvious what is chosen.
+pub fn choice<V: PartialEq>(
+    ui: &mut Ui,
+    current: &mut V,
+    value: V,
+    label: impl Into<WidgetText>,
+) -> Response {
+    let p = *palette(ui);
+    let selected = *current == value;
+    let font = FontId::proportional(15.0);
+    let galley =
+        label
+            .into()
+            .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, font);
+    let check = if selected { 18.0 } else { 0.0 };
+    let padding = Vec2::new(14.0, 7.0);
+    let size = Vec2::new(
+        galley.size().x + check + padding.x * 2.0,
+        (galley.size().y + padding.y * 2.0).max(32.0),
+    );
+    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
+    if response.clicked() && !selected {
+        *current = value;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::RadioButton,
+            ui.is_enabled(),
+            selected,
+            galley.text(),
+        )
+    });
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered();
+        let (fill, stroke, text) = if selected {
+            (p.accent, Stroke::new(1.0, p.accent), p.on_accent)
+        } else if hovered {
+            (p.raised, Stroke::new(1.0, p.accent), p.text)
+        } else {
+            (p.raised, Stroke::new(1.0, p.border), p.text)
+        };
+        let radius = CornerRadius::same((size.y / 2.0).min(16.0) as u8);
+        ui.painter().rect_filled(rect, radius, fill);
+        ui.painter()
+            .rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
+        let mut x = rect.min.x + padding.x;
+        if selected {
+            let c = Pos2::new(x + 6.0, rect.center().y);
+            let mark = vec![
+                Pos2::new(c.x - 5.0, c.y),
+                Pos2::new(c.x - 1.5, c.y + 3.5),
+                Pos2::new(c.x + 5.0, c.y - 4.0),
+            ];
+            ui.painter()
+                .add(egui::Shape::line(mark, Stroke::new(2.0, text)));
+            x += check;
+        }
+        let pos = Pos2::new(x, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(pos, galley, text);
+    }
+    response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// Two columns side by side when the window is wide enough, else one below
+/// the other. `add` is called once per column with its index.
+pub fn split(ui: &mut Ui, mut add: impl FnMut(&mut Ui, usize)) {
+    if ui.available_width() < 1100.0 {
+        add(ui, 0);
+        ui.add_space(14.0);
+        add(ui, 1);
+        return;
+    }
+    // Each column gets exactly half; content that would be wider is clipped
+    // instead of widening everything below (cards then keep one width).
+    let gap = 16.0;
+    let width = ui.available_width();
+    let column = ((width - gap) / 2.0).floor();
+    let top = ui.cursor().min;
+    let mut bottom = top.y;
+    for i in 0..2 {
+        let rect = Rect::from_min_size(
+            Pos2::new(top.x + i as f32 * (column + gap), top.y),
+            Vec2::new(column, 1.0e6),
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        child.set_width(column);
+        // 2 px beyond the column, so the frame of a card is not cut off.
+        child.set_clip_rect(child.clip_rect().intersect(Rect::from_min_size(
+            rect.min - Vec2::new(0.0, 1.0e6),
+            Vec2::new(column + 2.0, 2.0e6),
+        )));
+        add(&mut child, i);
+        bottom = bottom.max(child.min_rect().bottom());
+    }
+    ui.allocate_rect(
+        Rect::from_min_max(top, Pos2::new(top.x + width, bottom)),
+        Sense::hover(),
+    );
+}
+
+/// A bar showing how full something is, e.g. the destination drive.
+pub fn usage_bar(ui: &mut Ui, used_fraction: f32, label: &str) {
+    let p = *palette(ui);
+    let width = ui.available_width().min(520.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 10.0), Sense::hover());
+    let fraction = used_fraction.clamp(0.0, 1.0);
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(5), p.raised);
+    let mut used = rect;
+    used.set_width(rect.width() * fraction);
+    let color = if fraction > 0.9 {
+        p.error
+    } else if fraction > 0.75 {
+        p.warning
+    } else {
+        p.accent
+    };
+    ui.painter().rect_filled(used, CornerRadius::same(5), color);
+    ui.add_space(2.0);
+    secondary_text(ui, label);
+}
+
+/// A tile with a big number and a caption, for overviews.
+pub fn stat_tile(ui: &mut Ui, value: &str, caption: &str, color: Color32) {
+    let p = *palette(ui);
+    Frame::new()
+        .fill(p.raised)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(18, 12))
+        .show(ui, |ui| {
+            ui.set_min_width(150.0);
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(value)
+                        .size(26.0)
+                        .color(color)
+                        .family(FontFamily::Name(SERIF.into())),
+                );
+                ui.label(
+                    egui::RichText::new(caption)
+                        .size(13.0)
+                        .color(p.text_secondary),
+                );
+            });
+        });
 }

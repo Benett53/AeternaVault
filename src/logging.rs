@@ -84,7 +84,13 @@ pub fn init(paths: &AppPaths, console: bool) -> Logging {
         Ok("trace") => LevelFilter::TRACE,
         Ok("debug") => LevelFilter::DEBUG,
         Ok("warn") => LevelFilter::WARN,
-        _ => LevelFilter::INFO,
+        Ok("info") => LevelFilter::INFO,
+        // Otherwise as chosen in the settings (Settings → Logging).
+        _ => match crate::config::log_level(paths) {
+            crate::config::LogLevel::Errors => LevelFilter::WARN,
+            crate::config::LogLevel::Normal => LevelFilter::INFO,
+            crate::config::LogLevel::Detailed => LevelFilter::DEBUG,
+        },
     };
 
     let buffer = LogBuffer::default();

@@ -6,6 +6,8 @@ Off unless switched on. Restoring, deleting backups, changing folders or setting
 
 ## Switching it on
 
+The web interface is one of the optional parts of the program: Settings → Features → Web interface (on a new installation all optional parts are off). Then:
+
 In the window: **Web** tab → *Switch on the web interface*, then add the first user (an administrator) under *Users*.
 
 On the command line:
@@ -95,6 +97,10 @@ aeternavault-cli web ldap test --user anna
 | `nested_groups` | Active Directory: membership through nested groups counts. |
 
 The role is read again at every sign-in. Directory users appear in the user list after their first sign-in; there they can be limited to jobs, locked, and their one-time codes reset. Their password is checked by the directory, never stored. Users created here keep working besides, e.g. as an emergency administrator when the directory cannot be reached. A directory that cannot be reached does not count as a wrong password.
+
+## Which device
+
+Sign-ins, sessions and the audit log name the device a request came from: its address, its name (reverse DNS, e.g. `pc-anna.example.local`) and its MAC address. The MAC address comes from the neighbour table of the computer running AeternaVault, so it is known only for devices in the same network segment; behind a router it would be the router's, so none is shown. A browser on the computer itself appears with the computer's network address, name and MAC address instead of `127.0.0.1`.
 
 ## Sign-ins, live
 

@@ -428,7 +428,7 @@ pub fn low_space(settings: &Notifications, facts: &Facts) -> bool {
 /// Blocking (network); call it from a background thread in the window.
 pub fn after_run(config: &Config, run: &AutomaticRun, report: Option<&BackupReport>) {
     let settings = &config.notifications;
-    if !settings.active() {
+    if !config.notifications_on() || !settings.active() {
         return;
     }
     let lang = Lang::resolve(config.language);
@@ -489,7 +489,7 @@ pub fn overdue_jobs<'a>(
 /// Blocking (network); called by the background service.
 pub fn check_overdue(config_file: &std::path::Path, config: &Config) {
     let settings = &config.notifications;
-    if !settings.active() || settings.overdue_days == 0 {
+    if !config.notifications_on() || !settings.active() || settings.overdue_days == 0 {
         return;
     }
     let now = chrono::Utc::now();
@@ -560,7 +560,7 @@ pub fn after_manual_backup(
 ) {
     use crate::engine::manifest::SnapshotStatus;
     use crate::error::EngineError;
-    if !config.notifications.active() {
+    if !config.notifications_on() || !config.notifications.active() {
         return;
     }
     let error = result
