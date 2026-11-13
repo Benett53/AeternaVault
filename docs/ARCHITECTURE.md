@@ -35,6 +35,9 @@ src/
 ├── platform/        operating system: paths, tray, autostart, systemd, Explorer menu,
 │                    file association, application catalog (apps.toml)
 ├── gui/             window: views/, dialogs, theme, input (shortcuts, autoscroll)
+├── web/             optional web interface: small HTTP/1.1 server (http.rs) with
+│                    rustls (tls.rs), users and sign-in (users.rs), pages (app.rs)
+├── audit.rs         audit log (audit.jsonl): who changed what, hash-chained
 ├── cli.rs           command line
 ├── config.rs        config.toml (hand-editable)
 ├── history.rs       activity history (history.jsonl), shared by window, jobs and CLI
@@ -100,5 +103,6 @@ Environment variables for tests and demos: `AETERNAVAULT_HOME` (all own files in
 | Encryption | RustCrypto: `argon2`, `chacha20poly1305`, `aes-gcm`, `hmac`, `sha2` |
 | Passphrase rating | `zxcvbn` |
 | Settings | `serde`, `toml`, `serde_json` |
+| Web interface | `rustls` (ring), `httparse`, `rcgen` (self-signed certificate), `sha1` (one-time codes) |
 | Logging | `tracing` |
 | Windows | `windows-sys`, `winreg` |

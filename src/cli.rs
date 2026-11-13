@@ -182,6 +182,10 @@ pub enum Command {
     /// Integration with the operating system.
     #[command(subcommand)]
     System(SystemCommand),
+    /// The web interface: overview and everyday actions in a browser, with
+    /// users, roles and an audit log. Off unless switched on.
+    #[command(subcommand)]
+    Web(WebCommand),
     /// Install the latest release if it is newer.
     Update {
         /// Only report whether a newer version is available.
@@ -500,6 +504,109 @@ pub struct ChannelArgs {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum WebCommand {
+    /// Address, security settings, certificate and users.
+    Status,
+    /// Switch the web interface on (runs while AeternaVault is open, or with `web serve`).
+    On,
+    Off,
+    /// Change how the web interface is reached and protected.
+    Set(Box<WebSetArgs>),
+    /// Run the web interface here until stopped (Ctrl+C), e.g. on a server
+    /// without the window or as a service. Automatic backups keep running
+    /// through the window or the systemd timer as before.
+    Serve,
+    /// Make a new certificate (after the computer's name or address changed).
+    RenewCertificate,
+    /// Users of the web interface.
+    #[command(subcommand)]
+    User(WebUserCommand),
+    /// Who changed what, when and from where.
+    Audit {
+        /// Show the newest N entries.
+        #[arg(long, default_value_t = 50)]
+        last: usize,
+        /// Check that no entry was changed or removed afterwards.
+        #[arg(long)]
+        verify: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct WebSetArgs {
+    /// `127.0.0.1`: this computer only. `0.0.0.0`: every network of the computer.
+    #[arg(long)]
+    bind: Option<String>,
+    #[arg(long)]
+    port: Option<u16>,
+    #[arg(long, value_enum)]
+    tls: Option<crate::config::TlsMode>,
+    /// Own certificate (PEM), with `--tls files`.
+    #[arg(long, value_name = "FILE")]
+    cert: Option<PathBuf>,
+    /// Key of the own certificate (PEM).
+    #[arg(long, value_name = "FILE")]
+    key: Option<PathBuf>,
+    /// Networks that may connect, separated by commas (e.g. `192.168.1.0/24,10.0.0.5`); `any` for all.
+    #[arg(long, value_name = "NETWORKS")]
+    allow: Option<String>,
+    /// Sign out after this many minutes without activity.
+    #[arg(long)]
+    session_minutes: Option<u32>,
+    /// Every user needs a one-time code from an authenticator app.
+    #[arg(long, value_enum)]
+    require_two_factor: Option<OnOff>,
+    /// Wrong sign-ins in a row before a user or address has to wait.
+    #[arg(long)]
+    lockout_attempts: Option<u32>,
+    #[arg(long)]
+    lockout_minutes: Option<u32>,
+    #[arg(long)]
+    min_password_length: Option<u32>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebUserCommand {
+    List,
+    /// Add a user. The password is asked for (or read with `--passphrase-stdin`).
+    Add {
+        name: String,
+        #[arg(long, value_enum, default_value = "viewer")]
+        role: crate::web::users::Role,
+        /// Only these jobs (ids from `job list`), separated by commas. Default: all.
+        #[arg(long, value_delimiter = ',')]
+        jobs: Vec<String>,
+    },
+    Remove {
+        name: String,
+    },
+    Role {
+        name: String,
+        #[arg(value_enum)]
+        role: crate::web::users::Role,
+    },
+    /// Limit a user to these jobs (ids from `job list`); none: all jobs.
+    Jobs {
+        name: String,
+        jobs: Vec<String>,
+    },
+    /// Set a new password (asked for, or read with `--passphrase-stdin`).
+    Password {
+        name: String,
+    },
+    Lock {
+        name: String,
+    },
+    Unlock {
+        name: String,
+    },
+    /// Remove the user's one-time codes, e.g. after a lost phone.
+    ResetTwoFactor {
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum SystemCommand {
     /// Run backup jobs in the background: on Windows by starting AeternaVault
     /// with Windows, on Linux with a systemd user timer.
@@ -569,6 +676,7 @@ struct Ctx {
 
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
+    crate::audit::set_process_actor("command-line");
     let paths = AppPaths::resolve();
     let _log = crate::logging::init(&paths, true);
     tracing::info!(
@@ -648,6 +756,7 @@ fn run(command: Command, ctx: &mut Ctx) -> anyhow::Result<Outcome> {
         Command::Paths => paths_command(ctx),
         Command::Notify(command) => notify_command(ctx, command),
         Command::System(command) => system(ctx, command),
+        Command::Web(command) => web_command(ctx, command),
         Command::Update { check } => match crate::update::run_cli(check) {
             0 => Ok(Outcome::Ok),
             _ => anyhow::bail!("the update did not complete"),
@@ -2841,4 +2950,402 @@ fn notify_command(ctx: &mut Ctx, command: NotifyCommand) -> anyhow::Result<Outco
             Ok(Outcome::Ok)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Web interface
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct WebStatus {
+    enabled: bool,
+    url: String,
+    settings: crate::config::WebSettings,
+    certificate_sha256: Option<String>,
+    users: Vec<WebUserView>,
+}
+
+#[derive(Serialize)]
+struct WebUserView {
+    name: String,
+    role: crate::web::users::Role,
+    two_factor: bool,
+    jobs: Vec<String>,
+    locked: bool,
+    last_sign_in: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Ctx {
+    /// A new password for a web user: from standard input with
+    /// `--passphrase-stdin`, else asked for twice.
+    fn new_web_password(&mut self) -> anyhow::Result<String> {
+        if self.secret_stdin {
+            return self
+                .secret("")
+                .ok_or_else(|| anyhow!("no password on standard input"));
+        }
+        if !std::io::stdin().is_terminal() {
+            bail!("enter the password at a terminal, or pass it with --passphrase-stdin");
+        }
+        let first = platform::read_secret("New password: ").unwrap_or_default();
+        let second = platform::read_secret("Again: ").unwrap_or_default();
+        if first != second {
+            bail!("the passwords differ");
+        }
+        Ok(first)
+    }
+}
+
+fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
+    use crate::audit::{self, Record};
+    use crate::web::users::UserStore;
+    let config_file = ctx.paths.config_file.clone();
+    match command {
+        WebCommand::Status => {
+            let web = ctx.config.web.clone();
+            let store = UserStore::load(&config_file);
+            let view = WebStatus {
+                enabled: web.enabled,
+                url: web.url(),
+                certificate_sha256: web
+                    .uses_tls()
+                    .then(|| crate::web::tls::fingerprint(&config_file, &web))
+                    .flatten(),
+                users: store
+                    .users
+                    .iter()
+                    .map(|u| WebUserView {
+                        name: u.name.clone(),
+                        role: u.role,
+                        two_factor: u.totp.is_some(),
+                        jobs: u.jobs.clone(),
+                        locked: u.disabled,
+                        last_sign_in: u.last_sign_in,
+                    })
+                    .collect(),
+                settings: web,
+            };
+            ctx.print(&view, || {
+                let w = &view.settings;
+                let mut text = format!(
+                    "Web interface: {}\nAddress:       {}\nReachable:     {}\nHTTPS:         {:?}\n",
+                    if view.enabled { "on" } else { "off" },
+                    view.url,
+                    if w.local_only() { "this computer only" } else { "from the network" },
+                    w.tls,
+                );
+                if let Some(fp) = &view.certificate_sha256 {
+                    text += &format!("Certificate:   SHA-256 {fp}\n");
+                }
+                text += &format!(
+                    "Networks:      {}\nSessions:      signed out after {} min without activity\nOne-time codes: {}\nLockout:       {} wrong sign-ins, {} min\nUsers:",
+                    if w.allowed_networks.is_empty() { "any".to_string() } else { w.allowed_networks.join(", ") },
+                    w.session_minutes,
+                    if w.require_two_factor { "required" } else { "optional" },
+                    w.lockout_attempts,
+                    w.lockout_minutes,
+                );
+                if view.users.is_empty() {
+                    text += " none yet; add one with `aeternavault-cli web user add NAME --role admin`";
+                }
+                for u in &view.users {
+                    text += &format!(
+                        "\n  {:<20} {:<9} {}{}{}",
+                        u.name,
+                        u.role.name(true),
+                        if u.two_factor { "one-time codes" } else { "" },
+                        if u.locked { " locked" } else { "" },
+                        if u.jobs.is_empty() { String::new() } else { format!(" jobs: {}", u.jobs.join(", ")) },
+                    );
+                }
+                text
+            });
+        }
+        WebCommand::On | WebCommand::Off => {
+            let on = matches!(command, WebCommand::On);
+            if on {
+                crate::web::check_settings(&ctx.config.web).map_err(|e| anyhow!(e))?;
+            }
+            ctx.config.web.enabled = on;
+            ctx.save()?;
+            if on {
+                println!(
+                    "The web interface is on: {} (while AeternaVault is open, or run `aeternavault-cli web serve`).",
+                    ctx.config.web.url()
+                );
+                if UserStore::load(&config_file).users.is_empty() {
+                    println!("No user yet: `aeternavault-cli web user add NAME --role admin`.");
+                }
+            } else {
+                println!("The web interface is off.");
+            }
+        }
+        WebCommand::Set(args) => {
+            let web = &mut ctx.config.web;
+            if let Some(bind) = args.bind {
+                web.bind = bind;
+            }
+            if let Some(port) = args.port {
+                web.port = port;
+            }
+            if let Some(tls) = args.tls {
+                web.tls = tls;
+            }
+            if let Some(cert) = args.cert {
+                web.cert_file = cert;
+            }
+            if let Some(key) = args.key {
+                web.key_file = key;
+            }
+            if let Some(allow) = args.allow {
+                web.allowed_networks = if allow.trim().eq_ignore_ascii_case("any") {
+                    Vec::new()
+                } else {
+                    allow
+                        .split(',')
+                        .map(|n| n.trim().to_string())
+                        .filter(|n| !n.is_empty())
+                        .collect()
+                };
+            }
+            if let Some(minutes) = args.session_minutes {
+                web.session_minutes = minutes.max(1);
+            }
+            if let Some(on) = args.require_two_factor {
+                web.require_two_factor = on == OnOff::On;
+            }
+            if let Some(n) = args.lockout_attempts {
+                web.lockout_attempts = n;
+            }
+            if let Some(n) = args.lockout_minutes {
+                web.lockout_minutes = n.max(1);
+            }
+            if let Some(n) = args.min_password_length {
+                web.min_password_length = n.max(8);
+            }
+            crate::web::check_settings(web).map_err(|e| anyhow!(e))?;
+            ctx.save()?;
+            println!(
+                "Saved. A running web interface uses the new settings after it is started again."
+            );
+        }
+        WebCommand::Serve => {
+            let control = std::sync::Arc::new(crate::web::LocalRunner::new(ctx.paths.clone()));
+            let mut settings = ctx.config.web.clone();
+            settings.enabled = true;
+            let server = crate::web::WebServer::start(&ctx.paths, &settings, control)
+                .map_err(|e| anyhow!(e))?;
+            println!("Web interface: {}", server.url);
+            if let Some(fp) = settings
+                .uses_tls()
+                .then(|| crate::web::tls::fingerprint(&config_file, &settings))
+                .flatten()
+            {
+                println!("Certificate SHA-256: {fp}");
+            }
+            if UserStore::load(&config_file).users.is_empty() {
+                println!("No user yet: `aeternavault-cli web user add NAME --role admin`.");
+            }
+            println!("Stop with Ctrl+C.");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        WebCommand::RenewCertificate => {
+            crate::web::tls::renew(&config_file)?;
+            crate::web::tls::server_config(&config_file, &ctx.config.web)
+                .map_err(|e| anyhow!(e))?;
+            audit::record(&config_file, Record::local("web-certificate-renewed"));
+            match crate::web::tls::fingerprint(&config_file, &ctx.config.web) {
+                Some(fp) => {
+                    println!("New certificate, SHA-256 {fp}. Restart the web interface to use it.")
+                }
+                None => println!(
+                    "Removed. A new certificate is made when the web interface starts with HTTPS."
+                ),
+            }
+        }
+        WebCommand::Audit { last, verify } => {
+            if verify {
+                let checked = audit::verify(&config_file)?;
+                if checked.broken.is_empty() {
+                    println!(
+                        "{} entries, none changed or removed afterwards.",
+                        checked.entries
+                    );
+                    return Ok(Outcome::Ok);
+                }
+                println!(
+                    "{} entries; changed or removed before these lines: {:?}",
+                    checked.entries, checked.broken
+                );
+                return Ok(Outcome::Partly);
+            }
+            let entries = audit::load(&config_file);
+            let newest: Vec<_> = entries.iter().rev().take(last).rev().cloned().collect();
+            ctx.print(&newest, || {
+                newest
+                    .iter()
+                    .map(|e| {
+                        let mut line = format!(
+                            "{}  {:<24} {:<22} {}{} {}",
+                            e.at.with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %H:%M:%S"),
+                            e.actor,
+                            e.source,
+                            e.action,
+                            if e.ok { "" } else { " (failed)" },
+                            e.target
+                        );
+                        for d in &e.details {
+                            line += &format!("\n      {d}");
+                        }
+                        line
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+        }
+        WebCommand::User(command) => return web_user(ctx, command),
+    }
+    Ok(Outcome::Ok)
+}
+
+fn web_user(ctx: &mut Ctx, command: WebUserCommand) -> anyhow::Result<Outcome> {
+    use crate::audit::{self, Record};
+    use crate::web::users::{self, Role, UserStore};
+    let config_file = ctx.paths.config_file.clone();
+    let mut store = UserStore::load(&config_file);
+    let min = ctx.config.web.min_password_length;
+    let record: Record;
+    let message: String;
+    match command {
+        WebUserCommand::List => return web_command(ctx, WebCommand::Status),
+        WebUserCommand::Add { name, role, jobs } => {
+            users::valid_name(name.trim()).map_err(|e| anyhow!(e))?;
+            if store.find(&name).is_some() {
+                bail!("a user named {name} already exists");
+            }
+            let known: Vec<&str> = ctx.config.schedules.iter().map(|s| s.id.as_str()).collect();
+            if let Some(unknown) = jobs.iter().find(|j| !known.contains(&j.as_str())) {
+                bail!("there is no job {unknown} (see `aeternavault-cli job list`)");
+            }
+            let password = ctx.new_web_password()?;
+            store
+                .add(&name, role, &password, min)
+                .map_err(|e| anyhow!(e))?;
+            if let Some(user) = store.find_mut(&name) {
+                user.jobs = jobs.clone();
+            }
+            let mut details = vec![format!("role: {}", role.name(true))];
+            if !jobs.is_empty() {
+                details.push(format!("jobs: {}", jobs.join(", ")));
+            }
+            record = Record::local("user-added")
+                .target(name.trim())
+                .details(details);
+            message = format!("User {} added.", name.trim());
+        }
+        WebUserCommand::Remove { name } => {
+            if store.is_last_admin(&name) && store.users.len() > 1 {
+                bail!("{name} is the last administrator; make another user administrator first");
+            }
+            let before = store.users.len();
+            store.users.retain(|u| !u.name.eq_ignore_ascii_case(&name));
+            if store.users.len() == before {
+                bail!("there is no user {name}");
+            }
+            record = Record::local("user-removed").target(name.clone());
+            message = format!("User {name} removed.");
+        }
+        WebUserCommand::Role { name, role } => {
+            if store.is_last_admin(&name) && role != Role::Admin {
+                bail!("{name} is the last administrator; make another user administrator first");
+            }
+            let user = store
+                .find_mut(&name)
+                .ok_or_else(|| anyhow!("there is no user {name}"))?;
+            let details = vec![format!(
+                "role: {} → {}",
+                user.role.name(true),
+                role.name(true)
+            )];
+            user.role = role;
+            record = Record::local("user-changed")
+                .target(name.clone())
+                .details(details);
+            message = format!("{name} is now {}.", role.name(true));
+        }
+        WebUserCommand::Jobs { name, jobs } => {
+            let known: Vec<&str> = ctx.config.schedules.iter().map(|s| s.id.as_str()).collect();
+            if let Some(unknown) = jobs.iter().find(|j| !known.contains(&j.as_str())) {
+                bail!("there is no job {unknown} (see `aeternavault-cli job list`)");
+            }
+            let user = store
+                .find_mut(&name)
+                .ok_or_else(|| anyhow!("there is no user {name}"))?;
+            let details = vec![format!(
+                "jobs: [{}] → [{}]",
+                user.jobs.join(", "),
+                jobs.join(", ")
+            )];
+            user.jobs = jobs;
+            record = Record::local("user-changed")
+                .target(name.clone())
+                .details(details);
+            message = format!("Saved for {name}.");
+        }
+        WebUserCommand::Password { name } => {
+            if store.find(&name).is_none() {
+                bail!("there is no user {name}");
+            }
+            let password = ctx.new_web_password()?;
+            users::check_password(&password, min).map_err(|e| anyhow!(e))?;
+            let user = store.find_mut(&name).expect("checked above");
+            user.password = users::hash_password(&password);
+            user.must_change_password = false;
+            record = Record::local("user-password-reset").target(name.clone());
+            message = format!(
+                "New password set for {name}. Running sessions of {name} end when the web interface restarts."
+            );
+        }
+        WebUserCommand::Lock { name } => {
+            if store.is_last_admin(&name) {
+                bail!("{name} is the last administrator; make another user administrator first");
+            }
+            store
+                .find_mut(&name)
+                .ok_or_else(|| anyhow!("there is no user {name}"))?
+                .disabled = true;
+            record = Record::local("user-locked").target(name.clone());
+            message = format!("{name} is locked.");
+        }
+        WebUserCommand::Unlock { name } => {
+            store
+                .find_mut(&name)
+                .ok_or_else(|| anyhow!("there is no user {name}"))?
+                .disabled = false;
+            record = Record::local("user-unlocked").target(name.clone());
+            message = format!("{name} is unlocked.");
+        }
+        WebUserCommand::ResetTwoFactor { name } => {
+            store
+                .find_mut(&name)
+                .ok_or_else(|| anyhow!("there is no user {name}"))?
+                .totp = None;
+            record = Record::local("user-one-time-codes-reset").target(name.clone());
+            message = format!(
+                "One-time codes of {name} removed; they can be set up again after signing in."
+            );
+        }
+    }
+    store.save(&config_file).with_context(|| {
+        format!(
+            "could not save {}",
+            crate::web::users::file(&config_file).display()
+        )
+    })?;
+    audit::record(&config_file, record);
+    println!("{message}");
+    Ok(Outcome::Ok)
 }

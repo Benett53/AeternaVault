@@ -165,6 +165,63 @@ impl Service {
     }
 }
 
+impl Service {
+    /// A handle for the web interface; it does not stop the service when dropped.
+    pub fn handle(&self) -> ServiceHandle {
+        ServiceHandle {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+/// The web interface's way to the service of the window process.
+#[derive(Clone)]
+pub struct ServiceHandle {
+    shared: Arc<Shared>,
+}
+
+impl ServiceHandle {
+    fn wake(&self) {
+        let (flag, condvar) = &self.shared.wake;
+        *lock(flag) = true;
+        condvar.notify_all();
+    }
+}
+
+impl crate::web::Control for ServiceHandle {
+    fn run(&self, schedule: Option<String>) -> Result<(), String> {
+        if lock(&self.shared.running).is_some() {
+            return Err("a backup is already running".into());
+        }
+        if self.shared.window_busy.load(Ordering::Relaxed) {
+            return Err("a backup or restore started in the window is running".into());
+        }
+        lock(&self.shared.requests).push(match schedule {
+            Some(id) => Request::Schedule(id),
+            None => Request::Everything,
+        });
+        self.wake();
+        Ok(())
+    }
+
+    fn running(&self) -> Option<(String, Progress)> {
+        lock(&self.shared.running)
+            .as_ref()
+            .map(|r| (r.label.clone(), r.progress.clone()))
+    }
+
+    fn cancel(&self) {
+        if let Some(running) = lock(&self.shared.running).as_ref() {
+            running.cancel.cancel();
+        }
+    }
+
+    fn config_changed(&self, config: &Config) {
+        *lock(&self.shared.config) = config.clone();
+        self.wake();
+    }
+}
+
 impl Drop for Service {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);

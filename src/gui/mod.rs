@@ -174,12 +174,13 @@ pub enum View {
     Apps,
     Notifications,
     Settings,
+    Web,
     Activity,
 }
 
 impl View {
     /// In the order of the tabs.
-    pub const ALL: [View; 8] = [
+    pub const ALL: [View; 9] = [
         View::Backup,
         View::Restore,
         View::Backups,
@@ -187,6 +188,7 @@ impl View {
         View::Apps,
         View::Notifications,
         View::Settings,
+        View::Web,
         View::Activity,
     ];
 }
@@ -441,6 +443,8 @@ pub struct AeternaApp {
     pub viewer: Option<PathBuf>,
     pub nav: input::Navigation,
     pub updater: crate::update::Updater,
+    /// The web interface and the Web tab.
+    pub web: views::web::WebUi,
     config_dirty: bool,
 }
 
@@ -463,6 +467,7 @@ impl AeternaApp {
         };
         let mut app = Self {
             updater,
+            web: views::web::WebUi::default(),
             settings: SettingsUi {
                 exclude_text: loaded.config.exclude.join("\n"),
                 invalid_patterns: Vec::new(),
@@ -571,6 +576,10 @@ impl AeternaApp {
         self.config_dirty = true;
     }
 
+    pub fn is_config_dirty(&self) -> bool {
+        self.config_dirty
+    }
+
     /// A backup or restore runs, from the window or automatically.
     pub fn is_busy(&self) -> bool {
         self.task.is_some()
@@ -592,7 +601,9 @@ impl AeternaApp {
             // Browsing someone's backups never changes this computer's settings.
             return;
         }
-        if let Err(err) = self.config.save(&self.paths.config_file) {
+        let saved = self.config.save(&self.paths.config_file);
+        self.web.remember_config(&self.paths.config_file);
+        if let Err(err) = saved {
             tracing::error!("configuration could not be saved: {err}");
             self.notify(
                 NoticeKind::Error,
@@ -888,6 +899,7 @@ pub fn view_label(t: &crate::i18n::Tr, view: View) -> &'static str {
         View::Apps => t.nav_apps,
         View::Notifications => t.nav_notifications,
         View::Settings => t.nav_settings,
+        View::Web => "Web",
         View::Activity => t.nav_activity,
     }
 }
@@ -943,6 +955,7 @@ impl eframe::App for AeternaApp {
         self.background_tick(ctx);
         self.expire_read_access(ctx);
         self.save_if_dirty();
+        self.web_tick();
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -1002,6 +1015,7 @@ impl eframe::App for AeternaApp {
                                 View::Apps => views::apps::show(self, ui),
                                 View::Notifications => views::notifications::show(self, ui),
                                 View::Settings => views::settings::show(self, ui),
+                                View::Web => views::web::show(self, ui),
                                 View::Activity => views::activity::show(self, ui),
                             });
                         });

@@ -2,6 +2,17 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Web interface, off by default ([docs/web.md](docs/web.md)): an overview of jobs, last runs with their problems, destinations, backups and the activity in a browser, and the everyday actions (run, cancel, switch jobs on and off, check backups). Only this computer can connect by default; from the network only over HTTPS, with a certificate made by AeternaVault or own certificate files, and optionally only from chosen networks. Users with the roles viewer, operator and administrator, optionally limited to some jobs; Argon2id passwords, optional or required one-time codes from authenticator apps, lockout after wrong sign-ins, sessions that end after inactivity. Runs while AeternaVault is open, or with `aeternavault-cli web serve`. New Web tab in the window and `aeternavault-cli web` commands. Restoring, deleting and changing settings stay in the window and the command line.
+- Audit log (`audit.jsonl`): sign-ins, user management, actions over the web, and every saved change of the settings from the window, the command line or the web, with the changed fields (secrets only as "changed"). Entries are hash-chained; `aeternavault-cli web audit --verify` finds lines changed afterwards.
+
+### Changed
+
+- The window reads the settings again when they were changed outside it (over the web, by the command line or by hand) and it has no unsaved changes of its own.
+
 ## [0.10.1] - 2026-11-13
 
 ### Changed

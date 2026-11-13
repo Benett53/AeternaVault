@@ -62,6 +62,7 @@ fn main() -> ExitCode {
     }
 
     let args = Args::parse();
+    aeterna_vault::audit::set_process_actor("window");
     if args.quit {
         return if platform::instance::quit_all(std::time::Duration::from_secs(30)) {
             ExitCode::SUCCESS

@@ -465,6 +465,101 @@ impl Default for Updates {
     }
 }
 
+/// How the web interface is reached. Users and their roles are kept apart
+/// from these settings, in `web-users.json` (see [`crate::web::users`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebSettings {
+    pub enabled: bool,
+    /// Address to listen on: `127.0.0.1` (this computer only) or `0.0.0.0`
+    /// (every network of the computer), or one address of the computer.
+    pub bind: String,
+    pub port: u16,
+    pub tls: TlsMode,
+    /// Own certificate and key (PEM), with `tls = "files"`.
+    pub cert_file: PathBuf,
+    pub key_file: PathBuf,
+    /// Only these networks may connect, e.g. `192.168.1.0/24`. Empty: any.
+    /// The computer itself may always connect.
+    pub allowed_networks: Vec<String>,
+    /// Signed out after this many minutes without a request.
+    pub session_minutes: u32,
+    /// Every user needs a one-time code from an authenticator app.
+    pub require_two_factor: bool,
+    /// After this many wrong sign-ins in a row, a user or address waits …
+    pub lockout_attempts: u32,
+    /// … this many minutes.
+    pub lockout_minutes: u32,
+    pub min_password_length: u32,
+}
+
+impl Default for WebSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: "127.0.0.1".into(),
+            port: 8686,
+            tls: TlsMode::Auto,
+            cert_file: PathBuf::new(),
+            key_file: PathBuf::new(),
+            allowed_networks: Vec::new(),
+            session_minutes: 30,
+            require_two_factor: false,
+            lockout_attempts: 5,
+            lockout_minutes: 15,
+            min_password_length: 12,
+        }
+    }
+}
+
+impl WebSettings {
+    /// Whether only this computer can connect.
+    pub fn local_only(&self) -> bool {
+        self.bind
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+            || self.bind.eq_ignore_ascii_case("localhost")
+    }
+
+    /// Whether connections are encrypted (HTTPS).
+    pub fn uses_tls(&self) -> bool {
+        match self.tls {
+            TlsMode::Auto => !self.local_only(),
+            TlsMode::SelfSigned | TlsMode::Files => true,
+            TlsMode::Off => false,
+        }
+    }
+
+    pub fn url(&self) -> String {
+        let host = if self.local_only() || self.bind == "0.0.0.0" || self.bind == "::" {
+            if self.local_only() {
+                "127.0.0.1".to_string()
+            } else {
+                crate::platform::computer_name().to_lowercase()
+            }
+        } else {
+            self.bind.clone()
+        };
+        let scheme = if self.uses_tls() { "https" } else { "http" };
+        format!("{scheme}://{host}:{}/", self.port)
+    }
+}
+
+/// HTTPS for the web interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum TlsMode {
+    /// Plain HTTP for this computer only, a self-signed certificate otherwise.
+    #[default]
+    Auto,
+    /// Always HTTPS with a certificate made by AeternaVault.
+    SelfSigned,
+    /// HTTPS with `cert_file` and `key_file`.
+    Files,
+    /// Plain HTTP; only allowed when only this computer can connect.
+    Off,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -483,6 +578,8 @@ pub struct Config {
     pub advanced: Advanced,
     pub updates: Updates,
     pub notifications: crate::notify::Notifications,
+    /// The web interface (off unless switched on).
+    pub web: WebSettings,
     /// Name for the next backup (set from a job, not saved).
     #[serde(skip)]
     pub backup_label: Option<String>,
@@ -515,6 +612,7 @@ impl Default for Config {
             advanced: Advanced::default(),
             updates: Updates::default(),
             notifications: crate::notify::Notifications::default(),
+            web: WebSettings::default(),
             backup_label: None,
             fonts: Fonts::default(),
             schedules: Vec::new(),
@@ -662,7 +760,32 @@ impl Config {
         Ok(format!("{CONFIG_HEADER}\n{body}"))
     }
 
+    /// Saves the settings and notes the changed fields in the audit log, as
+    /// changed by this process (window or command line).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        self.save_as(path, crate::audit::Record::local("settings-changed"))
+    }
+
+    /// Saves the settings; `record` says who changed them (see [`crate::audit`]).
+    pub fn save_as(&self, path: &Path, record: crate::audit::Record) -> std::io::Result<()> {
+        let before = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| toml::from_str::<Config>(text.trim_start_matches('\u{feff}')).ok())
+            .map(|mut config| {
+                config.normalize();
+                config
+            });
+        self.write(path)?;
+        if let Some(before) = before {
+            let changes = crate::audit::config_changes(&before, self);
+            if !changes.is_empty() {
+                crate::audit::record(path, record.details(changes));
+            }
+        }
+        Ok(())
+    }
+
+    fn write(&self, path: &Path) -> std::io::Result<()> {
         let text = self.to_toml().map_err(std::io::Error::other)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

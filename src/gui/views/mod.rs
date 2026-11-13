@@ -9,6 +9,7 @@ pub mod jobs;
 pub mod notifications;
 pub mod restore;
 pub mod settings;
+pub mod web;
 pub mod working;
 
 use eframe::egui::Color32;

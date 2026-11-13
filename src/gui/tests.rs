@@ -399,6 +399,37 @@ fn demo_schedules(config: &Config) -> Vec<crate::config::Schedule> {
 /// $env:AETERNAVAULT_SCREENSHOTS = 'docs\screenshots'
 /// cargo test render_readme_screenshots -- --ignored
 /// ```
+/// The Web tab adds users (written to the audit log) and keeps the last
+/// administrator; in interface tests no server is started.
+#[test]
+fn web_tab_manages_users() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut harness = harness(tmp.path(), |_| {});
+    goto(&mut harness, View::Web);
+    harness.run();
+    harness.get_by_label("Switch on the web interface");
+    harness.state_mut().web.fill_new_user(
+        "admin",
+        "a long password",
+        crate::web::users::Role::Admin,
+    );
+    harness.run();
+    harness.get_by_label("Add").click();
+    harness.run();
+    let config_file = harness.state().paths.config_file.clone();
+    let store = crate::web::users::UserStore::load(&config_file);
+    assert!(
+        store
+            .find("admin")
+            .is_some_and(|u| u.may(crate::web::users::Role::Admin))
+    );
+    assert!(
+        harness.state().web.server.is_none(),
+        "no server without a real window"
+    );
+    let _ = harness.get_by_label("admin");
+}
+
 #[test]
 #[ignore = "needs demo data; run manually to refresh docs/screenshots"]
 fn render_readme_screenshots() {

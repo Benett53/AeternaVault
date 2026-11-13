@@ -85,6 +85,14 @@ minisign-verify = "0.3.0"
 # Notifications by e-mail (SMTP with TLS).
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "rustls", "ring", "webpki-roots"] }
 
+# Web interface (off unless switched on): HTTPS with the rustls already used
+# for updates and e-mail, a small HTTP/1.1 parser, a self-signed certificate,
+# and SHA-1 for one-time codes of authenticator apps (RFC 6238 requires it).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+httparse = "1.10"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
+sha1 = "0.11"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",

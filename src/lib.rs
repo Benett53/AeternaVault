@@ -7,6 +7,7 @@
 //!
 //! Both share the configuration, the backups and the activity history.
 
+pub mod audit;
 pub mod automatic;
 pub mod cli;
 pub mod config;
@@ -22,3 +23,4 @@ pub mod paths;
 pub mod platform;
 pub mod state;
 pub mod update;
+pub mod web;
