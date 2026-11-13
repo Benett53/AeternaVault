@@ -61,6 +61,13 @@ pub fn run_restore(
         report.failed += 1;
         report.skipped -= 1;
     }
+    for name in &plan.invalid {
+        tracing::warn!("not restored, the backup index names an unknown folder: {name}");
+        report.warnings.push(format!(
+            "{name}: invalid entry in the backup index (unknown folder)"
+        ));
+        report.failed += 1;
+    }
     let mut reporter = Reporter::new(on_progress);
     let mut progress = Progress {
         phase: Phase::Restoring,

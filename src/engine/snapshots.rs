@@ -158,7 +158,7 @@ impl SnapshotInfo {
 }
 
 /// One stored file of a backup, for browsing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StoredFile {
     /// Folder inside the backup (e.g. `Documents`).
     pub source: String,
@@ -177,16 +177,79 @@ impl StoredFile {
     }
 }
 
+/// Every part of a backup with its index, checked to belong together: the
+/// plain part first, then the encrypted one. Everything that shows, opens,
+/// copies, checks or restores files of a backup reads them through here, as
+/// a readable part is not authenticated by itself: anyone who can write to
+/// the storage could add or change one.
+pub fn load_parts<'a>(
+    snapshot: &'a SnapshotInfo,
+    key: Option<&VaultKey>,
+) -> EngineResult<Vec<(&'a SnapshotInfo, FileIndex)>> {
+    if snapshot.needs_unlock() {
+        return Err(EngineError::Locked);
+    }
+    let mut parts = Vec::new();
+    for part in snapshot.parts() {
+        if part.header.is_none() {
+            return Err(EngineError::SnapshotNotFound(snapshot.qualified_id()));
+        }
+        parts.push((part, part.load_index(key)?));
+    }
+    check_parts(&parts)?;
+    Ok(parts)
+}
+
+/// Refuses parts that do not belong together, before anything is read from them.
+fn check_parts(parts: &[(&SnapshotInfo, FileIndex)]) -> EngineResult<()> {
+    let refuse = |part: &SnapshotInfo, message: &str| EngineError::Manifest {
+        path: part.dir().to_path_buf(),
+        message: message.into(),
+    };
+    let mut id = None;
+    for (part, _) in parts {
+        let header = part.header.as_ref().ok_or(EngineError::Locked)?;
+        if *id.get_or_insert(&header.id) != &header.id || part.is_encrypted() != header.encrypted {
+            return Err(refuse(
+                part,
+                "the parts of this backup do not belong together",
+            ));
+        }
+        let mut keys = std::collections::HashSet::new();
+        if !header.sources.iter().all(|s| keys.insert(s.key.as_str())) {
+            return Err(refuse(part, "the backup index names a folder twice"));
+        }
+    }
+    match parts {
+        [(plain, index), (encrypted, _)] => {
+            let (Some(plain_header), Some(encrypted_header)) = (&plain.header, &encrypted.header)
+            else {
+                return Err(EngineError::Locked);
+            };
+            manifest::check_plain_part(plain_header, index, encrypted_header)
+                .map_err(|message| refuse(plain, message))
+        }
+        // A partly encrypted backup with one of its parts gone (deleted,
+        // damaged, not yet synchronised): never restore half of it as if it
+        // were everything.
+        [(only, _)] if only.header.as_ref().is_some_and(|h| h.split) => Err(refuse(
+            only,
+            if only.is_encrypted() {
+                "the readable part of this partly encrypted backup is missing"
+            } else {
+                "the encrypted part of this partly encrypted backup is missing"
+            },
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// All files of a backup (every part), sorted by path. Links are left out:
 /// nothing is stored for them that could be opened or copied; they come back
 /// with a restore.
 pub fn contents(snapshot: &SnapshotInfo, key: Option<&VaultKey>) -> EngineResult<Vec<StoredFile>> {
-    if snapshot.needs_unlock() {
-        return Err(EngineError::Locked);
-    }
     let mut files = Vec::new();
-    for part in snapshot.parts() {
-        let index = part.load_index(key)?;
+    for (part, index) in load_parts(snapshot, key)? {
         let stored = index.files.into_iter().filter(|f| !f.is_link());
         files.extend(stored.map(|f| StoredFile {
             source: f.source,

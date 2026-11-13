@@ -126,7 +126,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                             }
                             if !status.is_empty() {
                                 let failed = last.is_some_and(|r| !r.outcome.is_success());
-                                ui.add(
+                                let shown = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(status.join(" · ")).size(12.5).color(
                                             if failed { p.warning } else { p.text_secondary },
@@ -134,6 +134,11 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                                     )
                                     .wrap(),
                                 );
+                                // What went wrong and what to do, on this computer
+                                // with all names.
+                                if let Some(run) = last.filter(|r| !r.problems.is_empty()) {
+                                    shown.on_hover_text(lang.problem_report(&run.problems, false));
+                                }
                             }
                         },
                     );

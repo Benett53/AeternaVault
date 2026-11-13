@@ -1379,6 +1379,8 @@ struct VerifyResult {
     bytes: u64,
     damaged: Vec<String>,
     missing: Vec<String>,
+    /// `file: error` of stored copies that could not be read.
+    unreadable: Vec<String>,
 }
 
 fn verify_backup(ctx: &mut Ctx, wanted: &str, at: &At) -> anyhow::Result<Outcome> {
@@ -1402,12 +1404,14 @@ fn verify_backup(ctx: &mut Ctx, wanted: &str, at: &At) -> anyhow::Result<Outcome
             files: report.files,
             damaged: report.damaged.len() as u64,
             missing: report.missing.len() as u64,
+            unreadable: report.unreadable.len() as u64,
         },
     );
     let ok = report.is_ok();
     tracing::info!(
         damaged = report.damaged.len(),
         missing = report.missing.len(),
+        unreadable = report.unreadable.len(),
         "backup {} checked",
         snapshot.id
     );
@@ -1417,6 +1421,7 @@ fn verify_backup(ctx: &mut Ctx, wanted: &str, at: &At) -> anyhow::Result<Outcome
         bytes: report.bytes,
         damaged: report.damaged.clone(),
         missing: report.missing.clone(),
+        unreadable: report.unreadable.clone(),
     };
     ctx.print(&view, || {
         let mut text = if ok {
@@ -1428,10 +1433,11 @@ fn verify_backup(ctx: &mut Ctx, wanted: &str, at: &At) -> anyhow::Result<Outcome
             )
         } else {
             format!(
-                "Backup {}: {} damaged, {} missing.",
+                "Backup {}: {} damaged, {} missing, {} not readable.",
                 snapshot.id,
                 report.damaged.len(),
-                report.missing.len()
+                report.missing.len(),
+                report.unreadable.len()
             )
         };
         for damaged in &report.damaged {
@@ -1439,6 +1445,9 @@ fn verify_backup(ctx: &mut Ctx, wanted: &str, at: &At) -> anyhow::Result<Outcome
         }
         for missing in &report.missing {
             text += &format!("\n  missing: {missing}");
+        }
+        for unreadable in &report.unreadable {
+            text += &format!("\n  not readable: {unreadable}");
         }
         text
     });

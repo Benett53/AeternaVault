@@ -52,6 +52,8 @@ The overdue alert is checked in the background every 15 minutes (Linux: with eve
 aeternavault-cli config set notifications.problem_title "[BACKUP] {computer}: {status}"
 ```
 
+`{message}` explains a problem: the error that stopped the run, or every file and folder that was not saved and every file the check after the backup found damaged, missing or unreadable, each with its reason (up to 10 per kind; the full list is in the activity log), followed by what to do. With encryption on, the names of files the backup could not save are not sent, only their number; the reason and the advice are. Results of the check name encrypted files by number only.
+
 Passwords and tokens are stored in `config.toml` in the user profile, readable only by that user account.
 
 ## Databases (PostgreSQL)

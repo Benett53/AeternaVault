@@ -20,6 +20,9 @@ pub enum EngineError {
     #[error("the destination {0} is not reachable")]
     DestinationUnavailable(PathBuf),
 
+    #[error("none of the folders to back up could be read: {0}")]
+    SourcesUnavailable(String),
+
     #[error("the source {source_path} lies inside the destination {destination}")]
     SourceInsideDestination {
         source_path: PathBuf,

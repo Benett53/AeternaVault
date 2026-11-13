@@ -26,13 +26,20 @@ pub struct VerifyReport {
     pub damaged: Vec<String>,
     /// `source/path` of files whose stored copy is missing.
     pub missing: Vec<String>,
+    /// `source/path: error` of stored copies that could not be read (often
+    /// locked by a virus scanner or a sync program at the destination). Their
+    /// content is unknown, not known to be damaged.
+    pub unreadable: Vec<String>,
     pub cancelled: bool,
     pub duration: Duration,
 }
 
 impl VerifyReport {
     pub fn is_ok(&self) -> bool {
-        self.damaged.is_empty() && self.missing.is_empty() && !self.cancelled
+        self.damaged.is_empty()
+            && self.missing.is_empty()
+            && self.unreadable.is_empty()
+            && !self.cancelled
     }
 }
 
@@ -48,15 +55,8 @@ pub fn verify(
     on_progress: &mut dyn FnMut(&Progress),
 ) -> EngineResult<VerifyReport> {
     let started = Instant::now();
-    if snapshot.needs_unlock() {
-        return Err(EngineError::Locked);
-    }
     let destination = snapshot.destination();
-    let mut parts = Vec::new();
-    for part in snapshot.parts() {
-        parts.push((part, part.load_index(key)?));
-    }
-    super::plan::check_parts(&parts)?;
+    let parts = super::snapshots::load_parts(snapshot, key)?;
 
     let mut report = VerifyReport::default();
     let mut progress = Progress {
@@ -70,7 +70,7 @@ pub fn verify(
     };
     let mut reporter = Reporter::new(on_progress);
     // Encrypted content is shared between files; each blob is checked once.
-    let mut checked_blobs: HashMap<String, bool> = HashMap::new();
+    let mut checked_blobs: HashMap<String, Result<bool, String>> = HashMap::new();
 
     let mut hidden = 0u64;
     for (part, index) in &parts {
@@ -108,23 +108,36 @@ pub fn verify(
                     .then(|| vault::blob_path(&destination, &entry.blob)),
             };
             let Some(path) = path.filter(|p| p.is_file()) else {
+                tracing::warn!(
+                    "missing in backup {}: {label}: the stored copy is not there",
+                    snapshot.qualified_id()
+                );
                 report.missing.push(label);
                 progress.bytes_done += entry.size;
                 continue;
             };
 
-            let ok = if part.is_encrypted() {
+            // `Err(error)`: the stored copy could not be read at all.
+            let result: Result<bool, String> = if part.is_encrypted() {
                 let key = key.ok_or(EngineError::Locked)?;
                 match checked_blobs.get(&entry.blob) {
-                    Some(ok) => *ok,
+                    Some(result) => result.clone(),
                     None => {
-                        let ok = decrypted_hash(key, &path, cancel, &mut |n| {
+                        let result = match decrypted_hash(key, &path, cancel, &mut |n| {
                             progress.bytes_done += n;
                             reporter.maybe(&progress);
-                        })
-                        .is_ok_and(|hash| hash.eq_ignore_ascii_case(&entry.sha256));
-                        checked_blobs.insert(entry.blob.clone(), ok);
-                        ok
+                        }) {
+                            Ok(hash) => Ok(hash.eq_ignore_ascii_case(&entry.sha256)),
+                            // A cut-off copy reads to its end: damaged, not locked.
+                            Err(super::crypto::CryptoError::Io(err))
+                                if err.kind() != io::ErrorKind::UnexpectedEof =>
+                            {
+                                Err(err.to_string())
+                            }
+                            Err(_) => Ok(false),
+                        };
+                        checked_blobs.insert(entry.blob.clone(), result.clone());
+                        result
                     }
                 }
             } else {
@@ -132,16 +145,30 @@ pub fn verify(
                     progress.bytes_done += n;
                     reporter.maybe(&progress);
                 })
-                .is_ok_and(|hash| hash.eq_ignore_ascii_case(&entry.sha256))
+                .map(|hash| hash.eq_ignore_ascii_case(&entry.sha256))
+                .map_err(|err| err.to_string())
             };
             if cancel.is_cancelled() {
                 report.cancelled = true;
                 break;
             }
             report.bytes += entry.size;
-            if !ok {
-                tracing::warn!("damaged in backup {}: {label}", snapshot.qualified_id());
-                report.damaged.push(label);
+            match result {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        "damaged in backup {}: {label}: the content does not match its checksum",
+                        snapshot.qualified_id()
+                    );
+                    report.damaged.push(label);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "could not be read in backup {}: {label}: {err}",
+                        snapshot.qualified_id()
+                    );
+                    report.unreadable.push(format!("{label}: {err}"));
+                }
             }
             reporter.maybe(&progress);
         }
@@ -155,6 +182,7 @@ pub fn verify(
         files = report.files,
         damaged = report.damaged.len(),
         missing = report.missing.len(),
+        unreadable = report.unreadable.len(),
         "backup checked"
     );
     Ok(report)

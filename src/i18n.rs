@@ -762,8 +762,9 @@ impl Lang {
                 files,
                 damaged,
                 missing,
+                unreadable,
             } => {
-                let ok = *damaged == 0 && *missing == 0;
+                let ok = *damaged == 0 && *missing == 0 && *unreadable == 0;
                 (
                     match (en, ok) {
                         (true, true) => "Backup checked: everything readable".to_string(),
@@ -777,8 +778,12 @@ impl Lang {
                         join(vec![
                             snapshot.clone(),
                             pick(
-                                format!("{damaged} damaged, {missing} missing"),
-                                format!("{damaged} beschädigt, {missing} fehlen"),
+                                format!(
+                                    "{damaged} damaged, {missing} missing, {unreadable} not readable"
+                                ),
+                                format!(
+                                    "{damaged} beschädigt, {missing} fehlen, {unreadable} nicht lesbar"
+                                ),
                             ),
                         ])
                     },
@@ -916,15 +921,27 @@ impl Lang {
         }
     }
 
-    pub fn verify_problems(self, damaged: usize, missing: usize) -> String {
-        match self {
+    pub fn verify_problems(self, damaged: usize, missing: usize, unreadable: usize) -> String {
+        let mut text = match self {
             Lang::En => format!(
                 "{damaged} damaged, {missing} missing. The affected files cannot be restored from this backup; an older or newer backup may still have them."
             ),
             Lang::De => format!(
                 "{damaged} beschädigt, {missing} fehlend. Die betroffenen Dateien lassen sich aus dieser Sicherung nicht wiederherstellen; eine ältere oder neuere Sicherung hat sie vielleicht noch."
             ),
+        };
+        if unreadable > 0 {
+            text.push(' ');
+            text.push_str(&match self {
+                Lang::En => format!(
+                    "{unreadable} stored copies could not be read; they are often only locked (virus scanner, indexing or sync program at the destination). Check again later."
+                ),
+                Lang::De => format!(
+                    "{unreadable} gespeicherte Kopien ließen sich nicht lesen; oft sind sie nur gesperrt (Virenscanner, Indexdienst oder Synchronisation am Ziel). Später erneut prüfen."
+                ),
+            });
         }
+        text
     }
 
     pub fn delete_result(self, report: &crate::engine::manage::DeleteReport) -> String {
@@ -1255,6 +1272,120 @@ impl Lang {
         }
     }
 
+    /// What went wrong in a run, item by item, and what to do about it: for
+    /// notifications and the log. `hide_names`: files and folders the backup
+    /// reported are only counted (they may belong to encrypted folders);
+    /// results of the check name encrypted files only by number anyway.
+    pub fn problem_report(self, problems: &crate::state::Problems, hide_names: bool) -> String {
+        const SHOWN: usize = 10;
+        let en = self == Lang::En;
+        let mut lines: Vec<String> = Vec::new();
+        let list = |lines: &mut Vec<String>, items: &[String], hide: bool| {
+            if hide {
+                lines.push(pick_lang(
+                    en,
+                    "Names are in the activity log on this computer (not sent, because backups are encrypted).",
+                    "Die Namen stehen im Protokoll auf diesem Computer (nicht gesendet, weil Sicherungen verschlüsselt werden).",
+                ));
+                return;
+            }
+            lines.extend(items.iter().take(SHOWN).map(|i| format!("• {i}")));
+            if items.len() > SHOWN {
+                let more = items.len() - SHOWN;
+                lines.push(if en {
+                    format!("… and {more} more; the full list is in the activity log on this computer.")
+                } else {
+                    format!("… und {more} weitere; die vollständige Liste steht im Protokoll auf diesem Computer.")
+                });
+            }
+        };
+
+        if !problems.error.is_empty() {
+            lines.push(problems.error.clone());
+        }
+        if !problems.not_saved.is_empty() {
+            let n = problems.not_saved.len();
+            lines.push(if en {
+                format!("Not saved or noted during the backup ({n}):")
+            } else {
+                format!("Nicht oder nur mit Hinweis gesichert ({n}):")
+            });
+            list(&mut lines, &problems.not_saved, hide_names);
+            if !problems.folders_missing.is_empty() {
+                lines.push(pick_lang(
+                    en,
+                    "What to do: a folder to back up was not reachable (network share not connected, drive unplugged, folder renamed or moved). Connect it or correct the folder in the job; for network shares a UNC path (\\\\server\\share) is more reliable than a drive letter. The newest backup that contains the folder is kept.",
+                    "Abhilfe: Ein zu sichernder Ordner war nicht erreichbar (Netzlaufwerk nicht verbunden, Laufwerk getrennt, Ordner umbenannt oder verschoben). Verbinden oder den Ordner im Auftrag korrigieren; bei Netzwerkfreigaben ist ein UNC-Pfad (\\\\server\\freigabe) zuverlässiger als ein Laufwerksbuchstabe. Die neueste Sicherung, die den Ordner enthält, bleibt erhalten.",
+                ));
+            }
+            if n > problems.folders_missing.len() {
+                lines.push(pick_lang(
+                    en,
+                    "What to do: a file that could not be read is usually open in a program that locks it (database, mail program) or the account running the backup may not read it. Close the program before the backup (for example with the job's command before the backup) or grant read access. All other files were saved.",
+                    "Abhilfe: Eine Datei, die sich nicht lesen ließ, ist meist in einem Programm geöffnet, das sie sperrt (Datenbank, Mailprogramm), oder das Konto, unter dem die Sicherung läuft, darf sie nicht lesen. Das Programm vor der Sicherung beenden (z. B. mit dem Befehl vor der Sicherung im Auftrag) oder Leserechte geben. Alle anderen Dateien wurden gesichert.",
+                ));
+            }
+        }
+
+        let checked = [
+            &problems.check_unreadable,
+            &problems.check_damaged,
+            &problems.check_missing,
+        ];
+        if checked.iter().any(|c| !c.is_empty()) {
+            let (u, d, m) = (
+                problems.check_unreadable.len(),
+                problems.check_damaged.len(),
+                problems.check_missing.len(),
+            );
+            lines.push(if en {
+                format!("Check after the backup: {d} damaged, {m} missing, {u} not readable.")
+            } else {
+                format!("Prüfung nach der Sicherung: {d} beschädigt, {m} fehlen, {u} nicht lesbar.")
+            });
+            if d > 0 {
+                lines.push(pick_lang(
+                    en,
+                    "Damaged (content does not match the checksum taken when it was saved):",
+                    "Beschädigt (Inhalt passt nicht zur Prüfsumme vom Zeitpunkt der Sicherung):",
+                ));
+                list(&mut lines, &problems.check_damaged, false);
+                lines.push(pick_lang(
+                    en,
+                    "What to do: the destination changed or damaged these copies (disk, network, storage), or an earlier copy that this backup reuses was already damaged. Check the destination drive and run a full backup: it saves these files again. Turning on the “Health check” in the advanced settings finds and repairs such copies regularly.",
+                    "Abhilfe: Das Ziel hat diese Kopien verändert oder beschädigt (Datenträger, Netzwerk, Speicher), oder eine ältere Kopie, die diese Sicherung weiterverwendet, war schon beschädigt. Ziellaufwerk prüfen und eine vollständige Sicherung ausführen: Sie speichert diese Dateien neu. Der „Health check“ in den erweiterten Einstellungen findet und repariert solche Kopien regelmäßig.",
+                ));
+            }
+            if m > 0 {
+                lines.push(pick_lang(
+                    en,
+                    "Missing (the stored copy is not at the destination):",
+                    "Fehlen (die gespeicherte Kopie ist nicht am Ziel):",
+                ));
+                list(&mut lines, &problems.check_missing, false);
+                lines.push(pick_lang(
+                    en,
+                    "What to do: copies were deleted, moved or not fully synchronised at the destination. Run a full backup.",
+                    "Abhilfe: Kopien wurden am Ziel gelöscht, verschoben oder nicht vollständig synchronisiert. Eine vollständige Sicherung ausführen.",
+                ));
+            }
+            if u > 0 {
+                lines.push(pick_lang(
+                    en,
+                    "Not readable during the check (with the error reported by the system):",
+                    "Beim Prüfen nicht lesbar (mit der Fehlermeldung des Systems):",
+                ));
+                list(&mut lines, &problems.check_unreadable, false);
+                lines.push(pick_lang(
+                    en,
+                    "What to do: freshly saved files are often locked for a moment by a virus scanner, an indexing service or a sync program at the destination; their content is not known to be damaged. Exclude the destination folder from real-time scanning and check the backup again (Backups → Check, or aeternavault-cli verify).",
+                    "Abhilfe: Frisch gespeicherte Dateien sperrt oft kurz ein Virenscanner, ein Indexdienst oder ein Synchronisationsprogramm am Ziel; ihr Inhalt ist damit nicht als beschädigt erkannt. Den Zielordner vom Echtzeitscan ausnehmen und die Sicherung erneut prüfen (Sicherungen → Prüfen oder aeternavault-cli verify).",
+                ));
+            }
+        }
+        lines.join("\n")
+    }
+
     /// Calm, localized explanation of an engine error.
     pub fn error_message(self, error: &EngineError) -> String {
         use EngineError as E;
@@ -1279,6 +1410,12 @@ impl Lang {
                     p.display()
                 )
             }
+            (Lang::En, E::SourcesUnavailable(folders)) => format!(
+                "None of the folders to back up could be read: {folders}. Is the drive or network share connected? No backup was made; the existing backups stay."
+            ),
+            (Lang::De, E::SourcesUnavailable(folders)) => format!(
+                "Keiner der zu sichernden Ordner konnte gelesen werden: {folders}. Ist das Laufwerk oder die Netzwerkfreigabe verbunden? Es wurde keine Sicherung erstellt; die vorhandenen Sicherungen bleiben."
+            ),
             (Lang::En, E::SourceInsideDestination { source_path, .. }) => format!(
                 "The folder {} lies inside the backup destination. Please choose a different destination.",
                 source_path.display()
@@ -1654,6 +1791,7 @@ pub struct Tr {
     pub done_verify_problems: &'static str,
     pub done_verify_cancelled: &'static str,
     pub damaged_label: &'static str,
+    pub unreadable_label: &'static str,
     pub missing_label: &'static str,
     pub done_delete: &'static str,
     pub done_transfer: &'static str,
@@ -2134,6 +2272,7 @@ pub static EN: Tr = Tr {
     done_verify_problems: "The check found problems.",
     done_verify_cancelled: "The check was cancelled.",
     damaged_label: "damaged",
+    unreadable_label: "not readable",
     missing_label: "missing",
     done_delete: "The backups were deleted.",
     done_transfer: "The backup was moved.",
@@ -2624,6 +2763,7 @@ pub static DE: Tr = Tr {
     done_verify_problems: "Die Prüfung hat Probleme gefunden.",
     done_verify_cancelled: "Die Prüfung wurde abgebrochen.",
     damaged_label: "beschädigt",
+    unreadable_label: "nicht lesbar",
     missing_label: "fehlt",
     done_delete: "Die Sicherungen wurden gelöscht.",
     done_transfer: "Die Sicherung wurde verschoben.",
@@ -2808,6 +2948,10 @@ pub static DE: Tr = Tr {
     tip_health_check: "Eine inkrementelle Sicherung verwendet Kopien unveränderter Dateien weiter. Einmal in diesem Zeitraum liest sie jede weiterverwendete Kopie und vergleicht die Prüfsumme; eine beschädigte wird aus dem Original neu gespeichert. Diese Sicherung dauert länger. Eine Vollsicherung zählt als Health check.",
     confirm_health_check: "Diese Sicherung macht auch den Health check: Jede weiterverwendete Kopie wird gelesen und verglichen, deshalb dauert sie länger.",
 };
+
+fn pick_lang(en: bool, english: &str, german: &str) -> String {
+    if en { english } else { german }.to_string()
+}
 
 #[cfg(test)]
 mod tests {

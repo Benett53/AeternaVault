@@ -292,6 +292,10 @@ pub fn extract(
     if files.iter().any(|f| f.encrypted) && key.is_none() {
         return Err(EngineError::Locked);
     }
+    // Only files that the backup, read and checked again now, contains: a
+    // list made earlier (or elsewhere) is never trusted by itself.
+    let trusted: HashSet<snapshots::StoredFile> =
+        snapshots::contents(snapshot, key)?.into_iter().collect();
     let destination = snapshot.destination();
     let plain_root = snapshot.parts().find_map(|p| p.blob_root());
     let mut report = ExtractReport::default();
@@ -308,6 +312,12 @@ pub fn extract(
         if cancel.is_cancelled() {
             report.cancelled = true;
             break;
+        }
+        if !trusted.contains(file) {
+            report
+                .failed
+                .push(format!("{}: not part of this backup", file.display_path()));
+            continue;
         }
         let Some(rel) = safe_relative_path(&file.path) else {
             report
@@ -439,10 +449,11 @@ pub fn transfer(
         if !check.is_ok() {
             return Err(EngineError::io(
                 format!(
-                    "the copy at {} is not complete ({} damaged, {} missing); the backup stays where it was",
+                    "the copy at {} is not complete ({} damaged, {} missing, {} not readable); the backup stays where it was",
                     target.display(),
                     check.damaged.len(),
-                    check.missing.len()
+                    check.missing.len(),
+                    check.unreadable.len()
                 ),
                 std::io::Error::from(std::io::ErrorKind::InvalidData),
             ));
@@ -474,10 +485,7 @@ fn copy_parts(
     report: &mut TransferReport,
 ) -> EngineResult<()> {
     let source_destination = snapshot.destination();
-    let mut parts = Vec::new();
-    for part in snapshot.parts() {
-        parts.push((part, part.load_index(key)?));
-    }
+    let parts = snapshots::load_parts(snapshot, key)?;
     let mut reporter = Reporter::new(on_progress);
     let mut progress = Progress {
         phase: Phase::Copying,

@@ -406,6 +406,7 @@ impl AeternaApp {
                     files: report.files,
                     damaged: report.damaged.len() as u64,
                     missing: report.missing.len() as u64,
+                    unreadable: report.unreadable.len() as u64,
                 });
             }
             TaskOutput::Delete(Ok(report)) if !report.deleted.is_empty() => {

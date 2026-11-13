@@ -600,6 +600,7 @@ fn render_readme_screenshots() {
                     files: 1284,
                     damaged: 0,
                     missing: 0,
+                    unreadable: 0,
                 },
             },
         ];

@@ -2,6 +2,27 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Notifications and the activity log now say what went wrong and what to do: every file or folder that was not saved and every file the check after the backup found damaged, missing or unreadable, each with its reason, followed by advice. Before, a notification named only the first problem or a count ("check found 6 damaged and 0 missing files"). Errors that stop a run are explained in the language of the program. With encryption on, file names from the backup stay on the computer; their number, the reason and the advice are sent. In the window, the details appear when hovering over the last run of a job.
+- The check of a backup tells stored copies that could not be read (often locked for a moment by a virus scanner, an indexing service or a sync program at the destination) apart from damaged ones, and names the error reported by the system. Before, both counted as damaged.
+
+### Fixed
+
+- A folder to back up that was not there or not readable (network share not connected, drive unplugged, no access) was counted as skipped, and the backup was reported as completed. Such a folder, and every sub-folder or file that could not be read while scanning, now counts as failed: the backup completes with notes, `aeternavault-cli backup` ends with exit code 2, and the folder is not named in the new backup. Retention therefore keeps the newest backup that contains it. If no folder can be read at all, no backup is made and the run fails.
+- Restore left out index entries that name a folder the backup does not have, without a message and with exit code 0. They now count as failed and are named.
+- Update `rustix` to 1.1.6 (RUSTSEC-2026-0486; the affected functions are not used by AeternaVault).
+
+### Security
+
+Findings of an external review (12.11.2026):
+
+- Browsing, opening and extracting files read a backup's parts without checking that they belong together, as restore and check do. A readable part placed next to an encrypted backup by someone with write access to the backup storage was listed next to the authenticated files and could be extracted or opened. All of these now read backups through the same check, and extracting copies only files that the backup, read again, contains.
+- A partly encrypted backup whose encrypted part was missing (deleted, damaged, not fully synchronised) was restored as if it were complete: only its readable files came back, without any message. It is now refused with "the encrypted part of this partly encrypted backup is missing", and the same applies to a missing readable part.
+- Linux: saving a recovery key over an existing file, or remembering the key, kept the permissions of the existing file; a key file written by version 0.9.0 (0644) stayed readable for other users. Such files are now always written as a new file for the owner only (0600) that replaces the old one; a link at that name is replaced, not followed.
+
 ## [0.10.0] - 2026-11-12
 
 ### Added

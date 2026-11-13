@@ -166,18 +166,40 @@ pub fn unprotect_for_user(data: &[u8]) -> std::io::Result<Vec<u8>> {
 }
 
 /// Writes a file that only the current user may read.
+///
+/// Linux: always a new file with mode 0600 under an unpredictable name, which
+/// then replaces `path`. An existing file keeps its permissions when it is
+/// overwritten, so a key saved earlier with wider permissions would stay
+/// readable for others; a link at `path` is replaced, never followed.
+/// Windows: the file gets the permissions of its folder (or keeps its own).
 pub fn write_private_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut name = path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
+        name.push(format!(
+            ".{}.tmp",
+            crate::engine::crypto::hex(&crate::engine::crypto::random_bytes::<8>())
+        ));
+        let temp = path.with_file_name(name);
         let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
             .write(true)
+            .create_new(true)
             .mode(0o600)
-            .open(path)?;
-        file.write_all(data)
+            .open(&temp)?;
+        let result = file
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .and_then(|()| file.write_all(data))
+            .and_then(|()| file.sync_all())
+            .and_then(|()| std::fs::rename(&temp, path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result
     }
     #[cfg(not(unix))]
     {
@@ -445,5 +467,40 @@ pub fn open_in_editor(path: &Path) {
     let result = std::process::Command::new("xdg-open").arg(path).spawn();
     if let Err(err) = result {
         tracing::warn!("could not open {}: {err}", path.display());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Audit 2026-11-12 AV-06: a key saved over an existing file readable by
+    /// others (as version 0.9.0 wrote it) becomes private, and a link placed
+    /// at its name is replaced, not written through.
+    #[test]
+    fn private_file_replaces_readable_file_and_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("recovery-key.txt");
+        std::fs::write(&file, "old").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::write_private_file(&file, b"new key").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new key");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let elsewhere = tmp.path().join("elsewhere.txt");
+        std::fs::write(&elsewhere, "untouched").unwrap();
+        let link = tmp.path().join("link.txt");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        super::write_private_file(&link, b"key").unwrap();
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "untouched");
+        assert!(
+            !std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let leftovers = std::fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(leftovers, 3, "no temporary file left behind");
     }
 }

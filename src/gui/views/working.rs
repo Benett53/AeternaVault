@@ -231,11 +231,13 @@ pub fn show_done(app: &mut AeternaApp, ui: &mut Ui) {
                     );
                     ui.add_space(8.0);
                     ui.label(lang.verify_result(report.files, report.bytes, report.duration));
-                    if !report.damaged.is_empty() || !report.missing.is_empty() {
+                    if !report.is_ok() {
                         ui.label(
-                            egui::RichText::new(
-                                lang.verify_problems(report.damaged.len(), report.missing.len()),
-                            )
+                            egui::RichText::new(lang.verify_problems(
+                                report.damaged.len(),
+                                report.missing.len(),
+                                report.unreadable.len(),
+                            ))
                             .color(p.warning),
                         );
                         extra_notes = report
@@ -247,6 +249,12 @@ pub fn show_done(app: &mut AeternaApp, ui: &mut Ui) {
                                     .missing
                                     .iter()
                                     .map(|m| format!("{}: {m}", t.missing_label)),
+                            )
+                            .chain(
+                                report
+                                    .unreadable
+                                    .iter()
+                                    .map(|u| format!("{}: {u}", t.unreadable_label)),
                             )
                             .collect();
                     }

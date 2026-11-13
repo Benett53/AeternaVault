@@ -795,19 +795,12 @@ fn edited_plain_header_cannot_redirect_encrypted_files() {
     assert!(!evil.exists(), "nothing written to the edited path");
 }
 
-/// Audit R01: readable files placed next to a fully encrypted backup are
-/// never restored.
-#[test]
-fn readable_part_added_to_an_encrypted_backup_is_refused() {
+/// Places a readable part with one file (`Evil/planted.txt`, content
+/// `planted`) next to an encrypted backup, as someone with write access to
+/// the storage but without the key could. Returns the folder it names.
+fn plant_readable_part(tmp: &Path, report: &backup::BackupReport) -> PathBuf {
     use super::manifest::{FileEntry, FileIndex, SourceRecord};
-    let (tmp, _source, mut config) = setup();
-    let key = test_vault(&config.destination, "secret words");
-    config.encryption.enabled = true;
-    let report = run(&plan(&config, Some(&key)), Some(&key));
-    assert!(!report.header.split);
-
-    // A readable header with the same id, a folder of its own and one file.
-    let evil = tmp.path().join("Evil");
+    let evil = tmp.join("Evil");
     let mut header = report.header.clone();
     header.encrypted = false;
     header.split = true;
@@ -840,6 +833,19 @@ fn readable_part_added_to_an_encrypted_backup_is_refused() {
         serde_json::to_vec(&header).unwrap(),
     )
     .unwrap();
+    evil
+}
+
+/// Audit R01: readable files placed next to a fully encrypted backup are
+/// never restored.
+#[test]
+fn readable_part_added_to_an_encrypted_backup_is_refused() {
+    let (tmp, _source, mut config) = setup();
+    let key = test_vault(&config.destination, "secret words");
+    config.encryption.enabled = true;
+    let report = run(&plan(&config, Some(&key)), Some(&key));
+    assert!(!report.header.split);
+    let evil = plant_readable_part(tmp.path(), &report);
 
     let latest = snapshots::find(&config.destination, "latest", COMPUTER, Some(&key)).unwrap();
     assert!(latest.is_split(), "the planted part is seen");
@@ -1600,4 +1606,294 @@ fn backups_of_one_minute_are_listed_in_the_order_they_were_made() {
         .collect();
     let newest_first: Vec<&str> = names.iter().rev().copied().collect();
     assert_eq!(listed, newest_first);
+}
+
+fn split_config(config: &mut Config) -> VaultKey {
+    let key = test_vault(&config.destination, "secret words");
+    config.encryption.enabled = true;
+    config.encryption.scope = crate::config::EncryptionScope::Selected;
+    config.sources[0].encrypt_paths = vec!["photos".into()];
+    key
+}
+
+fn extract_all(
+    snapshot: &snapshots::SnapshotInfo,
+    files: &[snapshots::StoredFile],
+    target: &Path,
+    key: Option<&VaultKey>,
+) -> crate::error::EngineResult<super::manage::ExtractReport> {
+    super::manage::extract(
+        snapshot,
+        files,
+        target,
+        key,
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+}
+
+/// Audit 2026-11-12 AV-01: browsing, opening and extracting check the parts
+/// of a backup like a restore does; a readable part planted next to an
+/// encrypted backup is never listed or copied out.
+#[test]
+fn planted_readable_part_is_not_browsed_or_extracted() {
+    let (tmp, _source, mut config) = setup();
+    let key = test_vault(&config.destination, "secret words");
+    config.encryption.enabled = true;
+    let report = run(&plan(&config, Some(&key)), Some(&key));
+    plant_readable_part(tmp.path(), &report);
+
+    let latest = snapshots::find(&config.destination, "latest", COMPUTER, Some(&key)).unwrap();
+    let listed = snapshots::contents(&latest, Some(&key));
+    assert!(
+        matches!(listed, Err(crate::error::EngineError::Manifest { .. })),
+        "{listed:?}"
+    );
+
+    // A list of files made by someone else is not trusted either.
+    let planted = snapshots::StoredFile {
+        source: "Evil".into(),
+        path: "planted.txt".into(),
+        size: 7,
+        modified: 0,
+        sha256: super::format_sha256(&<sha2::Sha256 as sha2::Digest>::digest(b"planted")),
+        blob: format!("{}/Evil/planted.txt", report.header.id),
+        encrypted: false,
+    };
+    let out = tmp.path().join("Extracted");
+    assert!(extract_all(&latest, &[planted], &out, Some(&key)).is_err());
+    assert!(list_all_files(&out).is_empty(), "nothing extracted");
+    assert!(
+        super::verify::verify(
+            &latest,
+            Some(&key),
+            true,
+            &CancelToken::default(),
+            &mut quiet()
+        )
+        .is_err()
+    );
+}
+
+/// Extracting copies only files that the backup, read again, contains.
+#[test]
+fn extract_refuses_files_the_backup_does_not_contain() {
+    let (tmp, _source, config) = setup();
+    let report = run(&plan(&config, None), None);
+    let latest = snapshots::find(&config.destination, "latest", COMPUTER, None).unwrap();
+    let files = snapshots::contents(&latest, None).unwrap();
+    let letter = files.iter().find(|f| f.path == "letter.txt").unwrap();
+
+    // Same stored copy, but pretending to be another file.
+    let mut forged = letter.clone();
+    forged.path = "startup.bat".into();
+    let out = tmp.path().join("Extracted");
+    let result = extract_all(&latest, &[letter.clone(), forged], &out, None).unwrap();
+    assert_eq!(result.files, 1);
+    assert_eq!(result.failed.len(), 1, "{:?}", result.failed);
+    assert!(result.failed[0].contains("not part of this backup"));
+    assert!(out.join("Documents/letter.txt").is_file());
+    assert!(!out.join("Documents/startup.bat").exists());
+    let _ = report;
+}
+
+/// Audit 2026-11-12 AV-03: a partly encrypted backup with one of its parts
+/// gone is refused, never restored or checked as if it were complete.
+#[test]
+fn partly_encrypted_backup_with_a_missing_part_is_refused() {
+    use crate::error::EngineError;
+    for missing in ["encrypted.avs", "snapshot.json"] {
+        let (tmp, source, mut config) = setup();
+        let key = split_config(&mut config);
+        let report = run(&plan(&config, Some(&key)), Some(&key));
+        assert!(report.header.split);
+        fs::remove_file(report.snapshot_dir.join(META_DIR).join(missing)).unwrap();
+
+        let latest = snapshots::find(&config.destination, "latest", COMPUTER, Some(&key)).unwrap();
+        assert!(!latest.is_split(), "only one part is left");
+        let options = RestoreOptions {
+            target: RestoreTarget::Folder(tmp.path().join("Restored")),
+            conflict: ConflictPolicy::ReplaceChanged,
+            verify: true,
+            skip: HashSet::new(),
+        };
+        let refused = plan::plan_restore(
+            &latest,
+            options,
+            Some(&key),
+            &CancelToken::default(),
+            &mut quiet(),
+        );
+        assert!(
+            matches!(&refused, Err(EngineError::Manifest { message, .. }) if message.contains("is missing")),
+            "{missing}: {refused:?}"
+        );
+        let check = super::verify::verify(
+            &latest,
+            Some(&key),
+            true,
+            &CancelToken::default(),
+            &mut quiet(),
+        );
+        assert!(check.is_err(), "{missing}: verify reports it");
+        assert!(snapshots::contents(&latest, Some(&key)).is_err());
+        assert!(!tmp.path().join("Restored").exists());
+        let _ = source;
+    }
+}
+
+/// Audit 2026-11-12 AV-04: an index entry naming a folder the backup does
+/// not have is reported as failed, not left out silently.
+#[test]
+fn index_entry_naming_an_unknown_folder_fails_the_restore() {
+    let (tmp, _source, config) = setup();
+    let report = run(&plan(&config, None), None);
+    let index_file = report.snapshot_dir.join(META_DIR).join("files.json");
+    let mut index: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&index_file).unwrap()).unwrap();
+    for file in index["files"].as_array_mut().unwrap() {
+        if file["path"] == "letter.txt" {
+            file["source"] = serde_json::json!("Nowhere");
+        }
+    }
+    fs::write(&index_file, serde_json::to_string(&index).unwrap()).unwrap();
+
+    let target = tmp.path().join("Restored");
+    let plan = restore_plan(
+        &config.destination,
+        RestoreTarget::Folder(target.clone()),
+        None,
+    );
+    let result = restore::run_restore(&plan, None, &CancelToken::default(), &mut quiet()).unwrap();
+    assert_eq!(result.restored_files, 1);
+    assert_eq!(result.failed, 1, "{:?}", result.warnings);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("Nowhere/letter.txt"))
+    );
+}
+
+/// Audit 2026-11-12 AV-02: a folder that is not there (network share not
+/// connected) makes the backup incomplete; it is not named in the new
+/// backup, so retention keeps the last backup that has its files.
+#[test]
+fn missing_folder_fails_the_backup_and_its_last_copy_stays() {
+    use super::manifest::SnapshotStatus;
+    let (tmp, source, mut config) = setup();
+    let share = tmp.path().join("Share");
+    write(&share.join("orders.db"), "orders");
+    config.sources.push(Source::new("Share", &share, true));
+    config.retention = crate::config::Retention {
+        enabled: true,
+        keep_last: 1,
+        keep_daily: 0,
+        keep_weekly: 0,
+        keep_monthly: 0,
+    };
+    let first = run(&plan(&config, None), None);
+    assert_eq!(first.header.status, SnapshotStatus::Complete);
+
+    fs::rename(&share, tmp.path().join("Share (disconnected)")).unwrap();
+    let second = run(&plan(&config, None), None);
+    assert_eq!(second.header.status, SnapshotStatus::CompleteWithWarnings);
+    assert_eq!(second.header.stats.failed, 1);
+    assert!(
+        second
+            .warnings
+            .iter()
+            .any(|w| w.contains("Share") && w.contains("not connected")),
+        "{:?}",
+        second.warnings
+    );
+    assert_eq!(second.unread_folders, vec![share.display().to_string()]);
+    assert!(
+        second.header.sources.iter().all(|s| s.path != share),
+        "the folder that was not read is not named"
+    );
+
+    let all = snapshots::list(&config.destination, None).unwrap();
+    let doomed = super::retention::to_remove(&all, &config.retention, COMPUTER);
+    assert!(
+        doomed.is_empty(),
+        "the only backup with the share stays: {doomed:?}"
+    );
+    let _ = source;
+}
+
+/// Audit 2026-11-12 AV-02: when no folder can be read, no (empty) backup is
+/// made at all.
+#[test]
+fn no_readable_folder_makes_no_backup() {
+    let (tmp, source, config) = setup();
+    run(&plan(&config, None), None);
+    fs::rename(&source, tmp.path().join("gone")).unwrap();
+    let sources = Sources::collect(&config, &KnownPaths::current());
+    let input = BackupInput {
+        config: &config,
+        sources: &sources,
+        computer: COMPUTER,
+        key: None,
+    };
+    let result = plan::plan_backup(&input, &CancelToken::default(), &mut quiet());
+    assert!(
+        matches!(
+            result,
+            Err(crate::error::EngineError::SourcesUnavailable(_))
+        ),
+        "{:?}",
+        result.err()
+    );
+    assert_eq!(snapshots::list(&config.destination, None).unwrap().len(), 1);
+}
+
+/// A sub-folder without read access is a failure of the backup, not a skip.
+#[cfg(unix)]
+#[test]
+fn unreadable_folder_counts_as_failed() {
+    use super::manifest::SnapshotStatus;
+    use std::os::unix::fs::PermissionsExt;
+    let (_tmp, source, config) = setup();
+    let locked = source.join("locked");
+    write(&locked.join("a.txt"), "a");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_dir(&locked).is_ok() {
+        // Running as root: permissions are not enforced.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    let report = run(&plan(&config, None), None);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(report.header.status, SnapshotStatus::CompleteWithWarnings);
+    assert_eq!(report.header.stats.failed, 1);
+    assert!(
+        report.warnings.iter().any(|w| w.contains("locked")),
+        "{:?}",
+        report.warnings
+    );
+}
+
+/// A stored copy that cannot be read is reported with the system's error,
+/// apart from copies whose content is wrong.
+#[cfg(unix)]
+#[test]
+fn check_tells_unreadable_copies_from_damaged_ones() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_tmp, _source, config) = setup();
+    let report = run(&plan(&config, None), None);
+    let stored = report.snapshot_dir.join("Documents/letter.txt");
+    fs::set_permissions(&stored, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&stored).is_ok() {
+        return; // root
+    }
+    let latest = snapshots::find(&config.destination, "latest", COMPUTER, None).unwrap();
+    let check =
+        super::verify::verify(&latest, None, true, &CancelToken::default(), &mut quiet()).unwrap();
+    fs::set_permissions(&stored, fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(!check.is_ok());
+    assert!(check.damaged.is_empty(), "{:?}", check.damaged);
+    assert_eq!(check.unreadable.len(), 1);
+    assert!(check.unreadable[0].starts_with("Documents/letter.txt: "));
+    assert!(check.unreadable[0].to_lowercase().contains("permission"));
 }

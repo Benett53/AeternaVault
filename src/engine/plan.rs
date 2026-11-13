@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use super::crypto::VaultKey;
 use super::manifest::SourceRecord;
-use super::manifest::{self, FileEntry, SnapshotHeader};
+use super::manifest::{self, FileEntry};
 use super::scan::{self, Excludes, ScanOptions, SkipReason};
 use super::selection::Selection;
 use super::snapshots::{self, SnapshotInfo};
@@ -174,6 +174,9 @@ pub struct BackupPlan {
     pub summary: Summary,
     pub excluded: u64,
     pub warnings: Vec<String>,
+    /// Folders (indexes into `sources`) that could not be read at all: not
+    /// there, not connected, or no access. They are not part of the backup.
+    pub unread_sources: Vec<usize>,
 }
 
 impl BackupPlan {
@@ -319,6 +322,7 @@ pub fn plan_backup(
         summary: Summary::default(),
         excluded: 0,
         warnings,
+        unread_sources: Vec::new(),
     };
 
     let mut progress = Progress::default();
@@ -345,6 +349,18 @@ pub fn plan_backup(
         let scanned =
             scan::scan_source(&source.root, &options, cancel, &mut progress, &mut reporter)?;
         plan.excluded += scanned.excluded;
+        // Whether the folder itself could not be read. Its files are then
+        // unknown, not removed.
+        let unread = scanned.skipped.iter().any(|s| {
+            s.path == source.root
+                && matches!(
+                    s.reason,
+                    SkipReason::SourceMissing | SkipReason::NoAccess(_)
+                )
+        });
+        if unread {
+            plan.unread_sources.push(source_index);
+        }
 
         let source_path = path_key(&source.root);
         let previous = [lookups[0].get(&source_path), lookups[1].get(&source_path)];
@@ -429,7 +445,7 @@ pub fn plan_backup(
         }
 
         let mut removed: Vec<&FileEntry> = Vec::new();
-        for map in previous.into_iter().flatten() {
+        for map in previous.into_iter().flatten().filter(|_| !unread) {
             for (lower, entry) in map {
                 if seen.insert(lower.clone()) {
                     removed.push(entry);
@@ -455,6 +471,17 @@ pub fn plan_backup(
                 },
             );
         }
+    }
+
+    // Nothing could be read: such a run must not count as a backup, or its
+    // empty content would replace the last one that has the files.
+    if plan.unread_sources.len() == plan.sources.len() {
+        let folders: Vec<String> = plan
+            .sources
+            .iter()
+            .map(|s| s.root.display().to_string())
+            .collect();
+        return Err(EngineError::SourcesUnavailable(folders.join(", ")));
     }
 
     // A backup without any content still gets a (plain) folder.
@@ -524,6 +551,10 @@ pub struct RestorePlan {
     pub sources: Vec<PlannedSource>,
     pub items: Vec<PlanItem>,
     pub summary: Summary,
+    /// Entries of the index that name no folder of the backup (`folder/path`):
+    /// only a damaged or changed index has them. They cannot be restored and
+    /// count as failed.
+    pub invalid: Vec<String>,
 }
 
 impl RestorePlan {
@@ -538,23 +569,6 @@ impl RestorePlan {
 
 pub fn is_skipped(skip: &HashSet<String>, key: &str) -> bool {
     skip.contains(key)
-}
-
-/// Refuses a readable part that the encrypted part does not vouch for, before
-/// anything is written.
-pub(crate) fn check_parts(parts: &[(&SnapshotInfo, manifest::FileIndex)]) -> EngineResult<()> {
-    let [(plain, index), (encrypted, _)] = parts else {
-        return Ok(());
-    };
-    let (Some(plain_header), Some(encrypted_header)) = (&plain.header, &encrypted.header) else {
-        return Err(EngineError::Locked);
-    };
-    manifest::check_plain_part(plain_header, index, encrypted_header).map_err(|message| {
-        EngineError::Manifest {
-            path: plain.dir().to_path_buf(),
-            message: message.into(),
-        }
-    })
 }
 
 /// Where the files of one backed-up folder go when restoring.
@@ -589,22 +603,15 @@ pub fn plan_restore(
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(&Progress),
 ) -> EngineResult<RestorePlan> {
-    let header: SnapshotHeader = match &snapshot.header {
-        Some(header) => header.clone(),
+    match &snapshot.header {
+        Some(_) => {}
         None if snapshot.is_locked() => return Err(EngineError::Locked),
         None => return Err(EngineError::SnapshotNotFound(snapshot.qualified_id())),
-    };
-    if snapshot.needs_unlock() {
-        return Err(EngineError::Locked);
     }
-    // Every part with its index: the plain part first, then the encrypted one.
-    let mut parts: Vec<(&SnapshotInfo, manifest::FileIndex)> = Vec::new();
-    for part in snapshot.parts() {
-        parts.push((part, part.load_index(key)?));
-    }
+    // Every part with its index, checked to belong together.
+    let parts = snapshots::load_parts(snapshot, key)?;
     let here = KnownPaths::current();
     let destination = snapshot.destination();
-    check_parts(&parts)?;
 
     // Every part names its own folders. The folders of the encrypted part come
     // only from its own, authenticated header, never from the readable plain
@@ -613,12 +620,6 @@ pub fn plan_restore(
     let mut part_sources: Vec<HashMap<String, usize>> = Vec::new();
     for (part, _) in &parts {
         let part_header = part.header.as_ref().ok_or(EngineError::Locked)?;
-        if part_header.id != header.id || (part.is_encrypted() != part_header.encrypted) {
-            return Err(EngineError::Manifest {
-                path: part.dir().to_path_buf(),
-                message: "the parts of this backup do not belong together".into(),
-            });
-        }
         let mut map = HashMap::new();
         for record in &part_header.sources {
             map.insert(record.key.clone(), sources.len());
@@ -633,6 +634,7 @@ pub fn plan_restore(
         sources: sources.clone(),
         items: Vec::with_capacity(parts.iter().map(|(_, i)| i.files.len()).sum()),
         summary: Summary::default(),
+        invalid: Vec::new(),
     };
 
     let mut progress = Progress {
@@ -651,6 +653,8 @@ pub fn plan_restore(
             return Err(EngineError::Cancelled);
         }
         let Some(&source) = part_sources[n].get(entry.source.as_str()) else {
+            plan.invalid
+                .push(format!("{}/{}", entry.source, entry.path));
             continue;
         };
         let planned = &sources[source];

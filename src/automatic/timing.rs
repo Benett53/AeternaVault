@@ -245,6 +245,7 @@ mod tests {
             files: 0,
             bytes: 0,
             schedule: String::new(),
+            problems: crate::state::Problems::default(),
         });
         assert!(!is_due(
             &schedule,

@@ -73,6 +73,7 @@ pub fn run_unattended(
         files,
         bytes,
         schedule: label.to_string(),
+        problems: crate::state::Problems::default(),
     };
 
     let input = BackupInput {
@@ -91,7 +92,9 @@ pub fn run_unattended(
             } else {
                 tracing::warn!("automatic backup could not be planned: {err}");
             }
-            return (finished(outcome, err.to_string(), 0, 0), None);
+            let mut run = finished(outcome, err.to_string(), 0, 0);
+            run.problems = crate::state::Problems::from_error(&err, Lang::resolve(config.language));
+            return (run, None);
         }
     };
 
@@ -117,17 +120,20 @@ pub fn run_unattended(
                 AutomaticOutcome::CompleteWithNotes
             };
             let total = report.total_stats();
-            let run = finished(
+            let mut run = finished(
                 outcome,
-                report.warnings.first().cloned().unwrap_or_default(),
+                problems_summary(report.warnings.len()),
                 total.files,
                 total.bytes,
             );
+            run.problems = crate::state::Problems::from_backup(&report);
             (run, Some(report))
         }
         Err(err) => {
             tracing::error!("automatic backup failed: {err}");
-            (finished(outcome_for(&err), err.to_string(), 0, 0), None)
+            let mut run = finished(outcome_for(&err), err.to_string(), 0, 0);
+            run.problems = crate::state::Problems::from_error(&err, Lang::resolve(config.language));
+            (run, None)
         }
     }
 }
@@ -257,6 +263,11 @@ pub fn run_job(
             AutomaticRun {
                 at: Utc::now(),
                 outcome: AutomaticOutcome::Failed,
+                // About the job's own command, not about backed-up files.
+                problems: crate::state::Problems {
+                    error: message.clone(),
+                    ..crate::state::Problems::default()
+                },
                 message,
                 files: 0,
                 bytes: 0,
@@ -333,8 +344,9 @@ pub fn run_job(
         ),
         AutomaticOutcome::CompleteWithNotes => tracing::warn!(
             files = run.files,
-            "backup job completed with notes: {label}: {}",
-            run.message
+            "backup job completed with notes: {label}: {}\n{}",
+            run.message,
+            Lang::En.problem_report(&run.problems, false)
         ),
         AutomaticOutcome::DestinationUnavailable => {
             tracing::info!("backup job skipped, destination not connected: {label}")
@@ -501,15 +513,23 @@ fn check_backup(
                     files: check.files,
                     damaged: check.damaged.len() as u64,
                     missing: check.missing.len() as u64,
+                    unreadable: check.unreadable.len() as u64,
                 },
             );
             if !check.is_ok() {
                 run.outcome = AutomaticOutcome::CompleteWithNotes;
-                run.message = format!(
-                    "check found {} damaged and {} missing files",
+                let check_message = format!(
+                    "the check found {} damaged, {} missing and {} unreadable files",
                     check.damaged.len(),
-                    check.missing.len()
+                    check.missing.len(),
+                    check.unreadable.len()
                 );
+                run.message = if run.message.is_empty() {
+                    check_message
+                } else {
+                    format!("{}; {check_message}", run.message)
+                };
+                run.problems.add_check(&check);
             }
             check.is_ok()
         }
@@ -532,6 +552,15 @@ fn key_for_destination(
     let header = vault::read_header(&config.destination).ok()?;
     key.filter(|k| k.fingerprint() == header.key_check)
         .or_else(|| unattended_key(paths, config))
+}
+
+/// Short summary of a backup's problems; the details are in `problems`.
+pub fn problems_summary(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1 => "1 file or folder was not saved or has a note".into(),
+        n => format!("{n} files or folders were not saved or have a note"),
+    }
 }
 
 fn outcome_for(err: &EngineError) -> AutomaticOutcome {

@@ -3,7 +3,7 @@
 //! A backup has a plain part (a folder), an encrypted part (in the vault), or
 //! both. Each plan item says where it goes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, Utc};
@@ -14,7 +14,7 @@ use super::manifest::{
     self, EncryptedSnapshot, FORMAT_VERSION, FileEntry, FileIndex, HEADER_FILE, INDEX_FILE,
     META_DIR, SnapshotHeader, SnapshotStats, SnapshotStatus, SourceRecord,
 };
-use super::plan::{BackupPlan, ItemKind};
+use super::plan::{BackupPlan, ItemKind, Note};
 use super::sources::sanitize_segment;
 use super::{
     CancelToken, Phase, Progress, Reporter, safe_relative_path, snapshots, to_unix_nanos, vault,
@@ -34,6 +34,9 @@ pub struct BackupReport {
     /// Header of the encrypted part of a partly encrypted backup.
     pub encrypted_part: Option<SnapshotHeader>,
     pub warnings: Vec<String>,
+    /// Folders to back up that could not be read at all (not there, not
+    /// connected, no access).
+    pub unread_folders: Vec<String>,
     pub duration: Duration,
 }
 
@@ -135,13 +138,22 @@ pub fn run_backup(
     } else {
         ENCRYPTED
     };
-    parts[primary].stats.skipped = plan.summary.count(ItemKind::Skipped);
     // Warnings per part: in a partly encrypted backup, names of encrypted
     // files must not end up in the readable index. Warnings from scanning
     // cannot be assigned to a part and go to the encrypted one there.
     let split_plan = plan.plain_part && plan.encrypted_part;
+    let scan_part = if split_plan { ENCRYPTED } else { primary };
     let mut warnings: [Vec<String>; 2] = Default::default();
-    warnings[if split_plan { ENCRYPTED } else { primary }] = plan.warnings.clone();
+    warnings[scan_part] = plan.warnings.clone();
+    // Folders and files that could not be read while scanning are not in the
+    // backup: that is a failure, never a silent skip.
+    let unreadable = scan_failures(plan);
+    parts[primary].stats.skipped = plan.summary.count(ItemKind::Skipped) - unreadable.len() as u64;
+    parts[scan_part].stats.failed += unreadable.len() as u64;
+    for message in &unreadable {
+        tracing::warn!("not backed up: {message}");
+    }
+    warnings[scan_part].extend(unreadable);
     let mut cancelled = false;
 
     for item in plan.stored_files() {
@@ -362,10 +374,15 @@ pub fn run_backup(
     progress.current.clear();
     reporter.now(&progress);
 
+    // A folder that could not be read is not named: the backup does not hold
+    // it, and retention keeps the newest backup that does (see
+    // `retention::newest_per_folder`).
     let source_records: Vec<SourceRecord> = plan
         .sources
         .iter()
-        .map(|s| SourceRecord {
+        .enumerate()
+        .filter(|(n, _)| !plan.unread_sources.contains(n))
+        .map(|(_, s)| SourceRecord {
             key: s.key.clone(),
             name: s.name.clone(),
             path: s.root.clone(),
@@ -481,6 +498,11 @@ pub fn run_backup(
         header,
         encrypted_part,
         warnings: warnings.concat(),
+        unread_folders: plan
+            .unread_sources
+            .iter()
+            .map(|&n| plan.sources[n].root.display().to_string())
+            .collect(),
         duration: started.elapsed(),
     };
     let total = report.total_stats();
@@ -495,6 +517,31 @@ pub fn run_backup(
         "backup finished"
     );
     Ok(report)
+}
+
+/// What could not be read while scanning: missing folders and folders or
+/// files without access.
+fn scan_failures(plan: &BackupPlan) -> Vec<String> {
+    plan.items
+        .iter()
+        .filter(|i| i.kind == ItemKind::Skipped)
+        .filter_map(|item| {
+            let root = &plan.sources[item.source].root;
+            let path = if Path::new(&item.rel).is_absolute() {
+                PathBuf::from(&item.rel)
+            } else {
+                root.join(&item.rel)
+            };
+            match &item.note {
+                Some(Note::SourceMissing) => Some(format!(
+                    "{}: the folder was not found or is not connected",
+                    path.display()
+                )),
+                Some(Note::NoAccess(err)) => Some(format!("{}: {err}", path.display())),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// `Documents/Letters` → `Documents\Letters`.

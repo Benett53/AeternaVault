@@ -31,7 +31,7 @@ const OVERDUE_CHECK: Duration = Duration::from_secs(15 * 60);
 pub enum Event {
     Started,
     Progress,
-    Finished(AutomaticRun),
+    Finished(Box<AutomaticRun>),
 }
 
 #[derive(Debug, Clone)]
@@ -289,5 +289,5 @@ fn check_and_run(shared: &Shared) {
     );
     drop(_background);
     *lock(&shared.running) = None;
-    (shared.notify)(Event::Finished(run));
+    (shared.notify)(Event::Finished(Box::new(run)));
 }

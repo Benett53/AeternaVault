@@ -74,6 +74,10 @@ impl Outcome {
     }
 }
 
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Event {
@@ -128,6 +132,9 @@ pub enum Event {
         files: u64,
         damaged: u64,
         missing: u64,
+        /// Stored copies that could not be read during the check.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        unreadable: u64,
     },
     JobCreated {
         job: String,

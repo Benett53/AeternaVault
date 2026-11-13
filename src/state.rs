@@ -48,6 +48,62 @@ pub struct AutomaticRun {
     /// Name or description of the schedule that ran.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub schedule: String,
+    /// What went wrong, item by item, for notifications and the log.
+    #[serde(default, skip_serializing_if = "Problems::is_empty")]
+    pub problems: Problems,
+}
+
+/// The problems of one run, each entry `item: reason`, sorted by kind so that
+/// a message can say what to do about them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Problems {
+    /// Why the run stopped, explained in the user's language. It names no
+    /// file of a backed-up folder, so it is also sent with encryption on.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub error: String,
+    /// Folders to back up that could not be read at all.
+    pub folders_missing: Vec<String>,
+    /// Everything the backup could not read or store, folders included.
+    pub not_saved: Vec<String>,
+    /// Check after the backup: stored copies that could not be read.
+    pub check_unreadable: Vec<String>,
+    /// … whose content does not match the checksum taken when they were saved.
+    pub check_damaged: Vec<String>,
+    /// … that are not there.
+    pub check_missing: Vec<String>,
+}
+
+impl Problems {
+    pub fn is_empty(&self) -> bool {
+        self.error.is_empty()
+            && self.folders_missing.is_empty()
+            && self.not_saved.is_empty()
+            && self.check_unreadable.is_empty()
+            && self.check_damaged.is_empty()
+            && self.check_missing.is_empty()
+    }
+
+    pub fn from_error(error: &crate::error::EngineError, lang: crate::i18n::Lang) -> Self {
+        Self {
+            error: lang.error_message(error),
+            ..Self::default()
+        }
+    }
+
+    pub fn from_backup(report: &crate::engine::backup::BackupReport) -> Self {
+        Self {
+            folders_missing: report.unread_folders.clone(),
+            not_saved: report.warnings.clone(),
+            ..Self::default()
+        }
+    }
+
+    pub fn add_check(&mut self, check: &crate::engine::verify::VerifyReport) {
+        self.check_unreadable = check.unreadable.clone();
+        self.check_damaged = check.damaged.clone();
+        self.check_missing = check.missing.clone();
+    }
 }
 
 /// Bookkeeping for one schedule (keyed by its id).

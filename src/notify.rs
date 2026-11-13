@@ -327,13 +327,25 @@ pub fn facts_for_run(
             (Some(f), Some(t)) if t > 0 => Some(f as f64 * 100.0 / t as f64),
             _ => None,
         },
-        // With encryption on, a warning may name a file of an encrypted
-        // folder; it must not leave the computer.
-        message: if config.encryption.enabled && !run.message.is_empty() {
-            lang.t().notify_message_hidden.to_string()
-        } else {
-            run.message.clone()
-        },
+        message: run_message(config, run, lang),
+    }
+}
+
+/// What went wrong, for `{message}`: item by item with the reason and what
+/// to do. With encryption on, a file or folder named by the backup may belong
+/// to an encrypted folder; it must not leave the computer, so those are only
+/// counted. An error that stopped the run is explained in the user's language.
+fn run_message(config: &Config, run: &AutomaticRun, lang: Lang) -> String {
+    let hide = config.encryption.enabled;
+    if !run.problems.is_empty() {
+        return lang.problem_report(&run.problems, hide);
+    }
+    if run.message.is_empty() {
+        String::new()
+    } else if hide {
+        lang.t().notify_message_hidden.to_string()
+    } else {
+        run.message.clone()
     }
 }
 
@@ -551,13 +563,17 @@ pub fn after_manual_backup(
     if !config.notifications.active() {
         return;
     }
+    let error = result
+        .as_ref()
+        .err()
+        .map(|err| crate::state::Problems::from_error(err, Lang::resolve(config.language)));
     let (outcome, report, message) = match result {
         Ok(r) => match r.header.status {
             SnapshotStatus::Complete => (AutomaticOutcome::Complete, Some(r), String::new()),
             SnapshotStatus::CompleteWithWarnings => (
                 AutomaticOutcome::CompleteWithNotes,
                 Some(r),
-                r.warnings.first().cloned().unwrap_or_default(),
+                crate::automatic::problems_summary(r.warnings.len()),
             ),
             SnapshotStatus::Failed => (AutomaticOutcome::Failed, Some(r), String::new()),
             SnapshotStatus::Cancelled => return,
@@ -578,6 +594,9 @@ pub fn after_manual_backup(
         files: stats.files,
         bytes: stats.bytes,
         schedule: label.to_string(),
+        problems: error
+            .or_else(|| report.map(crate::state::Problems::from_backup))
+            .unwrap_or_default(),
     };
     let config = config.clone();
     let report = report.cloned();
@@ -965,6 +984,97 @@ fn send_email(channel: &Channel, message: &Message) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn run_with(problems: crate::state::Problems) -> AutomaticRun {
+        AutomaticRun {
+            at: chrono::Utc::now(),
+            outcome: AutomaticOutcome::CompleteWithNotes,
+            message: "short summary".into(),
+            files: 338,
+            bytes: 0,
+            schedule: "Database 20:00".into(),
+            problems,
+        }
+    }
+
+    /// A problem names each affected file with its reason and says what to
+    /// do (feedback from a company: "an error, but not which one").
+    #[test]
+    fn problem_message_names_files_reasons_and_what_to_do() {
+        let problems = crate::state::Problems {
+            check_unreadable: vec![
+                "Data/tasks.db: The process cannot access the file because it is being used by another process. (os error 32)".into(),
+            ],
+            check_damaged: vec!["Data/orders.db".into()],
+            ..Default::default()
+        };
+        let config = Config::default();
+        let text = run_message(&config, &run_with(problems.clone()), Lang::De);
+        assert!(
+            text.contains("Data/tasks.db: The process cannot access"),
+            "{text}"
+        );
+        assert!(text.contains("• Data/orders.db"), "{text}");
+        assert!(
+            text.contains("1 beschädigt, 0 fehlen, 1 nicht lesbar"),
+            "{text}"
+        );
+        assert!(text.contains("Virenscanner"), "{text}");
+        assert!(text.contains("vollständige Sicherung"), "{text}");
+        let english = run_message(&config, &run_with(problems), Lang::En);
+        assert!(english.contains("What to do"), "{english}");
+    }
+
+    /// With encryption on, files named by the backup itself are only
+    /// counted; the reason and what to do are still sent.
+    #[test]
+    fn encrypted_names_stay_on_the_computer_but_the_advice_is_sent() {
+        let problems = crate::state::Problems {
+            folders_missing: vec!["Y:\\Data".into()],
+            not_saved: vec![
+                "Y:\\Data: the folder was not found or is not connected".into(),
+                "C:\\Secret\\salaries.xlsx: locked".into(),
+            ],
+            ..Default::default()
+        };
+        let mut config = Config::default();
+        config.encryption.enabled = true;
+        let text = run_message(&config, &run_with(problems), Lang::De);
+        assert!(!text.contains("salaries"), "{text}");
+        assert!(text.contains("(2)"), "{text}");
+        assert!(text.contains("UNC-Pfad"), "{text}");
+        assert!(
+            text.contains("gesperrt") || text.contains("sperrt"),
+            "{text}"
+        );
+    }
+
+    /// A long list is cut; the rest is in the log.
+    #[test]
+    fn long_problem_lists_are_cut() {
+        let problems = crate::state::Problems {
+            check_missing: (0..25).map(|n| format!("Data/{n}.txt")).collect(),
+            ..Default::default()
+        };
+        let text = Lang::En.problem_report(&problems, false);
+        assert!(
+            text.contains("Data/9.txt") && !text.contains("Data/10.txt"),
+            "{text}"
+        );
+        assert!(text.contains("15 more"), "{text}");
+    }
+
+    /// An error that stopped the run is explained, also with encryption on.
+    #[test]
+    fn stopping_error_is_explained() {
+        let error = crate::error::EngineError::SourcesUnavailable("Y:\\Data".into());
+        let mut config = Config::default();
+        config.encryption.enabled = true;
+        let mut run = run_with(crate::state::Problems::from_error(&error, Lang::De));
+        run.outcome = AutomaticOutcome::Failed;
+        let text = run_message(&config, &run, Lang::De);
+        assert!(text.contains("Netzwerkfreigabe"), "{text}");
+    }
+
     fn facts() -> Facts {
         Facts {
             job: "Every evening".into(),
@@ -1145,6 +1255,7 @@ mod tests {
             files: 0,
             bytes: 0,
             schedule: String::new(),
+            problems: crate::state::Problems::default(),
         };
         let failed = AutomaticRun {
             outcome: AutomaticOutcome::Failed,
