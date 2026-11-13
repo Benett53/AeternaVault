@@ -2,7 +2,9 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.14.0] - 2026-11-14
+
+Contains the changes of 0.13.0, which was withdrawn.
 
 ### Added
 
@@ -25,7 +27,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); ver
 - Shorter labels; number fields show “off” or “never” for 0.
 - Pages before sign-in name nothing about the computer, and the sign-in box is centred; the style sheet address carries the version, so a browser never mixes old and new.
 
-## [0.13.0] - 2026-11-13
+## [0.13.0] - 2026-11-13 (withdrawn)
 
 ### Added
 
