@@ -405,14 +405,15 @@ fn demo_schedules(config: &Config) -> Vec<crate::config::Schedule> {
 fn web_tab_manages_users() {
     let tmp = tempfile::tempdir().unwrap();
     let mut harness = harness(tmp.path(), |_| {});
+    // The tab is long; everything should be on screen for the clicks.
+    harness.set_size(eframe::egui::vec2(1000.0, 2600.0));
     goto(&mut harness, View::Web);
     harness.run();
     harness.get_by_label("Switch on the web interface");
-    harness.state_mut().web.fill_new_user(
-        "admin",
-        "a long password",
-        crate::web::users::Role::Admin,
-    );
+    harness
+        .state_mut()
+        .web
+        .fill_new_user("admin", "short", crate::web::users::Role::Admin);
     harness.run();
     harness.get_by_label("Add").click();
     harness.run();

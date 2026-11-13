@@ -2,6 +2,23 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Web interface: sign-in with LDAP or Active Directory. The role comes from directory groups (nested groups in Active Directory), read again at every sign-in; LDAPS or StartTLS, certificates trusted by the system plus an optional own CA; search with a service account, anonymously, or as the user. `aeternavault-cli web ldap on|off|set|test`, and a test button in the Web tab.
+- Web interface: codes by e-mail as second step, sent through an e-mail notification channel. Users switch them on under Account; directory users use the address of their account; administrators can enter addresses. With a second step required, either an authenticator app or e-mail counts.
+- Sign-ins, live: who is signed in now, the last 24 hours, and every attempt with its reason, in the web interface (Activity → Sign-ins, administrators) and in the window (Activity → Sign-ins (web)).
+
+### Changed
+
+- The Web tab is laid out again: settings in sections with labels, edited as a draft and used with Apply (before, every change restarted the web interface), allowed networks as a list with a check per entry, file choosers for certificates, a user table with an actions menu, and a filterable audit log.
+- The password length is a recommendation (`recommended_password_length`, before `min_password_length`): shorter or easily guessed passwords are accepted with a note. Only an empty password is refused.
+
+### Fixed
+
+- Web tab: the message for a refused new user (for example a password that was too short) disappeared at once and could not be read.
+
 ## [0.11.0] - 2026-11-13
 
 ### Added

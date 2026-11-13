@@ -581,7 +581,7 @@ fn save_recovery_file(
 
 /// Weak / fair / good. The criteria appear when pointing at the bar or at
 /// (?), and stay open after a click on (?).
-fn strength_meter(ui: &mut Ui, passphrase: &str, lang: crate::i18n::Lang) {
+pub(crate) fn strength_meter(ui: &mut Ui, passphrase: &str, lang: crate::i18n::Lang) {
     let p = *palette(ui);
     let t = lang.t();
     let personal = passphrase::personal_details();

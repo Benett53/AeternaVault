@@ -110,11 +110,9 @@ fn setup(settings: WebSettings) -> (tempfile::TempDir, AppPaths, WebServer, u16)
         portable: false,
     };
     let mut store = UserStore::default();
+    store.add("admin", Role::Admin, "admin password 1").unwrap();
     store
-        .add("admin", Role::Admin, "admin password 1", 12)
-        .unwrap();
-    store
-        .add("viewer", Role::Viewer, "viewer password 1", 12)
+        .add("viewer", Role::Viewer, "viewer password 1")
         .unwrap();
     store.save(&paths.config_file).unwrap();
     let port = free_port();
@@ -241,6 +239,18 @@ fn administrators_manage_users_and_the_last_one_stays() {
         olga.must_change_password,
         "a password set by someone else is changed first"
     );
+
+    // A short password is a recommendation only: accepted with a note.
+    let short = send(
+        port,
+        "POST",
+        "/users/add",
+        Some(&cookie),
+        &format!("csrf={csrf}&user=kurt&password=abc&role=viewer"),
+    );
+    assert_eq!(short.status, 303);
+    assert!(short.header("location").unwrap().contains("msg="));
+    assert!(UserStore::load(&paths.config_file).find("kurt").is_some());
 
     // Olga must change her password before anything else.
     let olga_cookie = sign_in(port, "olga", "olga password 1");
@@ -380,4 +390,154 @@ fn https_with_a_certificate_made_here() {
     let plain = send(port, "GET", "/login", None, "");
     assert_ne!(plain.status, 200);
     assert!(super::tls::fingerprint(&paths.config_file, &server.settings).is_some());
+}
+
+/// A minimal SMTP receiver for one test: keeps the text of every mail.
+fn fake_smtp() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::BufRead;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mails = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let store = mails.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut writer = stream.try_clone().unwrap();
+            let mut reader = std::io::BufReader::new(stream);
+            let _ = writer.write_all(b"220 test ESMTP\r\n");
+            let mut line = String::new();
+            let mut data = None::<String>;
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                if let Some(body) = data.as_mut() {
+                    if line == ".\r\n" {
+                        store.lock().unwrap().push(data.take().unwrap());
+                        let _ = writer.write_all(b"250 queued\r\n");
+                    } else {
+                        body.push_str(&line);
+                    }
+                } else {
+                    let upper = line.to_ascii_uppercase();
+                    let reply: &[u8] = if upper.starts_with("EHLO") {
+                        b"250-test\r\n250 OK\r\n"
+                    } else if upper.starts_with("DATA") {
+                        data = Some(String::new());
+                        b"354 go on\r\n"
+                    } else if upper.starts_with("QUIT") {
+                        let _ = writer.write_all(b"221 bye\r\n");
+                        break;
+                    } else {
+                        b"250 OK\r\n"
+                    };
+                    let _ = writer.write_all(reply);
+                }
+                line.clear();
+            }
+        }
+    });
+    (port, mails)
+}
+
+#[test]
+fn codes_by_e_mail_when_a_second_step_is_required() {
+    let settings = WebSettings {
+        require_two_factor: true,
+        ..WebSettings::default()
+    };
+    let (_tmp, paths, _server, port) = setup(settings);
+    let (smtp_port, mails) = fake_smtp();
+    let mut config = crate::config::Config::default();
+    config.notifications.channels.push(crate::notify::Channel {
+        kind: crate::notify::ChannelKind::Email,
+        enabled: true,
+        smtp_host: "127.0.0.1".into(),
+        smtp_port,
+        smtp_security: crate::notify::SmtpSecurity::None,
+        from: "backup@firma.local".into(),
+        to: "team@firma.local".into(),
+        ..Default::default()
+    });
+    config.save(&paths.config_file).unwrap();
+    let mut store = UserStore::load(&paths.config_file);
+    store.find_mut("viewer").unwrap().email = "viewer@firma.local".into();
+    store.save(&paths.config_file).unwrap();
+
+    let cookie = sign_in(port, "viewer", "viewer password 1");
+    assert_eq!(
+        send(port, "GET", "/", Some(&cookie), "")
+            .header("location")
+            .as_deref(),
+        Some("/login/code"),
+        "the password alone is not enough"
+    );
+    let page = send(port, "GET", "/login/code", Some(&cookie), "");
+    assert!(page.body.contains("v***@firma.local"), "{}", page.body);
+
+    let mail = mails
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("a code was mailed");
+    assert!(mail.contains("viewer@firma.local"));
+    let code: String = mail
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|w| w.len() == 6)
+        .expect("a six-digit code")
+        .to_string();
+    let wrong = send(port, "POST", "/login/code", Some(&cookie), "code=000000");
+    assert_eq!(wrong.status, 200);
+    let ok = send(
+        port,
+        "POST",
+        "/login/code",
+        Some(&cookie),
+        &format!("code={code}"),
+    );
+    assert_eq!(ok.status, 303, "{}", ok.body);
+    assert_eq!(send(port, "GET", "/", Some(&cookie), "").status, 200);
+    // Used once only.
+    let again = send(
+        port,
+        "POST",
+        "/login/code",
+        Some(&cookie),
+        &format!("code={code}"),
+    );
+    assert_eq!(again.header("location").as_deref(), Some("/login"));
+
+    let log = crate::audit::load(&paths.config_file);
+    assert!(log.iter().any(|e| e.action == "sign-in-code-sent" && e.ok));
+    assert!(
+        log.iter()
+            .any(|e| e.action == "sign-in" && e.details.iter().any(|d| d.contains("e-mail")))
+    );
+
+    // The administrator sees it live under Activity → Sign-ins.
+    let admin = sign_in(port, "admin", "admin password 1");
+    // Admin has no second step yet: required, so the account page comes first.
+    assert_eq!(
+        send(port, "GET", "/activity?tab=sign-ins", Some(&admin), "")
+            .header("location")
+            .as_deref(),
+        Some("/account")
+    );
+}
+
+#[test]
+fn administrators_see_sign_ins_live() {
+    let (_tmp, _paths, _server, port) = setup(WebSettings::default());
+    let _ = send(port, "POST", "/login", None, "user=admin&password=wrong");
+    let admin = sign_in(port, "admin", "admin password 1");
+    let page = send(port, "GET", "/activity?tab=sign-ins", Some(&admin), "");
+    assert_eq!(page.status, 200);
+    assert!(
+        page.body.contains("http-equiv=\"refresh\""),
+        "refreshes itself"
+    );
+    assert!(page.body.contains("wrong password"), "{}", page.body);
+    let viewer = sign_in(port, "viewer", "viewer password 1");
+    let page = send(port, "GET", "/activity?tab=sign-ins", Some(&viewer), "");
+    assert!(
+        !page.body.contains("wrong password"),
+        "viewers do not see sign-ins"
+    );
 }

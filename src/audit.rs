@@ -184,6 +184,20 @@ fn last_line(path: &Path) -> std::io::Result<Option<String>> {
     }
 }
 
+/// Whether an entry is about signing in to the web interface (attempts,
+/// codes, sign-outs, passwords and second steps).
+pub fn is_sign_in(action: &str) -> bool {
+    action.starts_with("sign-")
+        || matches!(
+            action,
+            "password-changed"
+                | "one-time-codes-on"
+                | "one-time-codes-off"
+                | "email-codes-on"
+                | "email-codes-off"
+        )
+}
+
 /// All entries, oldest first. Lines that cannot be read are skipped.
 pub fn load(config_file: &Path) -> Vec<AuditEntry> {
     let Ok(file) = std::fs::File::open(file(config_file)) else {

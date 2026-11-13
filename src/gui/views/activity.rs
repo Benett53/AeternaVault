@@ -17,11 +17,11 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     let t = app.lang.t();
     let lang = app.lang;
     let p = *palette(ui);
-    let technical_id = egui::Id::new("activity-technical");
+    let mode_id = egui::Id::new("activity-mode");
     let filter_id = egui::Id::new("activity-filter");
-    let mut technical = ui
-        .data(|d| d.get_temp::<bool>(technical_id))
-        .unwrap_or(false);
+    // 0: history, 1: sign-ins to the web interface, 2: technical log.
+    let mut mode = ui.data(|d| d.get_temp::<u8>(mode_id)).unwrap_or(0);
+    let technical = mode == 2;
     let mut filter = ui
         .data(|d| d.get_temp::<String>(filter_id))
         .unwrap_or_default();
@@ -43,17 +43,26 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                 if widgets::button(ui, ButtonKind::Quiet, t.open_log_folder, true).clicked() {
                     platform::open_in_file_manager(&app.paths.log_dir);
                 }
-                let label = if technical {
-                    t.show_history
-                } else {
-                    t.show_technical_log
-                };
-                if widgets::button(ui, ButtonKind::Quiet, label, true).clicked() {
-                    technical = !technical;
-                }
             });
         });
-        if !technical {
+        ui.horizontal(|ui| {
+            let sign_ins = if lang == crate::i18n::Lang::En {
+                "Sign-ins (web)"
+            } else {
+                "Anmeldungen (Web)"
+            };
+            for (n, label) in [
+                (0u8, t.show_history),
+                (1, sign_ins),
+                (2, t.show_technical_log),
+            ] {
+                if ui.selectable_label(mode == n, label).clicked() {
+                    mode = n;
+                }
+            }
+        });
+        ui.add_space(4.0);
+        if mode == 0 {
             export_row(app, ui);
         }
         ui.add_space(6.0);
@@ -66,6 +75,10 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         let needle = filter.trim().to_lowercase();
         let height = (ui.available_height() - 20.0).max(240.0);
 
+        if mode == 1 {
+            sign_ins(app, ui, &needle, height);
+            return;
+        }
         if technical {
             let lines = app.log.lines();
             if lines.is_empty() {
@@ -180,7 +193,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     });
 
     ui.data_mut(|d| {
-        d.insert_temp(technical_id, technical);
+        d.insert_temp(mode_id, mode);
         d.insert_temp(filter_id, filter);
     });
 }
@@ -262,4 +275,136 @@ fn export_row(app: &mut AeternaApp, ui: &mut Ui) {
         widgets::secondary_text(ui, message);
     }
     ui.add_space(4.0);
+}
+
+/// Sign-ins to the web interface: who is signed in now, the last day at a
+/// glance, and every attempt. Read again every two seconds while shown.
+fn sign_ins(app: &mut AeternaApp, ui: &mut Ui, needle: &str, height: f32) {
+    let p = *palette(ui);
+    let lang = app.lang;
+    let en = lang == crate::i18n::Lang::En;
+    let tr = |a: &'static str, b: &'static str| if en { a } else { b };
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs(2));
+
+    match &app.web.server {
+        Some(server) => {
+            let active = server.active_sessions();
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} ({})",
+                    tr("Signed in now", "Jetzt angemeldet"),
+                    active.len()
+                ))
+                .strong(),
+            );
+            for (user, ip, since, idle) in active {
+                ui.label(format!(
+                    "{user} · {ip} · {} {} · {} {}",
+                    tr("signed in for", "angemeldet seit"),
+                    lang.duration(since),
+                    tr("idle for", "inaktiv seit"),
+                    lang.duration(idle)
+                ));
+            }
+        }
+        None => {
+            widgets::secondary_text(
+                ui,
+                tr(
+                    "The web interface does not run in this window; attempts from `web serve` are listed below as well.",
+                    "Die Web-Oberfläche läuft nicht in diesem Fenster; Versuche über `web serve` stehen trotzdem unten.",
+                ),
+            );
+        }
+    }
+    ui.add_space(6.0);
+
+    let entries: Vec<crate::audit::AuditEntry> = crate::audit::load(&app.paths.config_file)
+        .into_iter()
+        .filter(|e| crate::audit::is_sign_in(&e.action))
+        .collect();
+    let day = chrono::Utc::now() - chrono::Duration::hours(24);
+    let (good, bad) = entries
+        .iter()
+        .filter(|e| e.at > day && e.action == "sign-in")
+        .fold(
+            (0, 0),
+            |(g, b), e| if e.ok { (g + 1, b) } else { (g, b + 1) },
+        );
+    ui.horizontal(|ui| {
+        ui.colored_label(
+            p.success,
+            format!("{good} {}", tr("successful", "erfolgreich")),
+        );
+        ui.colored_label(
+            if bad > 0 { p.error } else { p.text_secondary },
+            format!("{bad} {}", tr("failed", "fehlgeschlagen")),
+        );
+        widgets::secondary_text(ui, tr("in the last 24 hours", "in den letzten 24 Stunden"));
+    });
+    ui.add_space(6.0);
+    if entries.is_empty() {
+        widgets::secondary_text(ui, tr("No sign-ins yet.", "Noch keine Anmeldungen."));
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("activity-sign-ins")
+        .max_height(height)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            egui::Grid::new("sign-ins-grid")
+                .num_columns(5)
+                .striped(true)
+                .spacing([14.0, 4.0])
+                .show(ui, |ui| {
+                    for h in [
+                        tr("When", "Wann"),
+                        tr("User", "Benutzer"),
+                        tr("Address", "Adresse"),
+                        tr("What", "Was"),
+                        tr("Details", "Details"),
+                    ] {
+                        ui.label(egui::RichText::new(h).color(p.text_secondary).size(13.0));
+                    }
+                    ui.end_row();
+                    for e in entries
+                        .iter()
+                        .rev()
+                        .filter(|e| {
+                            needle.is_empty()
+                                || [&e.actor, &e.source, &e.action]
+                                    .iter()
+                                    .any(|f| f.to_lowercase().contains(needle))
+                                || e.details.iter().any(|d| d.to_lowercase().contains(needle))
+                        })
+                        .take(SHOWN)
+                    {
+                        let color = if e.ok { p.text } else { p.error };
+                        ui.label(
+                            egui::RichText::new(
+                                e.at.with_timezone(&chrono::Local)
+                                    .format("%Y-%m-%d %H:%M:%S")
+                                    .to_string(),
+                            )
+                            .size(13.0),
+                        );
+                        ui.label(
+                            egui::RichText::new(e.actor.trim_start_matches("web:")).size(13.0),
+                        );
+                        ui.label(
+                            egui::RichText::new(&e.source)
+                                .size(13.0)
+                                .color(p.text_secondary),
+                        );
+                        ui.label(egui::RichText::new(&e.action).size(13.0).color(color));
+                        ui.label(
+                            egui::RichText::new(e.details.join("; "))
+                                .size(12.5)
+                                .color(p.text_secondary),
+                        );
+                        ui.end_row();
+                    }
+                });
+        });
 }

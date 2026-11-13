@@ -521,6 +521,9 @@ pub enum WebCommand {
     /// Users of the web interface.
     #[command(subcommand)]
     User(WebUserCommand),
+    /// Sign-in with LDAP / Active Directory.
+    #[command(subcommand)]
+    Ldap(WebLdapCommand),
     /// Who changed what, when and from where.
     Audit {
         /// Show the newest N entries.
@@ -561,8 +564,65 @@ pub struct WebSetArgs {
     lockout_attempts: Option<u32>,
     #[arg(long)]
     lockout_minutes: Option<u32>,
+    /// Recommended length; shorter passwords are accepted with a note.
+    #[arg(long, alias = "min-password-length")]
+    recommended_password_length: Option<u32>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebLdapCommand {
+    On,
+    Off,
+    /// Change the directory settings. `--preset` fills in the user filter and
+    /// nested groups for Active Directory or OpenLDAP.
+    Set(Box<WebLdapArgs>),
+    /// Connect and search; with `--user` and a password (asked for, or with
+    /// `--passphrase-stdin`) the whole sign-in of that user is checked.
+    Test {
+        #[arg(long)]
+        user: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LdapPreset {
+    ActiveDirectory,
+    Openldap,
+}
+
+#[derive(Args, Debug)]
+pub struct WebLdapArgs {
+    #[arg(long, value_enum)]
+    preset: Option<LdapPreset>,
+    /// `ldaps://dc1.example.local` or `ldap://ldap.example.local`.
     #[arg(long)]
-    min_password_length: Option<u32>,
+    url: Option<String>,
+    #[arg(long, value_enum)]
+    starttls: Option<OnOff>,
+    /// Send passwords unencrypted with `ldap://` without StartTLS (test setups only).
+    #[arg(long, value_enum)]
+    allow_unencrypted: Option<OnOff>,
+    /// Own certificate authority (PEM), in addition to the system's.
+    #[arg(long, value_name = "FILE")]
+    ca_file: Option<PathBuf>,
+    /// Search account; empty for anonymous, or with `{user}` (e.g. `{user}@example.local`)
+    /// to search as the user signing in. Its password is read with `--passphrase-stdin`.
+    #[arg(long)]
+    bind_dn: Option<String>,
+    #[arg(long)]
+    base_dn: Option<String>,
+    /// Filter that finds one user; `{user}` is the name typed at sign-in.
+    #[arg(long)]
+    filter: Option<String>,
+    #[arg(long, value_name = "GROUP_DN")]
+    admin_group: Option<String>,
+    #[arg(long, value_name = "GROUP_DN")]
+    operator_group: Option<String>,
+    #[arg(long, value_name = "GROUP_DN")]
+    viewer_group: Option<String>,
+    /// Active Directory: count membership through nested groups.
+    #[arg(long, value_enum)]
+    nested_groups: Option<OnOff>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -3120,8 +3180,8 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
             if let Some(n) = args.lockout_minutes {
                 web.lockout_minutes = n.max(1);
             }
-            if let Some(n) = args.min_password_length {
-                web.min_password_length = n.max(8);
+            if let Some(n) = args.recommended_password_length {
+                web.recommended_password_length = n;
             }
             crate::web::check_settings(web).map_err(|e| anyhow!(e))?;
             ctx.save()?;
@@ -3207,6 +3267,7 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
             });
         }
         WebCommand::User(command) => return web_user(ctx, command),
+        WebCommand::Ldap(command) => return web_ldap(ctx, command),
     }
     Ok(Outcome::Ok)
 }
@@ -3216,7 +3277,7 @@ fn web_user(ctx: &mut Ctx, command: WebUserCommand) -> anyhow::Result<Outcome> {
     use crate::web::users::{self, Role, UserStore};
     let config_file = ctx.paths.config_file.clone();
     let mut store = UserStore::load(&config_file);
-    let min = ctx.config.web.min_password_length;
+    let recommended = ctx.config.web.recommended_password_length;
     let record: Record;
     let message: String;
     match command {
@@ -3231,9 +3292,10 @@ fn web_user(ctx: &mut Ctx, command: WebUserCommand) -> anyhow::Result<Outcome> {
                 bail!("there is no job {unknown} (see `aeternavault-cli job list`)");
             }
             let password = ctx.new_web_password()?;
-            store
-                .add(&name, role, &password, min)
-                .map_err(|e| anyhow!(e))?;
+            store.add(&name, role, &password).map_err(|e| anyhow!(e))?;
+            if let Some(advice) = users::password_advice(&password, recommended, true) {
+                eprintln!("{advice}");
+            }
             if let Some(user) = store.find_mut(&name) {
                 user.jobs = jobs.clone();
             }
@@ -3300,7 +3362,10 @@ fn web_user(ctx: &mut Ctx, command: WebUserCommand) -> anyhow::Result<Outcome> {
                 bail!("there is no user {name}");
             }
             let password = ctx.new_web_password()?;
-            users::check_password(&password, min).map_err(|e| anyhow!(e))?;
+            users::check_password(&password).map_err(|e| anyhow!(e))?;
+            if let Some(advice) = users::password_advice(&password, recommended, true) {
+                eprintln!("{advice}");
+            }
             let user = store.find_mut(&name).expect("checked above");
             user.password = users::hash_password(&password);
             user.must_change_password = false;
@@ -3347,5 +3412,102 @@ fn web_user(ctx: &mut Ctx, command: WebUserCommand) -> anyhow::Result<Outcome> {
     })?;
     audit::record(&config_file, record);
     println!("{message}");
+    Ok(Outcome::Ok)
+}
+
+fn web_ldap(ctx: &mut Ctx, command: WebLdapCommand) -> anyhow::Result<Outcome> {
+    match command {
+        WebLdapCommand::On | WebLdapCommand::Off => {
+            let on = matches!(command, WebLdapCommand::On);
+            ctx.config.web.ldap.enabled = on;
+            if on {
+                ctx.config.web.ldap.check().map_err(|e| anyhow!(e))?;
+            }
+            ctx.save()?;
+            println!(
+                "Sign-in with LDAP is {}. A running web interface uses it after it is started again.",
+                if on { "on" } else { "off" }
+            );
+        }
+        WebLdapCommand::Set(args) => {
+            let read_password = args
+                .bind_dn
+                .as_deref()
+                .is_some_and(|dn| !dn.trim().is_empty() && !dn.contains("{user}"))
+                && ctx.secret_stdin;
+            let ldap = &mut ctx.config.web.ldap;
+            match args.preset {
+                Some(LdapPreset::ActiveDirectory) => {
+                    ldap.user_filter = crate::web::ldap::AD_FILTER.into();
+                    ldap.nested_groups = true;
+                }
+                Some(LdapPreset::Openldap) => {
+                    ldap.user_filter = crate::web::ldap::OPENLDAP_FILTER.into();
+                    ldap.nested_groups = false;
+                }
+                None => {}
+            }
+            if let Some(v) = args.url {
+                ldap.url = v;
+            }
+            if let Some(v) = args.starttls {
+                ldap.starttls = v == OnOff::On;
+            }
+            if let Some(v) = args.allow_unencrypted {
+                ldap.allow_unencrypted = v == OnOff::On;
+            }
+            if let Some(v) = args.ca_file {
+                ldap.ca_file = v;
+            }
+            if let Some(v) = args.bind_dn {
+                ldap.bind_dn = v;
+            }
+            if let Some(v) = args.base_dn {
+                ldap.base_dn = v;
+            }
+            if let Some(v) = args.filter {
+                ldap.user_filter = v;
+            }
+            if let Some(v) = args.admin_group {
+                ldap.admin_group = v;
+            }
+            if let Some(v) = args.operator_group {
+                ldap.operator_group = v;
+            }
+            if let Some(v) = args.viewer_group {
+                ldap.viewer_group = v;
+            }
+            if let Some(v) = args.nested_groups {
+                ldap.nested_groups = v == OnOff::On;
+            }
+            if read_password {
+                let password = ctx
+                    .secret("")
+                    .ok_or_else(|| anyhow!("no password on standard input"))?;
+                ctx.config.web.ldap.bind_password = password;
+            }
+            ctx.config.web.ldap.check().map_err(|e| anyhow!(e))?;
+            ctx.save()?;
+            println!(
+                "Saved. A running web interface uses the new settings after it is started again."
+            );
+        }
+        WebLdapCommand::Test { user } => {
+            let password = match &user {
+                Some(_) if ctx.secret_stdin => ctx.secret("").unwrap_or_default(),
+                Some(name) if std::io::stdin().is_terminal() => {
+                    platform::read_secret(&format!("Password of {name}: ")).unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+            let mut settings = ctx.config.web.ldap.clone();
+            settings.enabled = true;
+            match crate::web::ldap::test(&settings, user.as_deref().unwrap_or_default(), &password)
+            {
+                Ok(text) => println!("{text}"),
+                Err(err) => bail!(err),
+            }
+        }
+    }
     Ok(Outcome::Ok)
 }

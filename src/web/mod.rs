@@ -14,6 +14,7 @@
 
 pub mod app;
 pub mod http;
+pub mod ldap;
 #[cfg(test)]
 mod server_tests;
 pub mod tls;
@@ -123,6 +124,61 @@ impl Control for LocalRunner {
     fn config_changed(&self, _config: &Config) {}
 }
 
+/// The e-mail channel that sends sign-in codes: the one named in the web
+/// settings, or the first switched-on e-mail channel.
+pub fn email_channel(config: &Config) -> Option<crate::notify::Channel> {
+    use crate::notify::ChannelKind;
+    let wanted = config.web.email_channel.trim();
+    config
+        .notifications
+        .channels
+        .iter()
+        .filter(|c| c.kind == ChannelKind::Email && c.enabled)
+        .find(|c| wanted.is_empty() || c.name.trim().eq_ignore_ascii_case(wanted))
+        .cloned()
+}
+
+/// Sends a sign-in code to `address` through the e-mail channel.
+pub fn send_code(config: &Config, address: &str, code: &str, confirm: bool) -> Result<(), String> {
+    let mut channel = email_channel(config).ok_or("no e-mail channel is set up (Notifications)")?;
+    channel.to = address.to_string();
+    let en = crate::i18n::Lang::resolve(config.language) == crate::i18n::Lang::En;
+    let computer = crate::platform::computer_name();
+    let (title, body) = match (en, confirm) {
+        (true, false) => (
+            format!("AeternaVault {computer}: sign-in code {code}"),
+            format!(
+                "Your code for signing in to the AeternaVault web interface on {computer}: {code}\n\nIt is valid for 10 minutes. If you did not try to sign in, someone knows your password: change it and tell your administrator."
+            ),
+        ),
+        (false, false) => (
+            format!("AeternaVault {computer}: Anmeldecode {code}"),
+            format!(
+                "Dein Code für die Anmeldung an der AeternaVault-Web-Oberfläche auf {computer}: {code}\n\nEr gilt 10 Minuten. Wenn du dich nicht anmelden wolltest, kennt jemand dein Passwort: Ändere es und informiere deinen Administrator."
+            ),
+        ),
+        (true, true) => (
+            format!("AeternaVault {computer}: confirm your address"),
+            format!(
+                "Code to confirm this address for sign-in codes: {code}\n\nValid for 10 minutes."
+            ),
+        ),
+        (false, true) => (
+            format!("AeternaVault {computer}: Adresse bestätigen"),
+            format!(
+                "Code zum Bestätigen dieser Adresse für Anmeldecodes: {code}\n\nGültig für 10 Minuten."
+            ),
+        ),
+    };
+    let message = crate::notify::Message {
+        title,
+        body,
+        severity: crate::notify::Severity::Info,
+        attachment: None,
+    };
+    crate::notify::send(&channel, &message).map_err(|e| e.to_string())
+}
+
 /// A network clients may connect from: `192.168.1.0/24`, `10.0.0.5`, `fd00::/8`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Network {
@@ -195,6 +251,7 @@ pub fn check_settings(settings: &WebSettings) -> Result<Vec<Network>, String> {
     if settings.port == 0 {
         return Err("choose a port between 1 and 65535".into());
     }
+    settings.ldap.check()?;
     bind_address(settings)?;
     settings
         .allowed_networks
@@ -221,6 +278,7 @@ pub struct WebServer {
     pub url: String,
     pub settings: WebSettings,
     config_file: std::path::PathBuf,
+    app: Arc<app::WebApp>,
 }
 
 impl WebServer {
@@ -240,7 +298,8 @@ impl WebServer {
             networks,
             control,
         ));
-        let handler: http::Handler = Arc::new(move |request| app.handle(request));
+        let handling = app.clone();
+        let handler: http::Handler = Arc::new(move |request| handling.handle(request));
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
         let thread = std::thread::Builder::new()
@@ -259,7 +318,15 @@ impl WebServer {
             url,
             settings: settings.clone(),
             config_file: paths.config_file.clone(),
+            app,
         })
+    }
+
+    /// Who is signed in now: (user, address, signed in for, idle for).
+    pub fn active_sessions(
+        &self,
+    ) -> Vec<(String, IpAddr, std::time::Duration, std::time::Duration)> {
+        self.app.active_sessions()
     }
 
     pub fn stop(&mut self) {

@@ -11,7 +11,9 @@ use std::time::Duration;
 use chrono::{DateTime, Local, Utc};
 
 use super::http::{Request, Response, encode};
-use super::users::{self, Limiter, Role, Session, Sessions, User, UserStore};
+use super::users::{
+    self, EmailCode, Limiter, Role, SecondFactor, Session, Sessions, User, UserSource, UserStore,
+};
 use super::{Control, Network};
 use crate::audit::{self, Record};
 use crate::config::{Config, WebSettings};
@@ -60,6 +62,10 @@ pub struct WebApp {
     limiter: Mutex<Limiter>,
     /// Secrets shown for setting up one-time codes, until confirmed.
     pending_totp: Mutex<HashMap<String, String>>,
+    /// Codes sent by e-mail for a sign-in, by session.
+    email_codes: Mutex<HashMap<String, EmailCode>>,
+    /// Codes sent to confirm an e-mail address, by user (lower case).
+    pending_email: Mutex<HashMap<String, EmailCode>>,
     checks: Arc<Mutex<Vec<Check>>>,
     /// Passwords set by an administrator, shown once on the next page.
     flash: Mutex<HashMap<String, String>>,
@@ -115,6 +121,8 @@ impl WebApp {
             sessions: Mutex::new(Sessions::default()),
             limiter: Mutex::new(Limiter::default()),
             pending_totp: Mutex::new(HashMap::new()),
+            email_codes: Mutex::new(HashMap::new()),
+            pending_email: Mutex::new(HashMap::new()),
             checks: Arc::new(Mutex::new(Vec::new())),
             flash: Mutex::new(HashMap::new()),
         }
@@ -207,6 +215,7 @@ impl WebApp {
             ("POST", "/login") => return self.login(&req, en),
             ("GET", "/login/code") => return self.code_page(&req, en, None),
             ("POST", "/login/code") => return self.code(&req, en),
+            ("POST", "/login/code/resend") => return self.code_resend(&req, en),
             _ => {}
         }
 
@@ -244,7 +253,9 @@ impl WebApp {
         }
 
         // A new password or the set-up of one-time codes comes first.
-        let needs_code = self.settings.require_two_factor && ctx.user.totp.is_none();
+        let email_possible = super::email_channel(&ctx.config).is_some();
+        let needs_code = self.settings.require_two_factor
+            && ctx.user.second_factor(true, email_possible).is_none();
         let account_only = ctx.user.must_change_password || needs_code;
         if account_only && !ctx.req.path.starts_with("/account") && ctx.req.path != "/logout" {
             return Response::redirect("/account");
@@ -260,6 +271,10 @@ impl WebApp {
             ("POST", "/account/2fa/start") => self.totp_start(&ctx),
             ("POST", "/account/2fa/confirm") => self.totp_confirm(&ctx),
             ("POST", "/account/2fa/off") => self.totp_off(&ctx),
+            ("POST", "/account/email/start") => self.email_start(&ctx),
+            ("POST", "/account/email/confirm") => self.email_confirm(&ctx),
+            ("POST", "/account/email/use") => self.email_use(&ctx),
+            ("POST", "/account/email/off") => self.email_off(&ctx),
             ("POST", path) if ctx.user.may(Role::Operator) => match path {
                 "/jobs/run" => self.job_run(&ctx),
                 "/jobs/cancel" => self.job_cancel(&ctx),
@@ -447,25 +462,77 @@ impl WebApp {
         }
 
         let mut store = UserStore::load(&self.paths.config_file);
-        let user = store.find(&name).cloned();
-        // The hash is computed even for unknown names, so the answer takes
-        // as long and does not tell which names exist.
-        let stored = user.as_ref().map(|u| u.password.clone()).unwrap_or_else(|| {
-            "argon2id$19456$2$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000".into()
-        });
-        let password_ok = users::verify_password(&password, &stored);
-        let Some(user) = user.filter(|_| password_ok) else {
-            let mut limiter = lock(&self.limiter);
-            limiter.failed(&ip);
-            limiter.failed(&user_key);
-            drop(limiter);
-            failed(if store.find(&name).is_some() {
-                "wrong password"
-            } else {
-                "unknown user"
-            });
-            return self.login_page(req, en, Some(wrong));
+        let local = store
+            .find(&name)
+            .filter(|u| u.source == UserSource::Local)
+            .cloned();
+        let ldap = &self.settings.ldap;
+        // Who signs in, or why not (`None`: wrong name or password).
+        let checked: Result<User, &str> = match local {
+            Some(user) => {
+                if users::verify_password(&password, &user.password) {
+                    Ok(user)
+                } else {
+                    Err("wrong password")
+                }
+            }
+            None if ldap.enabled && users::valid_name(&name).is_ok() => {
+                match super::ldap::authenticate(ldap, &name, &password) {
+                    Ok(found) => Ok(self.directory_user(&mut store, &name, &found)),
+                    Err(super::ldap::LdapError::Rejected) => {
+                        Err("wrong password or unknown user (directory)")
+                    }
+                    Err(super::ldap::LdapError::NoGroup) => {
+                        failed("directory user in none of the groups that give a role");
+                        return self.login_page(
+                            req,
+                            en,
+                            Some(t(
+                                "Your account is not in any group that may use this web interface.",
+                                "Dein Konto ist in keiner Gruppe, die diese Web-Oberfläche nutzen darf.",
+                            )),
+                        );
+                    }
+                    Err(super::ldap::LdapError::Unavailable(err)) => {
+                        // Not counted as a wrong attempt: a server that is
+                        // down must not lock everybody out.
+                        tracing::warn!("web interface: directory not reachable: {err}");
+                        failed(&format!("directory not reachable: {err}"));
+                        return self.login_page(
+                            req,
+                            en,
+                            Some(t(
+                                "The directory (LDAP) cannot be reached at the moment. Details are in the log of the server.",
+                                "Das Verzeichnis (LDAP) ist gerade nicht erreichbar. Details stehen im Protokoll des Servers.",
+                            )),
+                        );
+                    }
+                }
+            }
+            None => {
+                // The hash is computed even for unknown names, so the answer
+                // takes as long and does not tell which names exist.
+                let _ = users::verify_password(
+                    &password,
+                    "argon2id$19456$2$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000",
+                );
+                Err("unknown user")
+            }
         };
+        let user = match checked {
+            Ok(user) => user,
+            Err(reason) => {
+                let mut limiter = lock(&self.limiter);
+                limiter.failed(&ip);
+                limiter.failed(&user_key);
+                drop(limiter);
+                failed(reason);
+                return self.login_page(req, en, Some(wrong));
+            }
+        };
+        if user.source == UserSource::Directory {
+            let _ = store.save(&self.paths.config_file);
+        }
         if user.disabled {
             failed("user is disabled");
             return self.login_page(req, en, Some(wrong));
@@ -475,8 +542,28 @@ impl WebApp {
             limiter.succeeded(&user_key);
             limiter.succeeded(&ip);
         }
-        let pending = user.totp.is_some();
+        let config = self.config();
+        let email_possible = super::email_channel(&config).is_some();
+        let factor = user.second_factor(self.settings.require_two_factor, email_possible);
+        let pending = factor.is_some();
         let (token, _) = lock(&self.sessions).create(&user.name, req.peer, pending);
+        if factor == Some(SecondFactor::Email)
+            && let Err(err) = self.send_sign_in_code(&config, &token, &user, &ip)
+        {
+            lock(&self.sessions).end(&token);
+            tracing::warn!(
+                "web interface: sign-in code not sent to {}: {err}",
+                user.name
+            );
+            return self.login_page(
+                req,
+                en,
+                Some(t(
+                    "The sign-in code could not be sent by e-mail. Details are in the log of the server.",
+                    "Der Anmeldecode konnte nicht per E-Mail gesendet werden. Details stehen im Protokoll des Servers.",
+                )),
+            );
+        }
         if !pending {
             if let Some(u) = store.find_mut(&user.name) {
                 u.last_sign_in = Some(Utc::now());
@@ -491,6 +578,96 @@ impl WebApp {
             .header("Set-Cookie", &self.session_cookie(req, &token))
     }
 
+    /// The local record of a directory user, made at the first sign-in; the
+    /// role always comes from the directory groups.
+    fn directory_user(
+        &self,
+        store: &mut UserStore,
+        name: &str,
+        found: &super::ldap::DirectoryUser,
+    ) -> User {
+        let name = name.trim();
+        match store.find_mut(name) {
+            Some(user) => {
+                if user.role != found.role {
+                    audit::record(
+                        &self.paths.config_file,
+                        Record::new("system", "directory", "user-changed")
+                            .target(user.name.clone())
+                            .details(vec![format!(
+                                "role from directory groups: {} → {}",
+                                user.role.name(true),
+                                found.role.name(true)
+                            )]),
+                    );
+                    user.role = found.role;
+                }
+                if let Some(email) = &found.email {
+                    user.email = email.clone();
+                }
+                user.clone()
+            }
+            None => {
+                let user = User {
+                    name: name.to_string(),
+                    role: found.role,
+                    source: UserSource::Directory,
+                    password: String::new(),
+                    totp: None,
+                    email: found.email.clone().unwrap_or_default(),
+                    email_codes: false,
+                    jobs: Vec::new(),
+                    disabled: false,
+                    must_change_password: false,
+                    created: Utc::now(),
+                    last_sign_in: None,
+                };
+                store.users.push(user.clone());
+                audit::record(
+                    &self.paths.config_file,
+                    Record::new("system", "directory", "user-added")
+                        .target(name.to_string())
+                        .details(vec![
+                            format!("from the directory: {}", found.dn),
+                            format!("role: {}", found.role.name(true)),
+                        ]),
+                );
+                user
+            }
+        }
+    }
+
+    /// Sends a new sign-in code to the user's address and keeps it for the session.
+    fn send_sign_in_code(
+        &self,
+        config: &Config,
+        token: &str,
+        user: &User,
+        ip: &str,
+    ) -> Result<(), String> {
+        let code = EmailCode::new(&user.email);
+        let result = super::send_code(config, &user.email, &code.code, false);
+        let record = Record::new(
+            format!("web:{}", user.name),
+            ip.to_string(),
+            "sign-in-code-sent",
+        )
+        .details(vec![format!("by e-mail to {}", users::masked(&user.email))]);
+        match &result {
+            Ok(()) => {
+                audit::record(&self.paths.config_file, record);
+                let mut codes = lock(&self.email_codes);
+                codes.retain(|_, c| c.sent.elapsed() < users::EMAIL_CODE_TTL);
+                codes.insert(token.to_string(), code);
+            }
+            Err(err) => audit::record(
+                &self.paths.config_file,
+                record.details(vec![err.clone()]).failed(),
+            ),
+        }
+        result
+    }
+
     fn pending_session(&self, req: &Request) -> Option<(String, Session)> {
         let token = req.cookie(self.cookie_name(req))?;
         let session = lock(&self.sessions).touch(&token, Duration::from_secs(300))?;
@@ -499,24 +676,82 @@ impl WebApp {
 
     fn code_page(&self, req: &Request, en: bool, error: Option<&str>) -> Response {
         let t = |a: &'static str, b: &'static str| if en { a } else { b };
-        if self.pending_session(req).is_none() {
+        let Some((token, _)) = self.pending_session(req) else {
             return Response::redirect("/login");
-        }
+        };
+        let by_mail = lock(&self.email_codes)
+            .get(&token)
+            .map(|c| users::masked(&c.address));
         let error = error
             .map(|e| format!(r#"<p class="error">{}</p>"#, esc(e)))
             .unwrap_or_default();
+        let resend = if by_mail.is_some() {
+            format!(
+                r#"<form method="post" action="/login/code/resend" class="stack"><button class="secondary">{}</button></form><p class="muted">{}</p>"#,
+                t("Send a new code", "Neuen Code senden"),
+                t(
+                    "The code is valid for 10 minutes. Also look in the spam folder.",
+                    "Der Code gilt 10 Minuten. Schau auch im Spam-Ordner nach."
+                )
+            )
+        } else {
+            String::new()
+        };
         Self::bare(
             en,
             t("One-time code", "Einmalcode"),
             &format!(
-                r#"{error}<form method="post" action="/login/code" class="stack"><label>{label}<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" required autofocus></label><button>{go}</button></form>"#,
-                label = t(
-                    "Code from your authenticator app",
-                    "Code aus deiner Authenticator-App"
-                ),
+                r#"{error}<form method="post" action="/login/code" class="stack"><label>{label}<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" required autofocus></label><button>{go}</button></form>{resend}"#,
+                label = match &by_mail {
+                    Some(address) if en => format!("Code from the e-mail to {address}"),
+                    Some(address) => format!("Code aus der E-Mail an {address}"),
+                    None => t(
+                        "Code from your authenticator app",
+                        "Code aus deiner Authenticator-App"
+                    )
+                    .into(),
+                },
                 go = t("Continue", "Weiter"),
             ),
         )
+    }
+
+    fn code_resend(&self, req: &Request, en: bool) -> Response {
+        let t = |a: &'static str, b: &'static str| if en { a } else { b };
+        let Some((token, session)) = self.pending_session(req) else {
+            return Response::redirect("/login");
+        };
+        let recent = lock(&self.email_codes)
+            .get(&token)
+            .is_some_and(|c| c.sent.elapsed() < Duration::from_secs(60));
+        if recent {
+            return self.code_page(
+                req,
+                en,
+                Some(t(
+                    "A code was sent less than a minute ago.",
+                    "Vor weniger als einer Minute wurde schon ein Code gesendet.",
+                )),
+            );
+        }
+        let store = UserStore::load(&self.paths.config_file);
+        let Some(user) = store.find(&session.user).cloned() else {
+            return Response::redirect("/login");
+        };
+        if !lock(&self.email_codes).contains_key(&token) {
+            return Response::redirect("/login/code");
+        }
+        match self.send_sign_in_code(&self.config(), &token, &user, &req.peer.to_string()) {
+            Ok(()) => self.code_page(req, en, None),
+            Err(_) => self.code_page(
+                req,
+                en,
+                Some(t(
+                    "The code could not be sent.",
+                    "Der Code konnte nicht gesendet werden.",
+                )),
+            ),
+        }
     }
 
     fn code(&self, req: &Request, en: bool) -> Response {
@@ -525,15 +760,27 @@ impl WebApp {
             return Response::redirect("/login");
         };
         let mut store = UserStore::load(&self.paths.config_file);
-        let Some(secret) = store.find(&session.user).and_then(|u| u.totp.clone()) else {
-            return Response::redirect("/login");
-        };
         let user_key = format!("code:{}", session.user.to_lowercase());
         let ip = req.peer.to_string();
         let code = req.form().get("code").cloned().unwrap_or_default();
-        let step = users::check_totp(&secret, &code, users::current_step());
+        let by_mail = lock(&self.email_codes)
+            .get_mut(&token)
+            .map(|c| c.check(&code));
+        let secret = store.find(&session.user).and_then(|u| u.totp.clone());
+        if by_mail.is_none() && secret.is_none() {
+            return Response::redirect("/login");
+        }
         let mut limiter = lock(&self.limiter);
-        let ok = step.is_some_and(|s| limiter.use_code(&session.user, s))
+        let code_ok = match by_mail {
+            Some(ok) => ok,
+            None => users::check_totp(
+                secret.as_deref().unwrap_or_default(),
+                &code,
+                users::current_step(),
+            )
+            .is_some_and(|s| limiter.use_code(&session.user, s)),
+        };
+        let ok = code_ok
             && limiter
                 .locked(&user_key, self.settings.lockout_attempts, self.lockout())
                 .is_none();
@@ -561,6 +808,7 @@ impl WebApp {
         }
         limiter.succeeded(&user_key);
         drop(limiter);
+        lock(&self.email_codes).remove(&token);
         lock(&self.sessions).finish_code(&token);
         if let Some(u) = store.find_mut(&session.user) {
             u.last_sign_in = Some(Utc::now());
@@ -568,8 +816,14 @@ impl WebApp {
         let _ = store.save(&self.paths.config_file);
         audit::record(
             &self.paths.config_file,
-            Record::new(format!("web:{}", session.user), ip, "sign-in")
-                .details(vec!["with one-time code".into()]),
+            Record::new(format!("web:{}", session.user), ip, "sign-in").details(vec![
+                if by_mail.is_some() {
+                    "with code by e-mail"
+                } else {
+                    "with one-time code"
+                }
+                .into(),
+            ]),
         );
         Response::redirect("/")
     }
@@ -846,9 +1100,117 @@ impl WebApp {
         }
     }
 
+    pub fn active_sessions(&self) -> Vec<(String, IpAddr, Duration, Duration)> {
+        lock(&self.sessions).active()
+    }
+
     fn activity(&self, ctx: &Ctx<'_>) -> Response {
-        let body = self.activity_table(ctx, 300);
+        let sign_ins = ctx.req.query.get("tab").is_some_and(|t| t == "sign-ins");
+        let mut body = String::new();
+        if ctx.user.may(Role::Admin) {
+            let current = |on: bool| if on { r#" aria-current="page""# } else { "" };
+            body.push_str(&format!(
+                r#"<nav class="tabs"><a href="/activity"{}>{}</a><a href="/activity?tab=sign-ins"{}>{}</a></nav>"#,
+                current(!sign_ins),
+                ctx.t("Backups and checks", "Sicherungen und Prüfungen"),
+                current(sign_ins),
+                ctx.t("Sign-ins (live)", "Anmeldungen (live)"),
+            ));
+        }
+        if sign_ins && ctx.user.may(Role::Admin) {
+            body.push_str(&self.sign_ins(ctx));
+            return self.page(ctx, ctx.t("Activity", "Verlauf"), &body, true);
+        }
+        body.push_str(&self.activity_table(ctx, 300));
         self.page(ctx, ctx.t("Activity", "Verlauf"), &body, false)
+    }
+
+    /// Who is signed in now, and every sign-in attempt, newest first.
+    fn sign_ins(&self, ctx: &Ctx<'_>) -> String {
+        let lang = ctx.lang();
+        let mut html = String::new();
+        let active = self.active_sessions();
+        let rows: String = active
+            .iter()
+            .map(|(user, ip, since, idle)| {
+                format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                    esc(user),
+                    esc(&ip.to_string()),
+                    esc(&lang.duration(*since)),
+                    esc(&lang.duration(*idle)),
+                )
+            })
+            .collect();
+        html.push_str(&format!(
+            r#"<section class="card"><h2>{} ({})</h2>{}</section>"#,
+            ctx.t("Signed in now", "Jetzt angemeldet"),
+            active.len(),
+            if rows.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<table><thead><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr></thead><tbody>{rows}</tbody></table>",
+                    ctx.t("User", "Benutzer"),
+                    ctx.t("Address", "Adresse"),
+                    ctx.t("Signed in for", "Angemeldet seit"),
+                    ctx.t("Idle for", "Inaktiv seit"),
+                )
+            }
+        ));
+
+        let entries: Vec<_> = audit::load(&self.paths.config_file)
+            .into_iter()
+            .filter(|e| audit::is_sign_in(&e.action))
+            .collect();
+        let day = Utc::now() - chrono::Duration::hours(24);
+        let recent = entries
+            .iter()
+            .filter(|e| e.at > day && e.action == "sign-in");
+        let (good, bad) = recent.fold(
+            (0, 0),
+            |(g, b), e| if e.ok { (g + 1, b) } else { (g, b + 1) },
+        );
+        let addresses: std::collections::HashSet<&str> = entries
+            .iter()
+            .filter(|e| e.at > day && e.action == "sign-in" && !e.ok)
+            .map(|e| e.source.as_str())
+            .collect();
+        html.push_str(&format!(
+            r#"<p><span class="badge good">{good} {ok}</span> <span class="badge {cls}">{bad} {failed}</span> <span class="muted">{from} {n} {addr} · {last24}</span></p>"#,
+            ok = ctx.t("successful", "erfolgreich"),
+            cls = if bad > 0 { "bad" } else { "muted" },
+            failed = ctx.t("failed", "fehlgeschlagen"),
+            from = ctx.t("from", "von"),
+            n = addresses.len(),
+            addr = ctx.t("addresses", "Adressen"),
+            last24 = ctx.t("last 24 hours", "letzte 24 Stunden"),
+        ));
+        let rows: String = entries
+            .iter()
+            .rev()
+            .take(300)
+            .map(|e| {
+                format!(
+                    r#"<tr><td class="nowrap">{}</td><td class="nowrap">{}</td><td>{}</td><td class="nowrap"><span class="dot {}"></span>{}</td><td>{}</td></tr>"#,
+                    esc(&e.at.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()),
+                    esc(e.actor.trim_start_matches("web:")),
+                    esc(&e.source),
+                    if e.ok { "good" } else { "bad" },
+                    esc(&e.action),
+                    esc(&e.details.join("; ")),
+                )
+            })
+            .collect();
+        html.push_str(&format!(
+            r#"<section class="card"><table><thead><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr></thead><tbody>{rows}</tbody></table></section>"#,
+            ctx.t("When", "Wann"),
+            ctx.t("User", "Benutzer"),
+            ctx.t("Address", "Adresse"),
+            ctx.t("What", "Was"),
+            ctx.t("Details", "Details"),
+        ));
+        html
     }
 
     // --- jobs -------------------------------------------------------------------------
@@ -1349,12 +1711,12 @@ impl WebApp {
                 .map(|t| Self::when(ctx, t))
                 .unwrap_or_else(|| ctx.t("never", "noch nie").into());
             body.push_str(&format!(
-                r#"<section class="card"><h2>{name} {disabled}</h2><p class="muted">{role_label}: {role} · {twofa} · {last_label}: {last}</p>
+                r#"<section class="card"><h2>{name} {source} {disabled}</h2><p class="muted">{role_label}: {role} · {twofa} · {last_label}: {last}</p>
 <form method="post" action="/users/change" class="stack">{csrf}<input type="hidden" name="user" value="{name}">
 <label>{role_label} {select}</label>{jobs}
 <div class="row"><button name="do" value="save">{save}</button>
 <button name="do" value="{toggle}" class="secondary">{toggle_label}</button>
-<button name="do" value="password" class="secondary">{reset}</button>
+{reset}
 <button name="do" value="2fa" class="secondary">{reset2fa}</button>
 <button name="do" value="remove" class="danger">{remove}</button></div></form></section>"#,
                 name = esc(&user.name),
@@ -1368,20 +1730,35 @@ impl WebApp {
                 save = ctx.t("Save", "Speichern"),
                 toggle = if user.disabled { "enable" } else { "disable" },
                 toggle_label = if user.disabled { ctx.t("Unlock", "Entsperren") } else { ctx.t("Lock", "Sperren") },
-                reset = ctx.t("New password", "Neues Passwort"),
+                source = if user.source == UserSource::Directory {
+                    r#"<span class="badge muted">LDAP</span>"#.to_string()
+                } else {
+                    String::new()
+                },
+                reset = if user.source == UserSource::Directory {
+                    String::new()
+                } else {
+                    format!(
+                        r#"<button name="do" value="password" class="secondary">{}</button>"#,
+                        ctx.t("New password", "Neues Passwort")
+                    )
+                },
                 reset2fa = ctx.t("Reset one-time codes", "Einmalcodes zurücksetzen"),
                 remove = ctx.t("Remove", "Entfernen"),
             ));
         }
         body.push_str(&format!(
             r#"<section class="card"><h2>{title}</h2><form method="post" action="/users/add" class="stack">{csrf}
-<label>{name}<input name="user" required></label><label>{pass}<input name="password" type="password" autocomplete="new-password" required minlength="{min}"></label>
+<label>{name}<input name="user" required></label><label>{pass}<input name="password" type="password" autocomplete="new-password" required></label>
 <label>{role_label} {select}</label>{jobs}<button>{add}</button></form>
 <p class="muted">{roles}</p></section>"#,
             title = ctx.t("Add user", "Benutzer hinzufügen"),
             name = ctx.t("User name", "Benutzername"),
-            pass = ctx.t("Password (the user must change it after the first sign-in)", "Passwort (muss nach der ersten Anmeldung geändert werden)"),
-            min = self.settings.min_password_length.max(8),
+            pass = if ctx.en {
+                format!("Password (recommended: at least {} characters; the user chooses a new one after the first sign-in)", self.settings.recommended_password_length)
+            } else {
+                format!("Passwort (empfohlen: mindestens {} Zeichen; der Benutzer wählt nach der ersten Anmeldung ein neues)", self.settings.recommended_password_length)
+            },
             role_label = ctx.t("Role", "Rolle"),
             select = Self::role_select(ctx, Role::Viewer),
             jobs = Self::job_boxes(ctx, &[]),
@@ -1407,7 +1784,7 @@ impl WebApp {
         };
         let jobs = ctx.req.form_all("jobs");
         let mut store = UserStore::load(&self.paths.config_file);
-        if let Err(err) = store.add(&name, role, &password, self.settings.min_password_length) {
+        if let Err(err) = store.add(&name, role, &password) {
             return Self::back("/users", &err);
         }
         if let Some(user) = store.find_mut(&name) {
@@ -1427,7 +1804,13 @@ impl WebApp {
                 .target(name.trim())
                 .details(details),
         );
-        Self::back("/users", ctx.t("User added.", "Benutzer hinzugefügt."))
+        let mut message = ctx.t("User added.", "Benutzer hinzugefügt.").to_string();
+        if let Some(advice) =
+            users::password_advice(&password, self.settings.recommended_password_length, ctx.en)
+        {
+            message = format!("{message} {advice}");
+        }
+        Self::back("/users", &message)
     }
 
     fn user_change(&self, ctx: &Ctx<'_>) -> Response {
@@ -1561,20 +1944,36 @@ impl WebApp {
             ));
         }
         let csrf = csrf_field(&ctx.session);
-        body.push_str(&format!(
+        if ctx.user.source == UserSource::Directory {
+            body.push_str(&format!(
+                r#"<section class="card"><h2>{}</h2><p class="muted">{}: {}</p><p>{}</p></section>"#,
+                ctx.t("Password", "Passwort"),
+                ctx.t("Role", "Rolle"),
+                ctx.user.role.name(ctx.en),
+                ctx.t(
+                    "You sign in with your directory account (LDAP / Active Directory). Its password and your role are managed there.",
+                    "Du meldest dich mit deinem Verzeichniskonto an (LDAP / Active Directory). Passwort und Rolle werden dort verwaltet."
+                )
+            ));
+        } else {
+            body.push_str(&format!(
             r#"<section class="card"><h2>{title}</h2><p class="muted">{role}: {r}</p><form method="post" action="/account/password" class="stack">{csrf}
 <label>{current}<input name="current" type="password" autocomplete="current-password" required></label>
-<label>{new}<input name="new" type="password" autocomplete="new-password" required minlength="{min}"></label>
+<label>{new}<input name="new" type="password" autocomplete="new-password" required></label>
 <label>{again}<input name="again" type="password" autocomplete="new-password" required></label><button>{save}</button></form></section>"#,
             title = ctx.t("Password", "Passwort"),
             role = ctx.t("Role", "Rolle"),
             r = ctx.user.role.name(ctx.en),
             current = ctx.t("Current password", "Aktuelles Passwort"),
-            new = ctx.t("New password", "Neues Passwort"),
+            new = if ctx.en {
+                format!("New password (recommended: at least {} characters)", self.settings.recommended_password_length)
+            } else {
+                format!("Neues Passwort (empfohlen: mindestens {} Zeichen)", self.settings.recommended_password_length)
+            },
             again = ctx.t("New password again", "Neues Passwort wiederholen"),
-            min = self.settings.min_password_length.max(8),
             save = ctx.t("Change password", "Passwort ändern"),
         ));
+        }
         let pending = lock(&self.pending_totp)
             .get(&ctx.user.name.to_lowercase())
             .cloned();
@@ -1582,7 +1981,7 @@ impl WebApp {
             (Some(_), _) => format!(
                 r#"<p><span class="badge good">{on}</span></p>{off}"#,
                 on = ctx.t("on", "an"),
-                off = if self.settings.require_two_factor {
+                off = if self.settings.require_two_factor && !self.email_factor(ctx) {
                     String::new()
                 } else {
                     format!(
@@ -1616,14 +2015,225 @@ impl WebApp {
         body.push_str(&format!(
             r#"<section class="card"><h2>{}</h2>{twofa}</section>"#,
             ctx.t(
-                "One-time codes (two-factor sign-in)",
-                "Einmalcodes (Zwei-Faktor-Anmeldung)"
+                "Authenticator app (two-factor sign-in)",
+                "Authenticator-App (Zwei-Faktor-Anmeldung)"
             )
         ));
+        body.push_str(&self.email_section(ctx));
         self.page(ctx, ctx.t("Account", "Konto"), &body, false)
     }
 
+    /// Whether codes by e-mail work for this user now (channel, address, chosen or required).
+    fn email_factor(&self, ctx: &Ctx<'_>) -> bool {
+        super::email_channel(&ctx.config).is_some()
+            && ctx.user.email.contains('@')
+            && (ctx.user.email_codes || self.settings.require_two_factor)
+    }
+
+    fn email_section(&self, ctx: &Ctx<'_>) -> String {
+        let csrf = csrf_field(&ctx.session);
+        let title = ctx.t("Codes by e-mail", "Codes per E-Mail");
+        if super::email_channel(&ctx.config).is_none() {
+            return format!(
+                r#"<section class="card"><h2>{title}</h2><p class="muted">{}</p></section>"#,
+                ctx.t(
+                    "Not available: no e-mail channel is set up on the server (AeternaVault → Notifications).",
+                    "Nicht verfügbar: Auf dem Server ist kein E-Mail-Kanal eingerichtet (AeternaVault → Benachrichtigungen)."
+                )
+            );
+        }
+        let directory = ctx.user.source == UserSource::Directory;
+        let address = esc(&ctx.user.email);
+        let pending = lock(&self.pending_email)
+            .get(&ctx.user.name.to_lowercase())
+            .cloned();
+        let mut html = String::new();
+        if self.email_factor(ctx) {
+            html.push_str(&format!(
+                r#"<p><span class="badge good">{on}</span> {to} <strong>{address}</strong></p>"#,
+                on = ctx.t("on", "an"),
+                to = ctx.t("Codes go to", "Codes gehen an"),
+            ));
+            let can_switch_off = !self.settings.require_two_factor || ctx.user.totp.is_some();
+            if can_switch_off && ctx.user.email_codes {
+                html.push_str(&format!(
+                    r#"<form method="post" action="/account/email/off" class="stack">{csrf}<label>{pw}<input name="current" type="password" required></label><button class="secondary">{label}</button></form>"#,
+                    pw = ctx.t("Password", "Passwort"),
+                    label = ctx.t("Switch off", "Ausschalten")
+                ));
+            }
+        } else if directory && ctx.user.email.contains('@') {
+            html.push_str(&format!(
+                r#"<p>{text} <strong>{address}</strong></p><form method="post" action="/account/email/use">{csrf}<button>{label}</button></form>"#,
+                text = ctx.t("Your directory account has the address", "Dein Verzeichniskonto hat die Adresse"),
+                label = ctx.t("Use codes by e-mail", "Codes per E-Mail verwenden"),
+            ));
+        } else if let Some(code) = pending {
+            html.push_str(&format!(
+                r#"<p>{text} <strong>{to}</strong>.</p><form method="post" action="/account/email/confirm" class="stack">{csrf}<label>{label}<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>{confirm}</button></form>"#,
+                text = ctx.t("A code was sent to", "Ein Code wurde gesendet an"),
+                to = esc(&code.address),
+                label = ctx.t("Code from the e-mail", "Code aus der E-Mail"),
+                confirm = ctx.t("Confirm", "Bestätigen"),
+            ));
+        } else if directory {
+            html.push_str(&format!(
+                r#"<p class="muted">{}</p>"#,
+                ctx.t(
+                    "Your directory account has no e-mail address (attribute mail).",
+                    "Dein Verzeichniskonto hat keine E-Mail-Adresse (Attribut mail)."
+                )
+            ));
+        } else {
+            html.push_str(&format!(
+                r#"<p>{explain}</p><form method="post" action="/account/email/start" class="stack">{csrf}<label>{label}<input name="email" type="email" autocomplete="email" value="{address}" required></label><button>{send}</button></form>"#,
+                explain = ctx.t(
+                    "After the password, sign-in then needs a code sent to this address.",
+                    "Nach dem Passwort braucht die Anmeldung dann einen Code, der an diese Adresse geht."
+                ),
+                label = ctx.t("E-mail address", "E-Mail-Adresse"),
+                send = ctx.t("Send a code to confirm", "Code zum Bestätigen senden"),
+            ));
+        }
+        format!(r#"<section class="card"><h2>{title}</h2>{html}</section>"#)
+    }
+
+    /// The user's own password: from the hash here, or checked by the directory.
+    fn own_password_ok(&self, ctx: &Ctx<'_>, password: &str) -> bool {
+        match ctx.user.source {
+            UserSource::Local => users::verify_password(password, &ctx.user.password),
+            UserSource::Directory => {
+                super::ldap::authenticate(&self.settings.ldap, &ctx.user.name, password).is_ok()
+            }
+        }
+    }
+
+    fn email_start(&self, ctx: &Ctx<'_>) -> Response {
+        if ctx.user.source == UserSource::Directory {
+            return self.forbidden(ctx);
+        }
+        let address = ctx
+            .req
+            .form()
+            .get("email")
+            .map(|e| e.trim().to_string())
+            .unwrap_or_default();
+        if !users::plausible_email(&address) {
+            return self.account(
+                ctx,
+                Some(ctx.t(
+                    "This is not an e-mail address.",
+                    "Das ist keine E-Mail-Adresse.",
+                )),
+            );
+        }
+        let key = ctx.user.name.to_lowercase();
+        if lock(&self.pending_email)
+            .get(&key)
+            .is_some_and(|c| c.sent.elapsed() < Duration::from_secs(60))
+        {
+            return self.account(
+                ctx,
+                Some(ctx.t(
+                    "A code was sent less than a minute ago.",
+                    "Vor weniger als einer Minute wurde schon ein Code gesendet.",
+                )),
+            );
+        }
+        let code = EmailCode::new(&address);
+        if let Err(err) = super::send_code(&ctx.config, &address, &code.code, true) {
+            tracing::warn!("web interface: confirmation code not sent: {err}");
+            return self.account(ctx, Some(ctx.t("The code could not be sent. Details are in the log of the server.", "Der Code konnte nicht gesendet werden. Details stehen im Protokoll des Servers.")));
+        }
+        lock(&self.pending_email).insert(key, code);
+        Response::redirect("/account")
+    }
+
+    fn email_confirm(&self, ctx: &Ctx<'_>) -> Response {
+        let key = ctx.user.name.to_lowercase();
+        let typed = ctx.req.form().get("code").cloned().unwrap_or_default();
+        let checked = lock(&self.pending_email)
+            .get_mut(&key)
+            .map(|c| (c.check(&typed), c.address.clone()));
+        let Some((true, address)) = checked else {
+            return self.account(
+                ctx,
+                Some(ctx.t(
+                    "The code is not correct or no longer valid.",
+                    "Der Code ist nicht korrekt oder nicht mehr gültig.",
+                )),
+            );
+        };
+        lock(&self.pending_email).remove(&key);
+        let mut store = UserStore::load(&self.paths.config_file);
+        if let Some(user) = store.find_mut(&ctx.user.name) {
+            user.email = address.clone();
+            user.email_codes = true;
+        }
+        if let Err(err) = store.save(&self.paths.config_file) {
+            return self.account(ctx, Some(&err.to_string()));
+        }
+        audit::record(
+            &self.paths.config_file,
+            ctx.record("email-codes-on")
+                .details(vec![format!("address: {}", users::masked(&address))]),
+        );
+        Self::back(
+            "/account",
+            ctx.t("Codes by e-mail are on.", "Codes per E-Mail sind an."),
+        )
+    }
+
+    fn email_use(&self, ctx: &Ctx<'_>) -> Response {
+        if !ctx.user.email.contains('@') {
+            return Response::redirect("/account");
+        }
+        let mut store = UserStore::load(&self.paths.config_file);
+        if let Some(user) = store.find_mut(&ctx.user.name) {
+            user.email_codes = true;
+        }
+        let _ = store.save(&self.paths.config_file);
+        audit::record(
+            &self.paths.config_file,
+            ctx.record("email-codes-on")
+                .details(vec![format!("address: {}", users::masked(&ctx.user.email))]),
+        );
+        Self::back(
+            "/account",
+            ctx.t("Codes by e-mail are on.", "Codes per E-Mail sind an."),
+        )
+    }
+
+    fn email_off(&self, ctx: &Ctx<'_>) -> Response {
+        if self.settings.require_two_factor && ctx.user.totp.is_none() {
+            return self.forbidden(ctx);
+        }
+        let current = ctx.req.form().get("current").cloned().unwrap_or_default();
+        if !self.own_password_ok(ctx, &current) {
+            return self.account(
+                ctx,
+                Some(ctx.t(
+                    "The password is not correct.",
+                    "Das Passwort ist nicht korrekt.",
+                )),
+            );
+        }
+        let mut store = UserStore::load(&self.paths.config_file);
+        if let Some(user) = store.find_mut(&ctx.user.name) {
+            user.email_codes = false;
+        }
+        let _ = store.save(&self.paths.config_file);
+        audit::record(&self.paths.config_file, ctx.record("email-codes-off"));
+        Self::back(
+            "/account",
+            ctx.t("Codes by e-mail are off.", "Codes per E-Mail sind aus."),
+        )
+    }
+
     fn change_password(&self, ctx: &Ctx<'_>) -> Response {
+        if ctx.user.source == UserSource::Directory {
+            return self.forbidden(ctx);
+        }
         let form = ctx.req.form();
         let current = form.get("current").cloned().unwrap_or_default();
         let new = form.get("new").cloned().unwrap_or_default();
@@ -1660,9 +2270,11 @@ impl WebApp {
                 )),
             );
         }
-        if let Err(err) = users::check_password(&new, self.settings.min_password_length) {
+        if let Err(err) = users::check_password(&new) {
             return self.account(ctx, Some(&err));
         }
+        let advice =
+            users::password_advice(&new, self.settings.recommended_password_length, ctx.en);
         let mut store = UserStore::load(&self.paths.config_file);
         if let Some(user) = store.find_mut(&ctx.user.name) {
             user.password = users::hash_password(&new);
@@ -1679,7 +2291,11 @@ impl WebApp {
             if keep.is_some() {
                 let (token, _) = sessions.create(&ctx.user.name, ctx.req.peer, false);
                 audit::record(&self.paths.config_file, ctx.record("password-changed"));
-                return Self::back("/account", ctx.t("Password changed.", "Passwort geändert."))
+                let mut message = ctx.t("Password changed.", "Passwort geändert.").to_string();
+                if let Some(advice) = advice {
+                    message = format!("{message} {advice}");
+                }
+                return Self::back("/account", &message)
                     .header("Set-Cookie", &self.session_cookie(ctx.req, &token));
             }
         }
@@ -1725,11 +2341,11 @@ impl WebApp {
     }
 
     fn totp_off(&self, ctx: &Ctx<'_>) -> Response {
-        if self.settings.require_two_factor {
+        if self.settings.require_two_factor && !self.email_factor(ctx) {
             return self.forbidden(ctx);
         }
         let current = ctx.req.form().get("current").cloned().unwrap_or_default();
-        if !users::verify_password(&current, &ctx.user.password) {
+        if !self.own_password_ok(ctx, &current) {
             return self.account(
                 ctx,
                 Some(ctx.t(

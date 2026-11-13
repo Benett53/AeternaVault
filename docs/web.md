@@ -56,17 +56,55 @@ Users are kept in `web-users.json` next to the configuration (readable by its ow
 | Setting | Default | |
 |---|---|---|
 | `session_minutes` | `30` | Signed out after this many minutes without activity (at most 12 hours in total). |
-| `require_two_factor` | `false` | Every user needs a one-time code from an authenticator app (time-based, RFC 6238). Users set it up under *Account*. |
+| `require_two_factor` | `false` | Every user needs a second step after the password: a code from an authenticator app (RFC 6238) or a code by e-mail. Users set it up under *Account*. |
 | `lockout_attempts`, `lockout_minutes` | `5`, `15` | After this many wrong sign-ins for a name, it has to wait. An address waits after three times as many. |
-| `min_password_length` | `12` | |
+| `recommended_password_length` | `12` | A recommendation: shorter passwords are accepted with a note, as are easily guessed ones. Only an empty password is refused. |
+| `email_channel` | empty | The e-mail notification channel that sends sign-in codes; empty: the first switched-on one. |
 
 A lost phone: `aeternavault-cli web user reset-two-factor NAME`, or *Reset one-time codes* in the Web tab.
+
+### Codes by e-mail
+
+Instead of an authenticator app, the second step can be a six-digit code sent by e-mail. It needs an e-mail channel under Notifications (the same SMTP account as for backup reports). A code is valid for 10 minutes, once, and for five tries; a new one can be sent after a minute.
+
+- A user switches it on under *Account* and confirms the address with a code.
+- Directory users have the address of their directory account (`mail`).
+- An administrator can enter the address of a user in the Web tab (*Actions*). With `require_two_factor`, users with a known address and no authenticator app then get codes by e-mail without setting anything up.
+
+## LDAP / Active Directory
+
+Users can sign in with their directory account. In the Web tab: *LDAP / Active Directory*, or on the command line:
+
+```sh
+printf '%s\n' 'password of the search account' | aeternavault-cli --passphrase-stdin web ldap set \
+  --preset active-directory --url ldaps://dc1.example.local \
+  --bind-dn 'CN=svc-backup,OU=Service,DC=example,DC=local' --base-dn 'DC=example,DC=local' \
+  --admin-group 'CN=Backup-Admins,OU=Groups,DC=example,DC=local' \
+  --viewer-group 'CN=Backup-Readers,OU=Groups,DC=example,DC=local'
+aeternavault-cli web ldap on
+aeternavault-cli web ldap test --user anna
+```
+
+| Setting | |
+|---|---|
+| `url` | `ldaps://…` (encrypted) or `ldap://…` with `starttls`. Unencrypted `ldap://` only with `allow_unencrypted` (test setups). |
+| `ca_file` | An own certificate authority (PEM). Certificates trusted by the computer are always accepted, on Windows also company CAs from group policy. |
+| `bind_dn`, `bind_password` | The account that searches. Empty: anonymous. With `{user}`, e.g. `{user}@example.local`: the user signing in searches with their own account; no service account is needed. |
+| `base_dn`, `user_filter` | Where and how the user is found; `{user}` is the name typed at sign-in. Presets: Active Directory `(&(objectClass=user)(sAMAccountName={user}))`, OpenLDAP `(&(objectClass=inetOrgPerson)(uid={user}))`. |
+| `admin_group`, `operator_group`, `viewer_group` | Members get the role (the highest if several). Members of none cannot sign in. |
+| `nested_groups` | Active Directory: membership through nested groups counts. |
+
+The role is read again at every sign-in. Directory users appear in the user list after their first sign-in; there they can be limited to jobs, locked, and their one-time codes reset. Their password is checked by the directory, never stored. Users created here keep working besides, e.g. as an emergency administrator when the directory cannot be reached. A directory that cannot be reached does not count as a wrong password.
+
+## Sign-ins, live
+
+Administrators see under *Activity → Sign-ins (live)* who is signed in now, how many sign-ins succeeded and failed in the last 24 hours, and every attempt with user, address and reason (wrong password, unknown user, wrong code, locked, not in a group). The page updates itself. In the window, the same is under *Activity → Sign-ins (web)*.
 
 ## Audit log
 
 `audit.jsonl` next to the configuration lists who did what, when and from where:
 
-- sign-ins (also failed ones, with the reason), sign-outs;
+- sign-ins (also failed ones, with the reason), sign-outs, codes sent by e-mail;
 - users added, changed, locked, removed, passwords and one-time codes reset;
 - jobs run, cancelled and switched over the web, backups checked over the web;
 - every saved change of the settings, from the window, the command line or the web, with the changed fields. Passwords, tokens and web addresses of notification channels are only noted as changed;

@@ -490,7 +490,14 @@ pub struct WebSettings {
     pub lockout_attempts: u32,
     /// … this many minutes.
     pub lockout_minutes: u32,
-    pub min_password_length: u32,
+    /// Shorter passwords are accepted with a note (a recommendation, not a rule).
+    #[serde(alias = "min_password_length")]
+    pub recommended_password_length: u32,
+    /// Sign-in with LDAP / Active Directory, besides the users kept here.
+    pub ldap: crate::web::ldap::LdapSettings,
+    /// E-mail notification channel (by name) that sends sign-in codes.
+    /// Empty: the first switched-on e-mail channel.
+    pub email_channel: String,
 }
 
 impl Default for WebSettings {
@@ -507,7 +514,9 @@ impl Default for WebSettings {
             require_two_factor: false,
             lockout_attempts: 5,
             lockout_minutes: 15,
-            min_password_length: 12,
+            recommended_password_length: 12,
+            ldap: crate::web::ldap::LdapSettings::default(),
+            email_channel: String::new(),
         }
     }
 }

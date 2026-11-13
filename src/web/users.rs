@@ -49,15 +49,35 @@ impl Role {
     pub const ALL: [Role; 3] = [Role::Viewer, Role::Operator, Role::Admin];
 }
 
+/// Where a user signs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UserSource {
+    /// Name and password kept here.
+    #[default]
+    Local,
+    /// Checked against LDAP / Active Directory; the role comes from its groups
+    /// at every sign-in. Kept here for job limits, one-time codes and locking.
+    Directory,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub name: String,
     pub role: Role,
+    #[serde(default)]
+    pub source: UserSource,
     /// `argon2id$<memory KiB>$<passes>$<salt hex>$<hash hex>`.
     pub password: String,
     /// Secret for one-time codes (base32), once set up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub totp: Option<String>,
+    /// E-mail address for sign-in codes (directory users: from the directory).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub email: String,
+    /// The user chose codes by e-mail as second step.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub email_codes: bool,
     /// Ids of the jobs this user may see and run. Empty: all jobs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub jobs: Vec<String>,
@@ -71,7 +91,25 @@ pub struct User {
     pub last_sign_in: Option<DateTime<Utc>>,
 }
 
+/// The second step of a sign-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecondFactor {
+    App,
+    Email,
+}
+
 impl User {
+    /// Which second step this user's sign-in needs. `required`: the settings
+    /// ask for a second step from everybody; then a known e-mail address is
+    /// used even if the user did not choose it.
+    pub fn second_factor(&self, required: bool, email_possible: bool) -> Option<SecondFactor> {
+        if self.totp.is_some() {
+            return Some(SecondFactor::App);
+        }
+        let has_email = email_possible && self.email.contains('@');
+        (has_email && (self.email_codes || required)).then_some(SecondFactor::Email)
+    }
+
     pub fn may(&self, role: Role) -> bool {
         !self.disabled && self.role >= role
     }
@@ -131,25 +169,22 @@ impl UserStore {
         self.users.iter().filter(|u| u.may(Role::Admin)).count()
     }
 
-    /// Adds a user; the name must be new and the password long enough.
-    pub fn add(
-        &mut self,
-        name: &str,
-        role: Role,
-        password: &str,
-        min_length: u32,
-    ) -> Result<(), String> {
+    /// Adds a user; the name must be new and the password not empty.
+    pub fn add(&mut self, name: &str, role: Role, password: &str) -> Result<(), String> {
         let name = name.trim();
         valid_name(name)?;
         if self.find(name).is_some() {
             return Err(format!("a user named {name} already exists"));
         }
-        check_password(password, min_length)?;
+        check_password(password)?;
         self.users.push(User {
             name: name.to_string(),
             role,
+            source: UserSource::Local,
             password: hash_password(password),
             totp: None,
+            email: String::new(),
+            email_codes: false,
             jobs: Vec::new(),
             disabled: false,
             must_change_password: false,
@@ -178,15 +213,53 @@ pub fn valid_name(name: &str) -> Result<(), String> {
     }
 }
 
-pub fn check_password(password: &str, min_length: u32) -> Result<(), String> {
-    let min = min_length.max(8) as usize;
-    if password.chars().count() < min {
-        return Err(format!("the password needs at least {min} characters"));
+/// Only what cannot work is refused: an empty password, or one so long it
+/// would only slow the server down. Length and strength are advice, see
+/// [`password_advice`].
+pub fn check_password(password: &str) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("the password is empty".into());
     }
     if password.chars().count() > 1024 {
-        return Err("the password is too long".into());
+        return Err("the password is too long (more than 1024 characters)".into());
     }
     Ok(())
+}
+
+/// Advice about a password, or `None` if it looks fine: shorter than
+/// recommended, or easy to guess. Never a reason to refuse it.
+pub fn password_advice(password: &str, recommended: u32, en: bool) -> Option<String> {
+    if password.is_empty() {
+        return None;
+    }
+    let mut advice = Vec::new();
+    let length = password.chars().count();
+    if length < recommended as usize {
+        advice.push(if en {
+            format!("shorter than the recommended {recommended} characters ({length})")
+        } else {
+            format!("kürzer als die empfohlenen {recommended} Zeichen ({length})")
+        });
+    }
+    let personal = crate::engine::passphrase::personal_details();
+    let personal: Vec<&str> = personal.iter().map(String::as_str).collect();
+    let rating = crate::engine::passphrase::assess(password, &personal).rating();
+    if rating == crate::engine::passphrase::Rating::Weak {
+        advice.push(if en {
+            "easy to guess".into()
+        } else {
+            "leicht zu erraten".into()
+        });
+    }
+    if advice.is_empty() {
+        return None;
+    }
+    let text = advice.join(if en { " and " } else { " und " });
+    Some(if en {
+        format!("Note: the password is {text}. It is accepted anyway.")
+    } else {
+        format!("Hinweis: Das Passwort ist {text}. Es wird trotzdem übernommen.")
+    })
 }
 
 // --- passwords ------------------------------------------------------------------
@@ -350,6 +423,69 @@ pub fn totp_uri(secret: &str, user: &str) -> String {
     )
 }
 
+// --- codes by e-mail -------------------------------------------------------------
+
+/// How long a code sent by e-mail is valid.
+pub const EMAIL_CODE_TTL: Duration = Duration::from_secs(10 * 60);
+/// Wrong codes before a sent code is void.
+pub const EMAIL_CODE_TRIES: u32 = 5;
+
+/// A code sent by e-mail and not used yet.
+#[derive(Debug, Clone)]
+pub struct EmailCode {
+    pub code: String,
+    /// The address it went to (when an address is being confirmed).
+    pub address: String,
+    pub sent: Instant,
+    pub tries: u32,
+}
+
+impl EmailCode {
+    pub fn new(address: &str) -> Self {
+        let n = u32::from_be_bytes(random_bytes::<4>()) % 1_000_000;
+        Self {
+            code: format!("{n:06}"),
+            address: address.to_string(),
+            sent: Instant::now(),
+            tries: 0,
+        }
+    }
+
+    /// Checks a typed code; every wrong one counts, and an old or used-up
+    /// code never matches.
+    pub fn check(&mut self, typed: &str) -> bool {
+        let typed: String = typed.chars().filter(|c| c.is_ascii_digit()).collect();
+        if self.sent.elapsed() > EMAIL_CODE_TTL || self.tries >= EMAIL_CODE_TRIES {
+            return false;
+        }
+        let ok = equal(typed.as_bytes(), self.code.as_bytes());
+        if !ok {
+            self.tries += 1;
+        }
+        ok
+    }
+}
+
+/// `anna@example.org` → `a***@example.org`, for pages that say where a code went.
+pub fn masked(address: &str) -> String {
+    match address.split_once('@') {
+        Some((local, domain)) => {
+            let first: String = local.chars().take(1).collect();
+            format!("{first}***@{domain}")
+        }
+        None => "***".into(),
+    }
+}
+
+pub fn plausible_email(address: &str) -> bool {
+    let address = address.trim();
+    address.len() <= 254
+        && !address.contains(char::is_whitespace)
+        && address.split_once('@').is_some_and(|(l, d)| {
+            !l.is_empty() && d.contains('.') && !d.starts_with('.') && !d.ends_with('.')
+        })
+}
+
 // --- sessions and sign-in limits -----------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -414,6 +550,26 @@ impl Sessions {
 
     pub fn count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Signed-in sessions (user, address, signed in for, idle for), for the
+    /// live view of sign-ins.
+    pub fn active(&self) -> Vec<(String, IpAddr, Duration, Duration)> {
+        let mut list: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|s| !s.pending_code)
+            .map(|s| {
+                (
+                    s.user.clone(),
+                    s.ip,
+                    s.started.elapsed(),
+                    s.last_seen.elapsed(),
+                )
+            })
+            .collect();
+        list.sort_by_key(|(_, _, started, _)| *started);
+        list
     }
 }
 
@@ -500,17 +656,17 @@ mod tests {
     fn roles_and_jobs_limit_what_a_user_may_do() {
         let mut store = UserStore::default();
         store
-            .add("anna", Role::Operator, "long enough pass", 12)
+            .add("anna", Role::Operator, "long enough pass")
             .unwrap();
+        assert!(store.add("Anna", Role::Viewer, "long enough pass").is_err());
         assert!(
-            store
-                .add("Anna", Role::Viewer, "long enough pass", 12)
-                .is_err()
+            store.add("bob", Role::Viewer, "").is_err(),
+            "only empty is refused"
         );
-        assert!(store.add("bob", Role::Viewer, "short", 12).is_err());
+        store.add("carl", Role::Viewer, "short").unwrap();
         assert!(
             store
-                .add("bad name", Role::Viewer, "long enough pass", 12)
+                .add("bad name", Role::Viewer, "long enough pass")
                 .is_err()
         );
         let anna = store.find_mut("ANNA").unwrap();
@@ -521,6 +677,54 @@ mod tests {
         assert!(!anna.may_use_job(None));
         anna.disabled = true;
         assert!(!anna.may(Role::Viewer));
+    }
+
+    #[test]
+    fn email_codes_expire_and_allow_few_tries() {
+        let mut code = EmailCode::new("anna@example.org");
+        let right = code.code.clone();
+        assert_eq!(right.len(), 6);
+        assert!(!code.check("000000x") || right == "000000");
+        assert!(code.check(&format!("{} {}", &right[..3], &right[3..])));
+        let mut used = EmailCode::new("a@b.de");
+        let right = used.code.clone();
+        for _ in 0..EMAIL_CODE_TRIES {
+            used.check("wrong");
+        }
+        assert!(!used.check(&right), "too many wrong codes void it");
+        assert_eq!(masked("anna@example.org"), "a***@example.org");
+        assert!(plausible_email("anna@example.org"));
+        assert!(!plausible_email("anna@localhost") && !plausible_email("a b@x.de"));
+    }
+
+    #[test]
+    fn second_factor_is_app_then_email() {
+        let mut store = UserStore::default();
+        store.add("anna", Role::Viewer, "pw").unwrap();
+        let anna = store.find_mut("anna").unwrap();
+        assert_eq!(anna.second_factor(true, true), None, "no way known yet");
+        anna.email = "anna@example.org".into();
+        assert_eq!(
+            anna.second_factor(false, true),
+            None,
+            "not chosen, not required"
+        );
+        assert_eq!(anna.second_factor(true, true), Some(SecondFactor::Email));
+        assert_eq!(anna.second_factor(true, false), None, "no e-mail channel");
+        anna.totp = Some(new_totp_secret());
+        assert_eq!(anna.second_factor(false, true), Some(SecondFactor::App));
+    }
+
+    #[test]
+    fn short_passwords_get_advice_not_refused() {
+        assert!(check_password("abc").is_ok());
+        let advice = password_advice("abc", 12, true).unwrap();
+        assert!(
+            advice.contains("recommended 12") && advice.contains("accepted"),
+            "{advice}"
+        );
+        assert!(password_advice("Tannenbaum-Kaffee-Wolke-73", 12, true).is_none());
+        assert!(password_advice("", 12, true).is_none());
     }
 
     #[test]
