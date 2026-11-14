@@ -14,6 +14,7 @@
 
 pub mod access;
 pub mod app;
+pub mod countries;
 pub mod device;
 pub mod http;
 pub mod ldap;
@@ -339,6 +340,12 @@ impl WebServer {
         })
     }
 
+    /// Connections refused by country since the start, by ISO code
+    /// (`??`: not in the database).
+    pub fn geo_refusals(&self) -> Vec<(String, u64)> {
+        self.app.geo_refusals()
+    }
+
     /// Who is signed in now: (user, address, signed in for, idle for).
     pub fn active_sessions(
         &self,
@@ -392,6 +399,7 @@ mod tests {
     fn plain_http_only_for_this_computer() {
         let mut settings = WebSettings {
             tls: TlsMode::Off,
+            bind: "127.0.0.1".into(),
             ..WebSettings::default()
         };
         assert!(check_settings(&settings).is_ok());

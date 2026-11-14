@@ -560,6 +560,10 @@ pub fn log_level(paths: &AppPaths) -> LogLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebSettings {
+    /// Version of these settings; older files are moved to current defaults
+    /// once (see [`Config::normalize`]).
+    #[serde(default = "web_settings_v0")]
+    pub version: u32,
     pub enabled: bool,
     /// Address to listen on: `127.0.0.1` (this computer only) or `0.0.0.0`
     /// (every network of the computer), or one address of the computer.
@@ -607,11 +611,20 @@ pub struct WebSettings {
     pub email_channel: String,
 }
 
+/// Files written before the version field existed.
+fn web_settings_v0() -> u32 {
+    0
+}
+
+/// The current version of the web settings.
+pub const WEB_SETTINGS_VERSION: u32 = 1;
+
 impl Default for WebSettings {
     fn default() -> Self {
         Self {
+            version: WEB_SETTINGS_VERSION,
             enabled: false,
-            bind: "127.0.0.1".into(),
+            bind: "0.0.0.0".into(),
             port: 8686,
             tls: TlsMode::Auto,
             cert_file: PathBuf::new(),
@@ -622,9 +635,9 @@ impl Default for WebSettings {
             mfa: crate::web::access::MfaPolicy::Optional,
             mfa_app: true,
             mfa_email: true,
-            admin_access: crate::web::access::AdminAccess::Anywhere,
+            admin_access: crate::web::access::AdminAccess::ThisComputer,
             admin_networks: Vec::new(),
-            auto_block_after: 20,
+            auto_block_after: 5,
             geo: crate::web::access::GeoSettings::default(),
             lockout_attempts: 5,
             lockout_minutes: 15,
@@ -814,6 +827,26 @@ impl Config {
         if std::mem::take(&mut self.web.require_two_factor) {
             self.web.mfa = crate::web::access::MfaPolicy::Everyone;
         }
+        if self.web.version < 1 {
+            // 0.14: the web interface listens on the network (HTTPS) like
+            // other server software; reaching it from outside still needs a
+            // port opened in the firewall or router. Administration only
+            // from this computer, addresses blocked after 5 wrong sign-ins.
+            let web = &mut self.web;
+            if web.local_only() {
+                web.bind = "0.0.0.0".into();
+            }
+            if web.tls == TlsMode::Off {
+                web.tls = TlsMode::Auto;
+            }
+            if web.auto_block_after == 20 {
+                web.auto_block_after = 5;
+            }
+            if web.admin_access == crate::web::access::AdminAccess::Anywhere {
+                web.admin_access = crate::web::access::AdminAccess::ThisComputer;
+            }
+        }
+        self.web.version = WEB_SETTINGS_VERSION;
         let mut seen = std::collections::HashSet::new();
         for schedule in &mut self.schedules {
             if std::mem::take(&mut schedule.only_on_ac_power) {

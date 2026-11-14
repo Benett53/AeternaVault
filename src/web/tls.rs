@@ -158,6 +158,94 @@ impl rustls::server::ResolvesServerCert for Reloading {
     }
 }
 
+/// What a certificate says about itself, as certificate dialogs show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertInfo {
+    /// Common name of the subject.
+    pub subject: String,
+    pub issuer: String,
+    /// Host names and addresses it is valid for.
+    pub names: Vec<String>,
+    pub not_before: chrono::DateTime<chrono::Utc>,
+    pub not_after: chrono::DateTime<chrono::Utc>,
+    pub self_signed: bool,
+    pub fingerprint: String,
+}
+
+impl CertInfo {
+    pub fn days_left(&self) -> i64 {
+        (self.not_after - chrono::Utc::now()).num_days()
+    }
+}
+
+fn common_name(name: &x509_parser::x509::X509Name<'_>) -> String {
+    name.iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// Details of the certificate in use (`None`: none made yet).
+pub fn info(config_file: &Path, settings: &WebSettings) -> Option<Result<CertInfo, String>> {
+    let (cert_file, _) = files(config_file, settings);
+    if !cert_file.is_file() {
+        return None;
+    }
+    Some(read_info(&cert_file))
+}
+
+fn read_info(cert_file: &Path) -> Result<CertInfo, String> {
+    let der = CertificateDer::pem_file_iter(cert_file)
+        .map_err(|e| format!("{}: {e}", cert_file.display()))?
+        .next()
+        .ok_or_else(|| format!("{}: no certificate found", cert_file.display()))?
+        .map_err(|e| format!("{}: {e}", cert_file.display()))?;
+    let (_, cert) = x509_parser::parse_x509_certificate(der.as_ref())
+        .map_err(|e| format!("{}: {e}", cert_file.display()))?;
+    let names = cert
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .map(|san| {
+            san.value
+                .general_names
+                .iter()
+                .filter_map(|n| match n {
+                    x509_parser::extensions::GeneralName::DNSName(d) => Some(d.to_string()),
+                    x509_parser::extensions::GeneralName::IPAddress(ip) => match ip.len() {
+                        4 => Some(
+                            std::net::Ipv4Addr::from(<[u8; 4]>::try_from(*ip).ok()?).to_string(),
+                        ),
+                        16 => Some(
+                            std::net::Ipv6Addr::from(<[u8; 16]>::try_from(*ip).ok()?).to_string(),
+                        ),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let time = |t: &x509_parser::time::ASN1Time| {
+        chrono::DateTime::from_timestamp(t.timestamp(), 0).unwrap_or_default()
+    };
+    let digest = Sha256::digest(der.as_ref());
+    Ok(CertInfo {
+        subject: common_name(cert.subject()),
+        issuer: common_name(cert.issuer()),
+        names,
+        not_before: time(&cert.validity().not_before),
+        not_after: time(&cert.validity().not_after),
+        self_signed: cert.subject() == cert.issuer(),
+        fingerprint: digest
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(":"),
+    })
+}
+
 /// SHA-256 of the certificate as browsers show it (`AB:CD:…`).
 pub fn fingerprint(config_file: &Path, settings: &WebSettings) -> Option<String> {
     let (cert_file, _) = files(config_file, settings);
@@ -259,5 +347,13 @@ mod tests {
         create_self_signed(&cert, &key).unwrap();
         let second = reloading.current(Duration::ZERO).cert[0].clone();
         assert_ne!(second, first, "the new certificate is served");
+
+        let info = read_info(&cert).unwrap();
+        assert!(info.self_signed);
+        assert!(info.subject.starts_with("AeternaVault"));
+        assert!(info.names.iter().any(|n| n == "localhost"));
+        assert!(info.names.iter().any(|n| n == "127.0.0.1"));
+        assert!(info.days_left() > 300);
+        assert_eq!(info.fingerprint.len(), 32 * 3 - 1);
     }
 }

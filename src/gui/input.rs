@@ -98,8 +98,17 @@ impl AeternaApp {
             .collect()
     }
 
+    /// The tabs at the top: notifications and the web interface are pages
+    /// of the settings.
+    pub fn tab_views(&self) -> Vec<View> {
+        self.visible_views()
+            .into_iter()
+            .filter(|v| !matches!(v, View::Notifications | View::Web))
+            .collect()
+    }
+
     fn cycle_view(&mut self, ctx: &egui::Context, step: isize) {
-        let views = self.visible_views();
+        let views = self.tab_views();
         let Some(index) = views.iter().position(|v| *v == self.view) else {
             return;
         };
@@ -146,7 +155,7 @@ impl AeternaApp {
         ];
         for (index, key) in numbers.into_iter().enumerate() {
             if consume(Modifiers::CTRL, key)
-                && let Some(view) = self.visible_views().get(index).copied()
+                && let Some(view) = self.tab_views().get(index).copied()
             {
                 self.navigate(ctx, view);
             }

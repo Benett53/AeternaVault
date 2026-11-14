@@ -161,6 +161,78 @@ pub fn button(ui: &mut Ui, kind: ButtonKind, text: &str, enabled: bool) -> Respo
 }
 
 /// Navigation entry with a gold underline when selected.
+/// A one-line text field with room around the text, as high as buttons.
+pub fn text_field(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
+    egui::TextEdit::singleline(text).margin(Margin::symmetric(10, 7))
+}
+
+/// A multi-line text field with room around the text.
+pub fn text_area(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
+    egui::TextEdit::multiline(text).margin(Margin::symmetric(10, 8))
+}
+
+/// A small "i" after a label: the explanation shows on hover.
+pub fn hint_icon(ui: &mut Ui, text: &str) {
+    let p = *palette(ui);
+    let size = 15.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
+    let color = if response.hovered() {
+        p.accent
+    } else {
+        p.text_secondary
+    };
+    ui.painter()
+        .circle_stroke(rect.center(), size / 2.0 - 1.0, Stroke::new(1.1, color));
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "i",
+        FontId::proportional(10.5),
+        color,
+    );
+    response.on_hover_text(text);
+}
+
+/// An entry of a side list (settings sections): the whole width is
+/// clickable, the chosen one is filled with an accent bar on the left.
+pub fn side_tab(ui: &mut Ui, text: &str, selected: bool) -> Response {
+    let p = *palette(ui);
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 38.0), Sense::click());
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(response.id, selected || response.hovered(), 0.12);
+    if t > 0.0 {
+        let fill = if selected {
+            p.raised
+        } else {
+            p.raised.gamma_multiply(0.6)
+        };
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(8), fill.gamma_multiply(t));
+    }
+    if selected {
+        let bar = Rect::from_min_size(
+            rect.left_top() + Vec2::new(0.0, 9.0),
+            Vec2::new(3.0, rect.height() - 18.0),
+        );
+        ui.painter()
+            .rect_filled(bar, CornerRadius::same(2), p.accent);
+    }
+    let font = FontId::new(15.0, FontFamily::Proportional);
+    let color = if selected { p.text } else { p.text_secondary };
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, color);
+    let pos = Pos2::new(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, color);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, text)
+    });
+    response
+}
+
 pub fn nav_tab(ui: &mut Ui, text: &str, selected: bool, enabled: bool) -> Response {
     let p = *palette(ui);
     let font = FontId::new(16.5, FontFamily::Name(SANS_STRONG.into()));
@@ -882,120 +954,6 @@ pub fn split(ui: &mut Ui, mut add: impl FnMut(&mut Ui, usize)) {
     );
 }
 
-/// Cards in two columns of about equal height (heights from the frame
-/// before), so no large gap is left under one column. The order is kept as long as a new
-/// one would not be clearly better, so cards do not jump while a card grows
-/// or shrinks a little. One column below 1100 points.
-pub fn masonry(ui: &mut Ui, id: &str, count: usize, mut add: impl FnMut(&mut Ui, usize)) {
-    const GAP: f32 = 14.0;
-    if ui.available_width() < 1100.0 {
-        for i in 0..count {
-            if i > 0 {
-                ui.add_space(GAP);
-            }
-            add(ui, i);
-        }
-        return;
-    }
-    let heights_id = ui.id().with(("masonry-heights", id));
-    let columns_id = ui.id().with(("masonry-columns", id));
-    let mut heights: Vec<f32> = ui.data(|d| d.get_temp(heights_id)).unwrap_or_default();
-    heights.resize(count, 0.0);
-    let totals = |assign: &[usize]| {
-        let mut t = [0.0f32; 2];
-        for (i, c) in assign.iter().enumerate() {
-            t[*c] += heights[i] + GAP;
-        }
-        t
-    };
-    // The split with the shortest taller column (the first card stays on
-    // the left; each column keeps the order of its cards). Few cards, so
-    // every split is tried; beyond that, each card goes where there is less.
-    let mut greedy = vec![0usize; count];
-    if count <= 12 {
-        let mut best = f32::INFINITY;
-        for mask in 0..(1u32 << count.saturating_sub(1)) {
-            let assign: Vec<usize> = (0..count)
-                .map(|i| {
-                    if i == 0 {
-                        0
-                    } else {
-                        ((mask >> (i - 1)) & 1) as usize
-                    }
-                })
-                .collect();
-            let [a, b] = totals(&assign);
-            if a.max(b) + 0.5 < best {
-                best = a.max(b);
-                greedy = assign;
-            }
-        }
-    } else {
-        let mut sums = [0.0f32; 2];
-        for (i, h) in heights.iter().enumerate() {
-            let c = usize::from(sums[1] < sums[0]);
-            greedy[i] = c;
-            sums[c] += h + GAP;
-        }
-    }
-    let previous: Option<Vec<usize>> = ui.data(|d| d.get_temp(columns_id));
-    let assign = match previous.filter(|p| p.len() == count) {
-        Some(previous) => {
-            let [a, b] = totals(&previous);
-            let [c, d] = totals(&greedy);
-            // Re-sort only when it saves a clear amount of empty space.
-            if (a - b).abs() - (c - d).abs() > 160.0 {
-                greedy
-            } else {
-                previous
-            }
-        }
-        None => greedy,
-    };
-
-    let gap = 16.0;
-    let width = ui.available_width();
-    let column = ((width - gap) / 2.0).floor();
-    let top = ui.cursor().min;
-    let mut bottom = top.y;
-    let mut measured = heights.clone();
-    for c in 0..2 {
-        let rect = Rect::from_min_size(
-            Pos2::new(top.x + c as f32 * (column + gap), top.y),
-            Vec2::new(column, 1.0e6),
-        );
-        let mut child = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(rect)
-                .layout(Layout::top_down(Align::Min)),
-        );
-        child.set_width(column);
-        child.set_clip_rect(child.clip_rect().intersect(Rect::from_min_size(
-            rect.min - Vec2::new(0.0, 1.0e6),
-            Vec2::new(column + 2.0, 2.0e6),
-        )));
-        let mut first = true;
-        for (i, _) in assign.iter().enumerate().filter(|(_, a)| **a == c) {
-            if !first {
-                child.add_space(GAP);
-            }
-            first = false;
-            let start = child.cursor().top();
-            add(&mut child, i);
-            measured[i] = child.min_rect().bottom() - start;
-        }
-        bottom = bottom.max(child.min_rect().bottom());
-    }
-    ui.data_mut(|d| {
-        d.insert_temp(heights_id, measured);
-        d.insert_temp(columns_id, assign);
-    });
-    ui.allocate_rect(
-        Rect::from_min_max(top, Pos2::new(top.x + width, bottom)),
-        Sense::hover(),
-    );
-}
-
 /// A bar showing how full something is, e.g. the destination drive.
 pub fn usage_bar(ui: &mut Ui, used_fraction: f32, label: &str) {
     let p = *palette(ui);
@@ -1035,7 +993,11 @@ pub fn field_row<R>(
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.set_min_size(Vec2::new(label_width, 36.0));
-                secondary_text(ui, label).on_hover_text(hint);
+                ui.spacing_mut().item_spacing.x = 6.0;
+                secondary_text(ui, label);
+                if !hint.is_empty() {
+                    hint_icon(ui, hint);
+                }
             },
         );
         let rest = ui.available_width();
@@ -1054,20 +1016,40 @@ pub fn field_row<R>(
     .inner
 }
 
-/// Shows `add` when `open`, sliding and fading in and out instead of making
-/// the content below jump.
+/// Shows `add` when `open`: it slides open and fades in over a fifth of a
+/// second (and back), so the content below moves smoothly instead of jumping.
 pub fn reveal<R>(ui: &mut Ui, id: &str, open: bool, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
-    let id = ui.make_persistent_id(id);
-    let mut state =
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
-    state.set_open(open);
-    let openness = state.openness(ui.ctx());
-    state
-        .show_body_unindented(ui, |ui| {
-            ui.multiply_opacity(openness);
-            add(ui)
-        })
-        .map(|r| r.inner)
+    let id = ui.make_persistent_id(("reveal", id));
+    let linear = ui.ctx().animate_bool_with_time(id, open, 0.22);
+    if linear <= 0.0 {
+        return None;
+    }
+    // Ease out: fast at first, settling gently.
+    let t = 1.0 - (1.0 - linear).powi(3);
+    let height_id = id.with("height");
+    let known: Option<f32> = ui.data(|d| d.get_temp(height_id));
+    let area = ui.available_rect_before_wrap();
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(*ui.layout()));
+    let animating = linear < 1.0;
+    if animating && let Some(full) = known {
+        let mut clip = child.clip_rect();
+        clip.max.y = clip.max.y.min(area.top() + full * t);
+        child.set_clip_rect(clip);
+    }
+    child.multiply_opacity(t);
+    let result = add(&mut child);
+    let used = child.min_rect();
+    ui.data_mut(|d| d.insert_temp(height_id, used.height()));
+    let height = if animating {
+        (used.height() * t).round()
+    } else {
+        used.height()
+    };
+    ui.advance_cursor_after_rect(Rect::from_min_size(
+        used.min,
+        Vec2::new(used.width(), height),
+    ));
+    Some(result)
 }
 
 /// A small rounded button for inserting a value, filter tags and the like.

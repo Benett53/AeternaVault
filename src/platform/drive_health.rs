@@ -491,6 +491,22 @@ pub fn cached(path: &Path, repaint: impl FnOnce() + Send + 'static) -> Option<Re
     entry.reading.clone()
 }
 
+/// Makes the next [`cached`] call read again (a "Check now" button).
+pub fn refresh(path: &Path) {
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = cache.as_mut().and_then(|m| m.get_mut(path))
+        && !entry.reading_now
+    {
+        entry.at = None;
+    }
+}
+
+/// When the last reading of `path` was made.
+pub fn read_at(path: &Path) -> Option<Instant> {
+    let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.as_ref()?.get(path)?.at
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

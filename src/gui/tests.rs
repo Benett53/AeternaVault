@@ -409,7 +409,9 @@ fn web_tab_manages_users() {
     harness.set_size(eframe::egui::vec2(1000.0, 2600.0));
     goto(&mut harness, View::Web);
     harness.run();
-    harness.get_by_label("Web interface");
+    harness.get_by_label("Enable web interface");
+    harness.get_by_label("Users").click();
+    harness.run();
     harness
         .state_mut()
         .web
@@ -888,4 +890,20 @@ fn message_texts_start_from_the_built_in_text_and_take_values() {
     click(&mut h, "Own text");
     h.run();
     assert!(h.state().config.notifications.success_message.is_empty());
+}
+
+#[test]
+fn opening_the_web_page_changes_nothing_and_parts_switch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut h = harness(tmp.path(), |c| c.features.web = Some(true));
+    h.set_size(eframe::egui::vec2(1000.0, 1600.0));
+    goto(&mut h, View::Web);
+    h.run();
+    assert!(
+        h.query_by_label("Apply").is_none(),
+        "no unapplied change just from looking"
+    );
+    h.get_by_label("Roles").click();
+    h.run();
+    assert_eq!(h.state().web.tab, super::views::web::WebTab::Roles);
 }

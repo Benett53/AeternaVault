@@ -99,6 +99,8 @@ ldap3 = { version = "0.12", default-features = false, features = ["sync", "tls-r
 # (MaxMind GeoLite2 Country or DB-IP Lite, .mmdb). Read only, no network.
 maxminddb = "0.33"
 rustls-native-certs = "0.8"
+# Details of the web certificate (issuer, validity, names); already used by ldap3.
+x509-parser = { version = "0.18", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

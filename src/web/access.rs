@@ -222,7 +222,7 @@ impl GeoSettings {
             .map(|c| c.trim().to_ascii_uppercase())
             .filter(|c| !c.is_empty())
             .map(|c| {
-                if c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase()) {
+                if super::countries::known(&c) {
                     Ok(c)
                 } else {
                     Err(format!(
@@ -232,6 +232,15 @@ impl GeoSettings {
             })
             .collect()
     }
+}
+
+/// What a country database says about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeoInfo {
+    /// e.g. `DBIP-Country-Lite` or `GeoLite2-Country`.
+    pub database_type: String,
+    pub built: Option<DateTime<Utc>>,
+    pub ip_version: u16,
 }
 
 /// An opened country database with the rule.
@@ -275,6 +284,26 @@ impl Geo {
         }))
     }
 
+    pub fn info(&self) -> GeoInfo {
+        let m = self.reader.metadata();
+        GeoInfo {
+            database_type: m.database_type.clone(),
+            built: DateTime::from_timestamp(m.build_epoch as i64, 0).filter(|_| m.build_epoch > 0),
+            ip_version: m.ip_version,
+        }
+    }
+
+    /// Opens only the database, to look addresses up and show what it is.
+    pub fn open_database(path: &Path) -> Result<Self, String> {
+        let reader = maxminddb::Reader::open_readfile(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self {
+            reader,
+            mode: GeoMode::Off,
+            countries: Vec::new(),
+        })
+    }
+
     /// The ISO code of the country of `ip`, if the database knows it.
     pub fn country(&self, ip: IpAddr) -> Option<String> {
         let found = self.reader.lookup(canonical(ip)).ok()?;
@@ -285,13 +314,16 @@ impl Geo {
     /// Whether `ip` may connect. An address the database does not know
     /// counts as an unlisted country.
     pub fn allows(&self, ip: IpAddr) -> bool {
+        self.allows_with(ip, self.mode, &self.countries)
+    }
+
+    /// The same with another rule (to try a rule before it is applied).
+    pub fn allows_with(&self, ip: IpAddr, mode: GeoMode, countries: &[String]) -> bool {
         if is_local(ip) {
             return true;
         }
-        let listed = self
-            .country(ip)
-            .is_some_and(|c| self.countries.contains(&c));
-        match self.mode {
+        let listed = self.country(ip).is_some_and(|c| countries.contains(&c));
+        match mode {
             GeoMode::Off => true,
             GeoMode::Allow => listed,
             GeoMode::Block => !listed,

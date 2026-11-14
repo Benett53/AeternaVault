@@ -296,6 +296,8 @@ pub struct AppsUi {
 
 #[derive(Default)]
 pub struct SettingsUi {
+    /// The settings page shown (Notifications and Web are views of their own).
+    pub section: views::settings::Section,
     pub exclude_text: String,
     pub invalid_patterns: Vec<String>,
 }
@@ -477,6 +479,7 @@ impl AeternaApp {
             web: views::web::WebUi::default(),
             help_open: false,
             settings: SettingsUi {
+                section: views::settings::Section::default(),
                 exclude_text: loaded.config.exclude.join("\n"),
                 invalid_patterns: Vec::new(),
             },
@@ -689,8 +692,11 @@ impl AeternaApp {
                 // Wraps into a second row when the window is narrow.
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(20.0, 2.0);
-                    for (number, view) in self.visible_views().into_iter().enumerate() {
-                        let selected = self.view == view && matches!(self.screen, Screen::Main);
+                    for (number, view) in self.tab_views().into_iter().enumerate() {
+                        let in_settings = view == View::Settings
+                            && matches!(self.view, View::Notifications | View::Web);
+                        let selected = (self.view == view || in_settings)
+                            && matches!(self.screen, Screen::Main);
                         let label = view_label(t, view);
                         let update_ready =
                             view == View::Settings && self.updater.available().is_some();
@@ -1037,9 +1043,9 @@ impl eframe::App for AeternaApp {
                                 View::Backups => views::backups::show(self, ui),
                                 View::Jobs => views::jobs::show(self, ui),
                                 View::Apps => views::apps::show(self, ui),
-                                View::Notifications => views::notifications::show(self, ui),
-                                View::Settings => views::settings::show(self, ui),
-                                View::Web => views::web::show(self, ui),
+                                View::Notifications | View::Settings | View::Web => {
+                                    views::settings::show(self, ui)
+                                }
                                 View::Activity => views::activity::show(self, ui),
                             });
                         });

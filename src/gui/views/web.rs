@@ -53,6 +53,16 @@ pub struct WebUi {
     block_note: Option<Note>,
     new_role_name: String,
     role_note: Option<Note>,
+    pub tab: WebTab,
+    country_search: String,
+    geo_test: String,
+    /// The country database chosen, opened to show what it is.
+    #[allow(clippy::type_complexity)]
+    geo_db: Option<(
+        PathBuf,
+        Option<SystemTime>,
+        Result<Arc<crate::web::access::Geo>, String>,
+    )>,
     ldap_test_user: String,
     ldap_test_password: String,
     ldap_test: Arc<Mutex<Option<Result<String, String>>>>,
@@ -84,6 +94,10 @@ impl Default for WebUi {
             block_note: None,
             new_role_name: String::new(),
             role_note: None,
+            tab: WebTab::default(),
+            country_search: String::new(),
+            geo_test: String::new(),
+            geo_db: None,
             ldap_test_user: String::new(),
             ldap_test_password: String::new(),
             ldap_test: Arc::new(Mutex::new(None)),
@@ -104,6 +118,11 @@ impl WebUi {
     /// After this window wrote the configuration: not a change from elsewhere.
     pub fn remember_config(&mut self, config_file: &Path) {
         self.config_mtime = mtime(config_file);
+    }
+
+    #[cfg(test)]
+    pub fn country_search_for_test(&mut self, text: &str) {
+        self.country_search = text.into();
     }
 
     /// Fills the "add user" fields (interface tests).
@@ -228,7 +247,7 @@ fn path_field(ui: &mut Ui, path: &mut PathBuf, choose: &str, filter: (&str, &[&s
         let mut text = path.display().to_string();
         if ui
             .add(
-                egui::TextEdit::singleline(&mut text)
+                widgets::text_field(&mut text)
                     .desired_width((ui.available_width() - 120.0).clamp(160.0, 320.0)),
             )
             .changed()
@@ -260,7 +279,7 @@ fn network_list(ui: &mut Ui, lang: Lang, id: &str, list: &mut Vec<String>) {
                     ui.horizontal(|ui| {
                         let bad = !net.trim().is_empty()
                             && net.trim().parse::<crate::web::Network>().is_err();
-                        let mut edit = egui::TextEdit::singleline(net)
+                        let mut edit = widgets::text_field(net)
                             .hint_text("192.168.1.0/24")
                             .desired_width(190.0);
                         if bad {
@@ -298,8 +317,22 @@ fn network_list(ui: &mut Ui, lang: Lang, id: &str, list: &mut Vec<String>) {
     });
 }
 
-/// The Web tab.
+/// The parts of the Web page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WebTab {
+    #[default]
+    Connection,
+    SignIn,
+    Access,
+    Directory,
+    Users,
+    Roles,
+    Audit,
+}
+
+/// The Web page: the state at the top, then one part at a time.
 pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
+    let lang = app.lang;
     // Start a draft, or follow changes made elsewhere while nothing is edited.
     let unchanged = app.web.draft == app.web.draft_base;
     if app.web.draft.is_none()
@@ -312,6 +345,22 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     status_card(app, ui);
     apply_bar(app, ui, "top");
     ui.add_space(14.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        for (tab, en, de) in [
+            (WebTab::Connection, "Connection", "Verbindung"),
+            (WebTab::SignIn, "Sign-in", "Anmeldung"),
+            (WebTab::Access, "Access", "Zugriff"),
+            (WebTab::Directory, "LDAP / AD", "LDAP / AD"),
+            (WebTab::Users, "Users", "Benutzer"),
+            (WebTab::Roles, "Roles", "Rollen"),
+            (WebTab::Audit, "Audit log", "Audit-Log"),
+        ] {
+            widgets::choice(ui, &mut app.web.tab, tab, tr(lang, en, de));
+        }
+    });
+    ui.add_space(14.0);
+
     let mut draft = app.web.draft.take().expect("set above");
     let email_channels: Vec<String> = app
         .config
@@ -328,20 +377,33 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         })
         .collect();
     let roles = UserStore::load(&app.paths.config_file).role_names();
-    widgets::masonry(ui, "web", 4, |ui, item| match item {
-        0 => connection_card(app, ui, &mut draft),
-        1 => signin_card(app.lang, ui, &mut draft, &email_channels),
-        2 => access_card(app, ui, &mut draft),
-        _ => ldap_card(app, ui, &mut draft, &roles),
-    });
+    match app.web.tab {
+        WebTab::Connection => {
+            connection_card(app, ui, &mut draft);
+            ui.add_space(14.0);
+            certificate_card(app, ui, &mut draft);
+        }
+        WebTab::SignIn => signin_card(lang, ui, &mut draft, &email_channels),
+        WebTab::Access => {
+            access_card(app, ui, &mut draft);
+            ui.add_space(14.0);
+            countries_card(app, ui, &mut draft);
+            ui.add_space(14.0);
+            blocked_card(app, ui);
+        }
+        WebTab::Directory => ldap_card(app, ui, &mut draft, &roles),
+        WebTab::Users => users_card(app, ui),
+        WebTab::Roles => roles_card(app, ui),
+        WebTab::Audit => audit_card(app, ui),
+    }
     app.web.draft = Some(draft);
-    apply_bar(app, ui, "bottom");
-    ui.add_space(14.0);
-    users_card(app, ui);
-    ui.add_space(14.0);
-    roles_card(app, ui);
-    ui.add_space(14.0);
-    audit_card(app, ui);
+}
+
+/// One fact in a details list: label and value, the value selectable.
+fn fact(ui: &mut Ui, label: &str, value: impl Into<String>) {
+    widgets::field_row(ui, LABEL, label, "", |ui| {
+        ui.add(egui::Label::new(value.into()).wrap().selectable(true));
+    });
 }
 
 fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
@@ -361,7 +423,12 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
         if widgets::switch(
             ui,
             &mut on,
-            RichText::new(tr(lang, "Web interface", "Web-Oberfläche")).size(16.0),
+            RichText::new(tr(
+                lang,
+                "Enable web interface",
+                "Web-Oberfläche aktivieren",
+            ))
+            .size(16.0),
         )
         .changed()
         {
@@ -490,80 +557,98 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
 
 fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
     let lang = app.lang;
-    let config_file = app.paths.config_file.clone();
     widgets::card(ui, |ui| {
-        widgets::section_title(ui, tr(lang, "Connection", "Verbindung"));
-        widgets::field_row(
+        widgets::section_title_info(
             ui,
-            LABEL,
-            tr(lang, "Reachable from", "Erreichbar von"),
-            "",
-            |ui| {
-                let mut network = !web.local_only();
-                widgets::choice(
-                    ui,
-                    &mut network,
-                    false,
-                    tr(lang, "This computer", "Diesem Computer"),
-                );
-                widgets::choice(ui, &mut network, true, tr(lang, "Network", "Netzwerk"));
-                if network && web.local_only() {
-                    web.bind = "0.0.0.0".into();
-                } else if !network && !web.local_only() {
-                    web.bind = "127.0.0.1".into();
-                }
-            },
+            tr(lang, "Connection", "Verbindung"),
+            tr(
+                lang,
+                "The web interface listens on every network of this computer, always over HTTPS. Other computers in the same network reach it directly; from outside it needs the port opened in the firewall or router.",
+                "Die Web-Oberfläche lauscht in allen Netzen dieses Computers, immer über HTTPS. Andere Computer im selben Netz erreichen sie direkt; von außen muss der Port in Firewall oder Router freigegeben sein.",
+            ),
         );
-        ui.add_space(6.0);
         widgets::field_row(ui, LABEL, "Port", "", |ui| {
             widgets::number(ui, &mut web.port, 1..=65535);
         });
-        ui.add_space(6.0);
-        widgets::field_row(ui, LABEL, "HTTPS", "", |ui| {
-            if web.local_only() {
-                if web.tls == TlsMode::Off {
-                    web.tls = TlsMode::Auto;
-                }
-                widgets::choice(ui, &mut web.tls, TlsMode::Auto, tr(lang, "Off", "Aus"));
-            } else if matches!(web.tls, TlsMode::Auto | TlsMode::Off) {
-                web.tls = TlsMode::SelfSigned;
+        let url = web.url();
+        widgets::field_row(ui, LABEL, tr(lang, "Address", "Adresse"), "", |ui| {
+            ui.add(egui::Label::new(RichText::new(&url).monospace()).selectable(true));
+            if widgets::button(ui, ButtonKind::Quiet, tr(lang, "Copy", "Kopieren"), true).clicked()
+            {
+                ui.ctx().copy_text(url.clone());
             }
+        });
+        if web.local_only() {
+            widgets::field_row(
+                ui,
+                LABEL,
+                tr(lang, "Listening on", "Lauscht auf"),
+                tr(
+                    lang,
+                    "Set on the command line with `web set --bind`. 0.0.0.0 listens on every network.",
+                    "Gesetzt auf der Kommandozeile mit `web set --bind`. 0.0.0.0 lauscht in allen Netzen.",
+                ),
+                |ui| {
+                    ui.label(tr(lang, "this computer only", "nur diesem Computer"));
+                },
+            );
+        }
+    });
+}
+
+/// The certificate as server software shows it: what is in use, its
+/// details, and making, exporting or replacing it.
+fn certificate_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
+    let lang = app.lang;
+    let p = *palette(ui);
+    let config_file = app.paths.config_file.clone();
+    widgets::card(ui, |ui| {
+        widgets::section_title_info(
+            ui,
+            tr(lang, "Certificate", "Zertifikat"),
+            tr(
+                lang,
+                "Self-signed: AeternaVault makes and signs the certificate itself. The connection is encrypted, but browsers do not know the issuer and warn until the certificate is trusted: export it and add it to the trusted certificates of the computers that connect, or compare the fingerprint once. Own certificate: PEM files from the company CA or from Let's Encrypt (certbot, win-acme); renewed files are used without a restart.",
+                "Selbstsigniert: AeternaVault erstellt und signiert das Zertifikat selbst. Die Verbindung ist verschlüsselt, aber Browser kennen den Aussteller nicht und warnen, bis dem Zertifikat vertraut wird: exportieren und auf den zugreifenden Computern als vertrauenswürdig hinzufügen, oder den Fingerabdruck einmal vergleichen. Eigenes Zertifikat: PEM-Dateien der Firmen-CA oder von Let's Encrypt (certbot, win-acme); erneuerte Dateien werden ohne Neustart verwendet.",
+            ),
+        );
+        let mut own = web.tls == TlsMode::Files;
+        widgets::field_row(ui, LABEL, tr(lang, "Type", "Art"), "", |ui| {
             widgets::choice(
                 ui,
-                &mut web.tls,
-                TlsMode::SelfSigned,
-                tr(lang, "AeternaVault certificate", "AeternaVault-Zertifikat"),
+                &mut own,
+                false,
+                tr(lang, "Self-signed", "Selbstsigniert"),
             );
             widgets::choice(
                 ui,
-                &mut web.tls,
-                TlsMode::Files,
+                &mut own,
+                true,
                 tr(lang, "Own certificate", "Eigenes Zertifikat"),
             );
         });
-        if web.local_only() && web.tls == TlsMode::Auto {
-            note(
-                ui,
-                tr(
-                    lang,
-                    "Not needed while only this computer connects: nothing leaves it.",
-                    "Nicht nötig, solange nur dieser Computer sich verbindet: Nichts verlässt ihn.",
-                ),
-            );
+        if own && web.tls != TlsMode::Files {
+            web.tls = TlsMode::Files;
+        } else if !own && web.tls == TlsMode::Files {
+            // Auto: a self-signed certificate whenever others can connect.
+            web.tls = TlsMode::Auto;
         }
-
-        let files = web.tls == TlsMode::Files;
-        widgets::reveal(ui, "web-cert-files", files, |ui| {
+        widgets::reveal(ui, "web-cert-files", own, |ui| {
             let choose = tr(lang, "Choose…", "Auswählen…");
-            ui.add_space(6.0);
-            widgets::field_row(ui, LABEL, tr(lang, "Certificate", "Zertifikat"), "", |ui| {
-                path_field(
-                    ui,
-                    &mut web.cert_file,
-                    choose,
-                    ("PEM", &["pem", "crt", "cer"]),
-                );
-            });
+            widgets::field_row(
+                ui,
+                LABEL,
+                tr(lang, "Certificate file", "Zertifikatsdatei"),
+                "",
+                |ui| {
+                    path_field(
+                        ui,
+                        &mut web.cert_file,
+                        choose,
+                        ("PEM", &["pem", "crt", "cer"]),
+                    );
+                },
+            );
             widgets::field_row(
                 ui,
                 LABEL,
@@ -573,71 +658,116 @@ fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                     path_field(ui, &mut web.key_file, choose, ("PEM", &["pem", "key"]));
                 },
             );
-            note(
-                ui,
-                tr(
-                    lang,
-                    "PEM files from the company CA or from Let's Encrypt (certbot, win-acme). Renewed files are used automatically, without a restart.",
-                    "PEM-Dateien von der Firmen-CA oder von Let's Encrypt (certbot, win-acme). Erneuerte Dateien werden automatisch verwendet, ohne Neustart.",
-                ),
-            );
         });
 
-        let own = web.uses_tls() && !files;
-        widgets::reveal(ui, "web-cert-own", own, |ui| {
-            ui.add_space(6.0);
-            note(
+        ui.add_space(8.0);
+        match crate::web::tls::info(&config_file, web) {
+            None => fact(
                 ui,
+                tr(lang, "In use", "In Verwendung"),
                 tr(
                     lang,
-                    "AeternaVault makes and signs this certificate itself. The connection is encrypted, but browsers do not know the issuer and warn once. Compare the fingerprint with the one the browser shows.",
-                    "AeternaVault erstellt und signiert dieses Zertifikat selbst. Die Verbindung ist verschlüsselt, aber Browser kennen den Aussteller nicht und warnen einmal. Vergleiche den Fingerabdruck mit dem, den der Browser anzeigt.",
+                    "None yet: made when the web interface starts",
+                    "Noch keines: wird beim Start der Web-Oberfläche erstellt",
                 ),
-            );
-            ui.add_space(4.0);
-            match crate::web::tls::fingerprint(&config_file, web) {
-                Some(fp) => {
-                    ui.add(egui::Label::new(RichText::new(&fp).monospace().size(12.0)).wrap());
-                    ui.horizontal(|ui| {
-                        if widgets::button(
-                            ui,
-                            ButtonKind::Quiet,
-                            tr(lang, "Copy", "Kopieren"),
-                            true,
-                        )
+            ),
+            Some(Err(err)) => {
+                widgets::field_row(ui, LABEL, tr(lang, "In use", "In Verwendung"), "", |ui| {
+                    ui.add(egui::Label::new(RichText::new(err).color(p.error)).wrap());
+                });
+            }
+            Some(Ok(cert)) => {
+                fact(
+                    ui,
+                    tr(lang, "Issued to", "Ausgestellt für"),
+                    cert.subject.clone(),
+                );
+                fact(
+                    ui,
+                    tr(lang, "Issued by", "Ausgestellt von"),
+                    cert.issuer.clone(),
+                );
+                if !cert.names.is_empty() {
+                    fact(
+                        ui,
+                        tr(lang, "Valid for", "Gültig für"),
+                        cert.names.join(", "),
+                    );
+                }
+                let days = cert.days_left();
+                let until = cert
+                    .not_after
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d")
+                    .to_string();
+                widgets::field_row(ui, LABEL, tr(lang, "Valid until", "Gültig bis"), "", |ui| {
+                    let color = if days < 0 {
+                        p.error
+                    } else if days < 21 {
+                        p.warning
+                    } else {
+                        p.text
+                    };
+                    let left = if lang == Lang::En {
+                        format!("{until} · {days} days left")
+                    } else {
+                        format!("{until} · noch {days} Tage")
+                    };
+                    ui.label(RichText::new(left).color(color));
+                });
+                widgets::field_row(ui, LABEL, "SHA-256", "", |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(&cert.fingerprint).monospace().size(12.5))
+                            .wrap()
+                            .selectable(true),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    if widgets::button(ui, ButtonKind::Secondary, tr(lang, "Copy fingerprint", "Fingerabdruck kopieren"), true)
                         .clicked()
-                        {
-                            ui.ctx().copy_text(fp.clone());
-                        }
-                        if widgets::button(
-                            ui,
-                            ButtonKind::Quiet,
-                            tr(lang, "Make a new one", "Neu erstellen"),
-                            true,
-                        )
+                    {
+                        ui.ctx().copy_text(cert.fingerprint.clone());
+                    }
+                    if widgets::button(ui, ButtonKind::Secondary, tr(lang, "Export certificate…", "Zertifikat exportieren…"), true)
                         .on_hover_text(tr(
                             lang,
-                            "After the computer's name or address changed.",
-                            "Nachdem sich Name oder Adresse des Computers geändert haben.",
+                            "Saves the certificate (without the key) to install it as trusted on other computers.",
+                            "Speichert das Zertifikat (ohne Schlüssel), um es auf anderen Computern als vertrauenswürdig einzutragen.",
                         ))
                         .clicked()
+                    {
+                        let (cert_file, _) = crate::web::tls::files(&config_file, web);
+                        if let Some(target) = rfd::FileDialog::new()
+                            .set_file_name("aeternavault.crt")
+                            .add_filter("Certificate", &["crt", "pem"])
+                            .save_file()
                         {
-                            let _ = crate::web::tls::renew(&config_file);
-                            audit::record(&config_file, Record::local("web-certificate-renewed"));
-                            app.web.server = None;
+                            match std::fs::copy(&cert_file, &target) {
+                                Ok(_) => app.notify(
+                                    NoticeKind::Info,
+                                    format!("{} {}", tr(lang, "Saved:", "Gespeichert:"), target.display()),
+                                ),
+                                Err(err) => app.notify(NoticeKind::Error, err.to_string()),
+                            }
                         }
-                    });
-                }
-                None => note(
-                    ui,
-                    tr(
-                        lang,
-                        "Made when the web interface starts.",
-                        "Wird beim Start der Web-Oberfläche erstellt.",
-                    ),
-                ),
+                    }
+                    if !own
+                        && widgets::button(ui, ButtonKind::Quiet, tr(lang, "Make a new one", "Neu erstellen"), true)
+                            .on_hover_text(tr(
+                                lang,
+                                "After the computer's name or address changed. Browsers warn again once.",
+                                "Nachdem sich Name oder Adresse des Computers geändert haben. Browser warnen dann einmal neu.",
+                            ))
+                            .clicked()
+                    {
+                        let _ = crate::web::tls::renew(&config_file);
+                        audit::record(&config_file, Record::local("web-certificate-renewed"));
+                        app.web.server = None;
+                    }
+                });
             }
-        });
+        }
     });
 }
 
@@ -780,43 +910,29 @@ fn signin_card(lang: Lang, ui: &mut Ui, web: &mut WebSettings, email_channels: &
 }
 
 fn access_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
-    use crate::web::access::{AdminAccess, Blocklist, GeoMode};
+    use crate::web::access::AdminAccess;
     let lang = app.lang;
-    let p = *palette(ui);
-    let config_file = app.paths.config_file.clone();
     widgets::card(ui, |ui| {
-        widgets::section_title(ui, tr(lang, "Access", "Zugriff"));
-        if web.local_only() {
-            note(
-                ui,
-                tr(
-                    lang,
-                    "Only this computer can connect now. These rules apply once the network is allowed.",
-                    "Zurzeit kann sich nur dieser Computer verbinden. Diese Regeln gelten, sobald das Netzwerk erlaubt ist.",
-                ),
-            );
-            ui.add_space(8.0);
-        }
+        widgets::section_title(ui, tr(lang, "Rules", "Regeln"));
         widgets::field_row(
             ui,
             LABEL,
             tr(lang, "Allowed networks", "Erlaubte Netze"),
             tr(
                 lang,
-                "None: every network. This computer always may connect.",
-                "Keine: jedes Netz. Dieser Computer darf sich immer verbinden.",
+                "Only these networks may connect, e.g. 192.168.1.0/24 or a single address. None: every network. This computer always may.",
+                "Nur diese Netze dürfen sich verbinden, z. B. 192.168.1.0/24 oder eine einzelne Adresse. Keine: jedes Netz. Dieser Computer darf immer.",
             ),
             |ui| network_list(ui, lang, "allowed", &mut web.allowed_networks),
         );
-        ui.add_space(6.0);
         widgets::field_row(
             ui,
             LABEL,
-            tr(lang, "Block automatically", "Automatisch sperren"),
+            tr(lang, "Block address after", "Adresse sperren nach"),
             tr(
                 lang,
-                "An address is blocked after this many wrong sign-ins within 24 hours. This computer is never blocked.",
-                "Eine Adresse wird nach so vielen falschen Anmeldungen innerhalb von 24 Stunden gesperrt. Dieser Computer wird nie gesperrt.",
+                "An address with this many wrong sign-ins within 24 hours is blocked until it is allowed again. This computer is never blocked.",
+                "Eine Adresse mit so vielen falschen Anmeldungen innerhalb von 24 Stunden wird gesperrt, bis sie wieder zugelassen wird. Dieser Computer wird nie gesperrt.",
             ),
             |ui| {
                 widgets::number_or(
@@ -825,103 +941,19 @@ fn access_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                     0..=1000,
                     tr(lang, "off", "aus"),
                 );
-                ui.label(tr(lang, "wrong sign-ins in 24 h", "Fehlversuche in 24 h"));
+                ui.label(tr(lang, "wrong sign-ins in 24 h", "Fehlversuchen in 24 h"));
             },
         );
-        ui.add_space(6.0);
-        widgets::field_row(ui, LABEL, tr(lang, "Countries", "Länder"), "", |ui| {
-            widgets::choice(ui, &mut web.geo.mode, GeoMode::Off, tr(lang, "All", "Alle"));
-            widgets::choice(
-                ui,
-                &mut web.geo.mode,
-                GeoMode::Allow,
-                tr(lang, "Only these", "Nur diese"),
-            );
-            widgets::choice(
-                ui,
-                &mut web.geo.mode,
-                GeoMode::Block,
-                tr(lang, "All except these", "Alle außer diesen"),
-            );
-        });
-        widgets::reveal(ui, "web-geo", web.geo.mode != GeoMode::Off, |ui| {
-            ui.add_space(4.0);
-            widgets::field_row(
-                ui,
-                LABEL,
-                tr(lang, "Country codes", "Ländercodes"),
-                "",
-                |ui| {
-                    let mut text = web.geo.countries.join(", ");
-                    let bad = web.geo.codes().is_err();
-                    let mut edit = egui::TextEdit::singleline(&mut text)
-                        .hint_text("DE, AT, CH")
-                        .desired_width(190.0);
-                    if bad {
-                        edit = edit.text_color(p.error);
-                    }
-                    if ui.add(edit).changed() {
-                        web.geo.countries = text
-                            .split([',', ' '])
-                            .map(|c| c.trim().to_string())
-                            .filter(|c| !c.is_empty())
-                            .collect();
-                    }
-                },
-            );
-            widgets::field_row(
-                ui,
-                LABEL,
-                tr(lang, "Country database", "Länderdatenbank"),
-                "",
-                |ui| {
-                    path_field(
-                        ui,
-                        &mut web.geo.database,
-                        tr(lang, "Choose…", "Auswählen…"),
-                        ("MaxMind DB", &["mmdb"]),
-                    );
-                },
-            );
-            ui.horizontal_wrapped(|ui| {
-                note(
-                    ui,
-                    tr(
-                        lang,
-                        "A free .mmdb file: DB-IP IP to Country Lite or MaxMind GeoLite2 Country. Private networks are not checked.",
-                        "Eine kostenlose .mmdb-Datei: DB-IP IP to Country Lite oder MaxMind GeoLite2 Country. Private Netze werden nicht geprüft.",
-                    ),
-                );
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.hyperlink_to(
-                    "DB-IP Lite",
-                    "https://db-ip.com/db/download/ip-to-country-lite",
-                );
-                widgets::secondary_text(ui, "·");
-                ui.hyperlink_to(
-                    "MaxMind GeoLite2",
-                    "https://dev.maxmind.com/geoip/geolite2-free-geolocation-data",
-                );
-            });
-        });
-        ui.add_space(6.0);
         widgets::field_row(
             ui,
             LABEL,
-            tr(lang, "Administrators", "Administratoren"),
+            tr(lang, "Administration", "Verwaltung"),
             tr(
                 lang,
-                "Where users may manage users and block addresses. Elsewhere they keep the other permissions of their role.",
-                "Von wo Benutzer verwalten und Adressen sperren dürfen. Anderswo behalten sie die übrigen Rechte ihrer Rolle.",
+                "Where users may manage users and roles and block addresses. Elsewhere they keep the other permissions of their role.",
+                "Von wo Benutzer und Rollen verwaltet und Adressen gesperrt werden dürfen. Anderswo behalten Benutzer die übrigen Rechte ihrer Rolle.",
             ),
             |ui| {
-                widgets::choice(
-                    ui,
-                    &mut web.admin_access,
-                    AdminAccess::Anywhere,
-                    tr(lang, "Anywhere", "Überall"),
-                );
                 widgets::choice(
                     ui,
                     &mut web.admin_access,
@@ -932,7 +964,13 @@ fn access_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                     ui,
                     &mut web.admin_access,
                     AdminAccess::Networks,
-                    tr(lang, "These networks", "Diese Netze"),
+                    tr(lang, "Selected networks", "Ausgewählte Netze"),
+                );
+                widgets::choice(
+                    ui,
+                    &mut web.admin_access,
+                    AdminAccess::Anywhere,
+                    tr(lang, "Anywhere", "Überall"),
                 );
             },
         );
@@ -941,55 +979,327 @@ fn access_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
             "web-admin-networks",
             web.admin_access == AdminAccess::Networks,
             |ui| {
-                ui.add_space(4.0);
                 widgets::field_row(ui, LABEL, "", "", |ui| {
                     network_list(ui, lang, "admin", &mut web.admin_networks);
                 });
             },
         );
+    });
+}
 
-        // Blocked addresses apply at once, not with "Apply".
-        ui.add_space(14.0);
-        ui.separator();
-        ui.add_space(8.0);
-        let mut list = Blocklist::load(&config_file);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!(
-                    "{} ({})",
-                    tr(lang, "Blocked addresses", "Gesperrte Adressen"),
-                    list.entries.len()
-                ))
-                .strong(),
+/// Geoblocking, transparent: the rule, the countries by name, what the
+/// database is, a lookup to try, and what was refused.
+fn countries_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
+    use crate::web::access::{Geo, GeoMode};
+    use crate::web::countries;
+    let lang = app.lang;
+    let en = lang == Lang::En;
+    let p = *palette(ui);
+    widgets::card(ui, |ui| {
+        widgets::section_title_info(
+            ui,
+            tr(lang, "Countries", "Länder"),
+            tr(
+                lang,
+                "Every connection is looked up in a country database before anything else is done. Refused connections get 403 Forbidden and are counted below. Addresses of this computer and of private networks (10.x, 172.16–31.x, 192.168.x, fc00::/7, fe80::/10) are never checked. An address the database does not know counts as not listed.",
+                "Jede Verbindung wird vor allem anderen in einer Länderdatenbank nachgeschlagen. Abgewiesene Verbindungen erhalten 403 Forbidden und werden unten gezählt. Adressen dieses Computers und privater Netze (10.x, 172.16–31.x, 192.168.x, fc00::/7, fe80::/10) werden nie geprüft. Eine Adresse, die die Datenbank nicht kennt, gilt als nicht gelistet.",
+            ),
+        );
+        widgets::field_row(ui, LABEL, tr(lang, "Rule", "Regel"), "", |ui| {
+            widgets::choice(ui, &mut web.geo.mode, GeoMode::Off, tr(lang, "Off", "Aus"));
+            widgets::choice(
+                ui,
+                &mut web.geo.mode,
+                GeoMode::Allow,
+                tr(lang, "Allow only", "Nur zulassen"),
             );
-            widgets::secondary_text(ui, tr(lang, "· applies at once", "· gilt sofort"));
+            widgets::choice(
+                ui,
+                &mut web.geo.mode,
+                GeoMode::Block,
+                tr(lang, "Block", "Sperren"),
+            );
         });
-        ui.add_space(4.0);
-        let mut changed: Option<Record> = None;
-        let mut unblock = None;
-        for entry in list.entries.iter().rev() {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&entry.address).monospace());
-                let by = if entry.by == "automatic" {
-                    tr(lang, "automatic", "automatisch").to_string()
-                } else {
-                    entry.by.clone()
-                };
-                let since = lang.relative_time(entry.since.with_timezone(&chrono::Local));
-                widgets::secondary_text(ui, format!("{since} · {by}")).on_hover_text(&entry.reason);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::button(
-                        ui,
-                        ButtonKind::Quiet,
-                        tr(lang, "Allow again", "Wieder zulassen"),
-                        true,
-                    )
-                    .clicked()
-                    {
-                        unblock = Some(entry.address.clone());
+        let on = web.geo.mode != GeoMode::Off;
+        widgets::reveal(ui, "web-geo", on, |ui| {
+            // The chosen countries as removable chips, then a search to add.
+            widgets::field_row(
+                ui,
+                LABEL,
+                match web.geo.mode {
+                    GeoMode::Block => tr(lang, "Blocked countries", "Gesperrte Länder"),
+                    _ => tr(lang, "Allowed countries", "Erlaubte Länder"),
+                },
+                "",
+                |ui| {
+                    let mut remove = None;
+                    for (i, code) in web.geo.countries.iter().enumerate() {
+                        let label = format!(
+                            "{} {} ×",
+                            code.to_ascii_uppercase(),
+                            countries::name(code, en)
+                        );
+                        if widgets::chip(ui, &label)
+                            .on_hover_text(tr(lang, "Remove", "Entfernen"))
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                    }
+                    if let Some(i) = remove {
+                        web.geo.countries.remove(i);
+                    }
+                    if web.geo.countries.is_empty() {
+                        ui.label(
+                            RichText::new(tr(lang, "None yet", "Noch keine")).color(p.warning),
+                        );
+                    }
+                },
+            );
+            widgets::field_row(
+                ui,
+                LABEL,
+                tr(lang, "Add country", "Land hinzufügen"),
+                "",
+                |ui| {
+                    ui.add(
+                        widgets::text_field(&mut app.web.country_search)
+                            .hint_text(tr(lang, "Name or code", "Name oder Code"))
+                            .desired_width(220.0),
+                    );
+                },
+            );
+            let needle = app.web.country_search.trim().to_lowercase();
+            if !needle.is_empty() {
+                widgets::field_row(ui, LABEL, "", "", |ui| {
+                    let mut shown = 0;
+                    for (code, name_en, name_de) in countries::all() {
+                        let name = if en { name_en } else { name_de };
+                        let chosen = web
+                            .geo
+                            .countries
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(code));
+                        let hit = code.eq_ignore_ascii_case(&needle)
+                            || name.to_lowercase().contains(&needle)
+                            || name_en.to_lowercase().contains(&needle);
+                        if chosen || !hit {
+                            continue;
+                        }
+                        if widgets::chip(ui, &format!("+ {code} {name}")).clicked() {
+                            web.geo.countries.push(code.to_string());
+                            app.web.country_search.clear();
+                        }
+                        shown += 1;
+                        if shown == 12 {
+                            break;
+                        }
                     }
                 });
+            }
+            widgets::field_row(
+                ui,
+                LABEL,
+                tr(lang, "Database", "Datenbank"),
+                tr(
+                    lang,
+                    "A country database in MaxMind format (.mmdb): DB-IP IP to Country Lite or MaxMind GeoLite2 Country, both free. Update it monthly; it is read when the web interface starts.",
+                    "Eine Länderdatenbank im MaxMind-Format (.mmdb): DB-IP IP to Country Lite oder MaxMind GeoLite2 Country, beide kostenlos. Monatlich aktualisieren; sie wird beim Start der Web-Oberfläche gelesen.",
+                ),
+                |ui| {
+                    path_field(
+                        ui,
+                        &mut web.geo.database,
+                        tr(lang, "Choose…", "Auswählen…"),
+                        ("MaxMind DB", &["mmdb"]),
+                    );
+                },
+            );
+            widgets::field_row(ui, LABEL, "", "", |ui| {
+                ui.hyperlink_to(
+                    "DB-IP Lite",
+                    "https://db-ip.com/db/download/ip-to-country-lite",
+                );
+                widgets::secondary_text(ui, "·");
+                ui.hyperlink_to(
+                    "MaxMind GeoLite2",
+                    "https://dev.maxmind.com/geoip/geolite2-free-geolocation-data",
+                );
             });
+
+            // What the database is, read again when the file changes.
+            let path = web.geo.database.clone();
+            let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let fresh = app
+                .web
+                .geo_db
+                .as_ref()
+                .is_some_and(|(p, s, _)| *p == path && *s == stamp);
+            if !fresh && !path.as_os_str().is_empty() {
+                app.web.geo_db = Some((
+                    path.clone(),
+                    stamp,
+                    Geo::open_database(&path).map(std::sync::Arc::new),
+                ));
+            }
+            if path.as_os_str().is_empty() {
+                app.web.geo_db = None;
+            }
+            if let Some((_, _, db)) = &app.web.geo_db {
+                match db {
+                    Ok(geo) => {
+                        let info = geo.info();
+                        let built = info
+                            .built
+                            .map(|b| b.format("%Y-%m-%d").to_string())
+                            .unwrap_or_else(|| "?".into());
+                        fact(
+                            ui,
+                            tr(lang, "Database type", "Datenbanktyp"),
+                            format!(
+                                "{} · IPv{} · {} {built}",
+                                info.database_type,
+                                info.ip_version,
+                                tr(lang, "built", "erstellt")
+                            ),
+                        );
+                        widgets::field_row(
+                            ui,
+                            LABEL,
+                            tr(lang, "Look up", "Nachschlagen"),
+                            "",
+                            |ui| {
+                                ui.add(
+                                    widgets::text_field(&mut app.web.geo_test)
+                                        .hint_text("203.0.113.7")
+                                        .desired_width(180.0),
+                                );
+                                let text = app.web.geo_test.trim();
+                                if let Ok(ip) = text.parse::<std::net::IpAddr>() {
+                                    let codes = web.geo.codes().unwrap_or_default();
+                                    let country = geo.country(ip);
+                                    let name = country
+                                        .as_deref()
+                                        .map(|c| format!("{c} {}", countries::name(c, en)))
+                                        .unwrap_or_else(|| tr(lang, "unknown", "unbekannt").into());
+                                    let (allowed, why) = if crate::web::access::is_local(ip) {
+                                        (
+                                            true,
+                                            tr(
+                                                lang,
+                                                "private network, not checked",
+                                                "privates Netz, nicht geprüft",
+                                            ),
+                                        )
+                                    } else if geo.allows_with(ip, web.geo.mode, &codes) {
+                                        (true, tr(lang, "allowed", "zugelassen"))
+                                    } else {
+                                        (false, tr(lang, "refused", "abgewiesen"))
+                                    };
+                                    ui.label(
+                                        RichText::new(format!("{name} · {why}"))
+                                            .color(if allowed { p.success } else { p.error }),
+                                    );
+                                }
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        widgets::field_row(
+                            ui,
+                            LABEL,
+                            tr(lang, "Database", "Datenbank"),
+                            "",
+                            |ui| {
+                                ui.add(egui::Label::new(RichText::new(err).color(p.error)).wrap());
+                            },
+                        );
+                    }
+                }
+            } else {
+                fact(
+                    ui,
+                    tr(lang, "Database type", "Datenbanktyp"),
+                    tr(lang, "No database chosen", "Keine Datenbank gewählt"),
+                );
+            }
+            let refused = app
+                .web
+                .server
+                .as_ref()
+                .map(|s| s.geo_refusals())
+                .unwrap_or_default();
+            let text = if refused.is_empty() {
+                tr(lang, "None since the start", "Keine seit dem Start").to_string()
+            } else {
+                refused
+                    .iter()
+                    .map(|(c, n)| format!("{c} {n}"))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            };
+            fact(ui, tr(lang, "Refused", "Abgewiesen"), text);
+        });
+    });
+}
+
+/// Blocked addresses: they apply at once, not with "Apply".
+fn blocked_card(app: &mut AeternaApp, ui: &mut Ui) {
+    use crate::web::access::Blocklist;
+    let lang = app.lang;
+    let config_file = app.paths.config_file.clone();
+    widgets::card(ui, |ui| {
+        let mut list = Blocklist::load(&config_file);
+        widgets::section_title_info(
+            ui,
+            &format!(
+                "{} ({})",
+                tr(lang, "Blocked addresses", "Gesperrte Adressen"),
+                list.entries.len()
+            ),
+            tr(
+                lang,
+                "Kept in web-blocked.json next to the configuration. A change applies at once, also to a running web interface, without signing anybody out.",
+                "Gespeichert in web-blocked.json neben der Konfiguration. Eine Änderung gilt sofort, auch für eine laufende Web-Oberfläche, ohne dass jemand abgemeldet wird.",
+            ),
+        );
+        let mut changed: Option<Record> = None;
+        let mut unblock = None;
+        if !list.entries.is_empty() {
+            egui::Grid::new("web-blocked")
+                .num_columns(4)
+                .striped(true)
+                .spacing([18.0, 8.0])
+                .show(ui, |ui| {
+                    for entry in list.entries.iter().rev() {
+                        ui.label(RichText::new(&entry.address).monospace());
+                        let by = if entry.by == "automatic" {
+                            tr(lang, "automatic", "automatisch").to_string()
+                        } else {
+                            entry.by.clone()
+                        };
+                        widgets::secondary_text(
+                            ui,
+                            format!(
+                                "{} · {by}",
+                                lang.relative_time(entry.since.with_timezone(&chrono::Local))
+                            ),
+                        );
+                        widgets::secondary_text(ui, &entry.reason);
+                        if widgets::button(
+                            ui,
+                            ButtonKind::Quiet,
+                            tr(lang, "Allow again", "Wieder zulassen"),
+                            true,
+                        )
+                        .clicked()
+                        {
+                            unblock = Some(entry.address.clone());
+                        }
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(8.0);
         }
         if let Some(address) = unblock {
             list.remove(&address);
@@ -997,9 +1307,9 @@ fn access_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
         }
         ui.horizontal(|ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut app.web.block_address)
+                widgets::text_field(&mut app.web.block_address)
                     .hint_text(tr(lang, "Address or network", "Adresse oder Netz"))
-                    .desired_width(190.0),
+                    .desired_width(220.0),
             );
             let ready = !app.web.block_address.trim().is_empty();
             if widgets::button(
@@ -1057,8 +1367,8 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[
             &mut l.enabled,
             tr(
                 lang,
-                "Sign-in with the directory",
-                "Anmeldung über das Verzeichnis",
+                "Enable LDAP authentication",
+                "LDAP-Authentifizierung aktivieren",
             ),
         );
         let open = l.enabled;
@@ -1102,7 +1412,7 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[
 
             field(ui, "Server");
             ui.add(
-                egui::TextEdit::singleline(&mut l.url)
+                widgets::text_field(&mut l.url)
                     .hint_text("ldaps://dc1.firma.local")
                     .desired_width(width),
             );
@@ -1140,7 +1450,7 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[
 
             field(ui, tr(lang, "Search account", "Suchkonto"));
             ui.add(
-                egui::TextEdit::singleline(&mut l.bind_dn)
+                widgets::text_field(&mut l.bind_dn)
                     .hint_text("CN=svc-backup,OU=Service,DC=firma,DC=local")
                     .desired_width(width),
             )
@@ -1151,7 +1461,7 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[
             ));
             if !l.bind_dn.trim().is_empty() && !l.binds_as_user() {
                 ui.add(
-                    egui::TextEdit::singleline(&mut l.bind_password)
+                    widgets::text_field(&mut l.bind_password)
                         .password(true)
                         .hint_text(tr(lang, "Password", "Passwort"))
                         .desired_width(width.min(300.0)),
@@ -1160,14 +1470,14 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[
 
             field(ui, tr(lang, "Search base", "Suchbasis"));
             ui.add(
-                egui::TextEdit::singleline(&mut l.base_dn)
+                widgets::text_field(&mut l.base_dn)
                     .hint_text("DC=firma,DC=local")
                     .desired_width(width),
             );
 
             field(ui, tr(lang, "User filter", "Benutzerfilter"));
             ui.add(
-                egui::TextEdit::singleline(&mut l.user_filter)
+                widgets::text_field(&mut l.user_filter)
                     .desired_width(width)
                     .font(egui::TextStyle::Monospace),
             );
@@ -1179,25 +1489,22 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[
                     &mut l.role_source,
                     RoleSource::Directory,
                     tr(lang, "Directory groups", "Verzeichnisgruppen"),
-                );
-                widgets::choice(
-                    ui,
-                    &mut l.role_source,
-                    RoleSource::AeternaVault,
-                    "AeternaVault",
-                );
+                )
+                .on_hover_text(tr(
+                    lang,
+                    "Read again at every sign-in. Members of several groups get the role with the most permissions; members of none cannot sign in.",
+                    "Bei jeder Anmeldung neu gelesen. Wer in mehreren Gruppen ist, bekommt die Rolle mit den meisten Rechten; wer in keiner ist, kann sich nicht anmelden.",
+                ));
+                widgets::choice(ui, &mut l.role_source, RoleSource::AeternaVault, "AeternaVault")
+                    .on_hover_text(tr(
+                        lang,
+                        "The directory checks only the password. Roles are given and changed under Users.",
+                        "Das Verzeichnis prüft nur das Passwort. Rollen werden unter Benutzer vergeben und geändert.",
+                    ));
             });
             let by_groups = l.role_source == RoleSource::Directory;
             widgets::reveal(ui, "web-ldap-groups", by_groups, |ui| {
                 ui.add_space(6.0);
-                note(
-                    ui,
-                    tr(
-                        lang,
-                        "Read again at every sign-in. Members of several groups get the role with the most permissions; members of none cannot sign in.",
-                        "Bei jeder Anmeldung neu gelesen. Wer in mehreren Gruppen ist, bekommt die Rolle mit den meisten Rechten; wer in keiner ist, kann sich nicht anmelden.",
-                    ),
-                );
                 ui.add_space(4.0);
                 let group_width = (width - 190.0).clamp(160.0, 380.0);
                 for (label, group, hint) in [
@@ -1219,7 +1526,7 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[
                 ] {
                     ui.horizontal(|ui| {
                         ui.add(
-                            egui::TextEdit::singleline(group)
+                            widgets::text_field(group)
                                 .hint_text(hint)
                                 .desired_width(group_width),
                         );
@@ -1231,7 +1538,7 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[
                     ui.push_id(("group-role", i), |ui| {
                         ui.horizontal(|ui| {
                             ui.add(
-                                egui::TextEdit::singleline(&mut mapping.group)
+                                widgets::text_field(&mut mapping.group)
                                     .hint_text("CN=…,OU=Gruppen,DC=firma,DC=local")
                                     .desired_width(group_width),
                             );
@@ -1311,14 +1618,6 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[
                             }
                         });
                 });
-                note(
-                    ui,
-                    tr(
-                        lang,
-                        "The directory checks only the password. Roles are given and changed under Users; with none, an administrator assigns one first.",
-                        "Das Verzeichnis prüft nur das Passwort. Rollen werden unter Benutzer vergeben und geändert; ohne Rolle vergibt zuerst ein Administrator eine.",
-                    ),
-                );
             });
 
             ui.add_space(12.0);
@@ -1327,12 +1626,12 @@ fn ldap_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings, roles: &[
             ui.horizontal_wrapped(|ui| {
                 let w = ((width - 16.0) / 2.0).clamp(140.0, 220.0);
                 ui.add(
-                    egui::TextEdit::singleline(&mut app.web.ldap_test_user)
+                    widgets::text_field(&mut app.web.ldap_test_user)
                         .hint_text(tr(lang, "User name", "Benutzername"))
                         .desired_width(w),
                 );
                 ui.add(
-                    egui::TextEdit::singleline(&mut app.web.ldap_test_password)
+                    widgets::text_field(&mut app.web.ldap_test_password)
                         .password(true)
                         .hint_text(tr(lang, "Password", "Passwort"))
                         .desired_width(w),
@@ -1509,7 +1808,7 @@ fn roles_card(app: &mut AeternaApp, ui: &mut Ui) {
         }
         ui.horizontal(|ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut app.web.new_role_name)
+                widgets::text_field(&mut app.web.new_role_name)
                     .hint_text(tr(lang, "Name of a new role", "Name einer neuen Rolle"))
                     .desired_width(220.0),
             );
@@ -1660,7 +1959,7 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                             app.web.shown_password = None;
                         }
                     });
-                    note(
+                    widgets::hint_icon(
                         ui,
                         tr(lang, "Shown only now. The user chooses a new one after signing in.", "Wird nur jetzt angezeigt. Der Benutzer wählt nach der Anmeldung ein neues."),
                     );
@@ -1851,7 +2150,7 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
                                                 .color(p.text_secondary),
                                             );
                                             ui.add(
-                                                egui::TextEdit::singleline(text)
+                                                widgets::text_field(text)
                                                     .hint_text("name@firma.de")
                                                     .desired_width(220.0),
                                             );
@@ -1991,12 +2290,12 @@ fn users_card(app: &mut AeternaApp, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(10.0, 8.0);
             ui.add(
-                egui::TextEdit::singleline(&mut app.web.new_name)
+                widgets::text_field(&mut app.web.new_name)
                     .hint_text(tr(lang, "User name", "Benutzername"))
                     .desired_width(200.0),
             );
             ui.add(
-                egui::TextEdit::singleline(&mut app.web.new_password)
+                widgets::text_field(&mut app.web.new_password)
                     .password(true)
                     .hint_text(tr(lang, "Initial password", "Startpasswort"))
                     .desired_width(200.0),
@@ -2122,7 +2421,7 @@ fn audit_card(app: &mut AeternaApp, ui: &mut Ui) {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add(
-                    egui::TextEdit::singleline(&mut app.web.audit_filter)
+                    widgets::text_field(&mut app.web.audit_filter)
                         .hint_text(tr(
                             lang,
                             "Filter: user, action, address…",

@@ -33,7 +33,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         });
         ui.add_space(4.0);
         ui.add(
-            egui::TextEdit::singleline(&mut app.apps.search)
+            widgets::text_field(&mut app.apps.search)
                 .hint_text(t.search)
                 .desired_width(280.0),
         );

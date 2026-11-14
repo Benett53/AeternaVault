@@ -65,7 +65,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         }
         ui.add_space(6.0);
         ui.add(
-            egui::TextEdit::singleline(&mut filter)
+            widgets::text_field(&mut filter)
                 .hint_text(t.filter_activity)
                 .desired_width(280.0),
         );

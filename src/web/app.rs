@@ -68,6 +68,8 @@ pub struct WebApp {
     admin_networks: Vec<Network>,
     geo: Option<super::access::Geo>,
     blocked: Mutex<super::access::BlockCache>,
+    /// Connections refused by country since the start.
+    geo_refused: Mutex<std::collections::BTreeMap<String, u64>>,
     failures: Mutex<super::access::FailureLog>,
     control: Arc<dyn Control>,
     sessions: Mutex<Sessions>,
@@ -147,6 +149,7 @@ impl WebApp {
             admin_networks,
             geo,
             blocked: Mutex::new(super::access::BlockCache::default()),
+            geo_refused: Mutex::new(std::collections::BTreeMap::new()),
             failures: Mutex::new(super::access::FailureLog::default()),
             control,
             sessions: Mutex::new(Sessions::default()),
@@ -157,6 +160,13 @@ impl WebApp {
             checks: Arc::new(Mutex::new(Vec::new())),
             flash: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn geo_refusals(&self) -> Vec<(String, u64)> {
+        lock(&self.geo_refused)
+            .iter()
+            .map(|(c, n)| (c.clone(), *n))
+            .collect()
     }
 
     /// Whether a user with these permissions needs a second factor.
@@ -281,8 +291,12 @@ impl WebApp {
             tracing::debug!("web interface: refused {} (blocked)", req.peer);
             return Response::text(403, "Forbidden");
         }
-        if self.geo.as_ref().is_some_and(|g| !g.allows(req.peer)) {
-            tracing::debug!("web interface: refused {} (country)", req.peer);
+        if let Some(geo) = &self.geo
+            && !geo.allows(req.peer)
+        {
+            let country = geo.country(req.peer).unwrap_or_else(|| "??".into());
+            tracing::info!("web interface: refused {} (country {country})", req.peer);
+            *lock(&self.geo_refused).entry(country).or_default() += 1;
             return Response::text(403, "Forbidden");
         }
         if !self.allowed(req.peer) {

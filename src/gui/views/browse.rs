@@ -71,7 +71,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
 
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::TextEdit::singleline(&mut state.filter)
+                    widgets::text_field(&mut state.filter)
                         .hint_text(t.filter_hint)
                         .desired_width(280.0),
                 );

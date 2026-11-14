@@ -52,7 +52,7 @@ pub(super) fn secret_field(
         let button_width = 34.0;
         let width = ui.available_width() - button_width - ui.spacing().item_spacing.x;
         let response = ui.add(
-            egui::TextEdit::singleline(value)
+            widgets::text_field(value)
                 .password(!visible)
                 .hint_text(hint)
                 .desired_width(width.max(80.0)),
@@ -397,7 +397,7 @@ pub fn schedule_dialog(app: &mut AeternaApp, ui: &mut Ui) {
             ui.horizontal(|ui| {
                 widgets::secondary_text(ui, t.job_before_command);
                 ui.add(
-                    egui::TextEdit::singleline(&mut schedule.before_command)
+                    widgets::text_field(&mut schedule.before_command)
                         .hint_text("pg_dump …")
                         .desired_width(420.0),
                 );
@@ -439,7 +439,7 @@ pub fn schedule_dialog(app: &mut AeternaApp, ui: &mut Ui) {
             widgets::secondary_text(ui, t.schedule_name);
             let hint = crate::automatic::when_text(schedule, lang);
             ui.add(
-                egui::TextEdit::singleline(&mut schedule.name)
+                widgets::text_field(&mut schedule.name)
                     .hint_text(hint)
                     .desired_width(f32::INFINITY),
             );
@@ -890,7 +890,7 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                     wrapped(ui, t.test_recovery_hint, Some(p.text_secondary));
                     ui.add_space(10.0);
                     let field = ui.add(
-                        egui::TextEdit::singleline(secret)
+                        widgets::text_field(secret)
                             .hint_text("XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX")
                             .font(egui::TextStyle::Monospace)
                             .desired_width(f32::INFINITY),

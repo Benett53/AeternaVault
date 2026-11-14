@@ -114,9 +114,16 @@ fn setup(settings: WebSettings) -> (tempfile::TempDir, AppPaths, WebServer, u16)
     store.add("viewer", "viewer", "viewer password 1").unwrap();
     store.save(&paths.config_file).unwrap();
     let port = free_port();
+    // Plain HTTP for the tests: only this computer.
+    let bind = if settings.bind == "0.0.0.0" {
+        "127.0.0.1".to_string()
+    } else {
+        settings.bind.clone()
+    };
     let settings = WebSettings {
         enabled: true,
         port,
+        bind,
         ..settings
     };
     let server =

@@ -7,7 +7,7 @@ use eframe::egui::{self, Align, Layout, Ui};
 use crate::config::{Appearance, BackupMode, EncryptionScope, LanguageSetting, default_excludes};
 use crate::engine::scan::Excludes;
 use crate::gui::widgets::{self, ButtonKind, NoticeKind};
-use crate::gui::{AeternaApp, theme};
+use crate::gui::{AeternaApp, View, theme};
 use crate::i18n::Lang;
 use crate::platform;
 
@@ -112,207 +112,364 @@ pub fn encryption_info_card(app: &mut AeternaApp, ui: &mut Ui) {
     });
 }
 
-pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
-    let ctx = ui.ctx().clone();
-    let t = app.lang.t();
+/// The parts of the settings, each a page of its own beside the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Section {
+    #[default]
+    General,
+    Features,
+    Storage,
+    Encryption,
+    Background,
+    Notifications,
+    Web,
+    DriveHealth,
+    Updates,
+    Logging,
+    Advanced,
+}
 
-    features_card(app, ui);
-    ui.add_space(14.0);
-
-    // Cards in two balanced columns on wide windows (each goes where there is
-    // less), one below the other on narrow ones.
-    widgets::masonry(ui, "settings", 8, |ui, item| match item {
-        0 => {
-            widgets::card(ui, |ui| {
-                widgets::section_title(ui, t.settings_general);
-                let label = 150.0;
-                {
-                    widgets::field_row(ui, label, t.language, t.tip_language, |ui| {
-                        let before = app.config.language;
-                        widgets::choice(
-                            ui,
-                            &mut app.config.language,
-                            LanguageSetting::Auto,
-                            t.language_auto,
-                        );
-                        widgets::choice(
-                            ui,
-                            &mut app.config.language,
-                            LanguageSetting::En,
-                            "English",
-                        );
-                        widgets::choice(
-                            ui,
-                            &mut app.config.language,
-                            LanguageSetting::De,
-                            "Deutsch",
-                        );
-                        if before != app.config.language {
-                            app.lang = Lang::resolve(app.config.language);
-                            app.mark_dirty();
-                        }
-                    });
-                    ui.add_space(8.0);
-                    widgets::field_row(ui, label, t.appearance, t.tip_appearance, |ui| {
-                        let before = app.config.appearance;
-                        widgets::choice(
-                            ui,
-                            &mut app.config.appearance,
-                            Appearance::System,
-                            t.appearance_system,
-                        );
-                        widgets::choice(
-                            ui,
-                            &mut app.config.appearance,
-                            Appearance::Light,
-                            t.appearance_light,
-                        );
-                        widgets::choice(
-                            ui,
-                            &mut app.config.appearance,
-                            Appearance::Dark,
-                            t.appearance_dark,
-                        );
-                        widgets::choice(
-                            ui,
-                            &mut app.config.appearance,
-                            Appearance::Black,
-                            t.appearance_black,
-                        )
-                        .on_hover_text(t.tip_black);
-                        if before != app.config.appearance {
-                            theme::apply(&ctx, app.config.appearance);
-                            app.mark_dirty();
-                        }
-                    });
-                    ui.add_space(8.0);
-                    widgets::field_row(ui, label, t.interface_size, t.tip_interface_size, |ui| {
-                        let before = app.config.interface_scale;
-                        egui::ComboBox::from_id_salt("interface-scale")
-                            .selected_text(format!("{} %", app.config.interface_scale))
-                            .width(100.0)
-                            .show_ui(ui, |ui| {
-                                for scale in [90u16, 100, 110, 125, 150] {
-                                    ui.selectable_value(
-                                        &mut app.config.interface_scale,
-                                        scale,
-                                        format!("{scale} %"),
-                                    );
-                                }
-                            });
-                        if before != app.config.interface_scale {
-                            ctx.set_zoom_factor(app.config.zoom_factor());
-                            app.mark_dirty();
-                        }
-                    });
-                }
-            });
+impl Section {
+    fn name(self, lang: Lang) -> &'static str {
+        let en = lang == Lang::En;
+        match (self, en) {
+            (Self::General, true) => "General",
+            (Self::General, false) => "Allgemein",
+            (Self::Features, true) => "Features",
+            (Self::Features, false) => "Funktionen",
+            (Self::Storage, true) => "Storage",
+            (Self::Storage, false) => "Speicherort",
+            (Self::Encryption, true) => "Encryption",
+            (Self::Encryption, false) => "Verschlüsselung",
+            (Self::Background, true) => "Background",
+            (Self::Background, false) => "Hintergrund",
+            (Self::Notifications, true) => "Notifications",
+            (Self::Notifications, false) => "Benachrichtigungen",
+            (Self::Web, true) => "Web interface",
+            (Self::Web, false) => "Web-Oberfläche",
+            (Self::DriveHealth, true) => "Drive health",
+            (Self::DriveHealth, false) => "Laufwerkszustand",
+            (Self::Updates, true) => "Updates",
+            (Self::Updates, false) => "Updates",
+            (Self::Logging, true) => "Logging",
+            (Self::Logging, false) => "Protokoll",
+            (Self::Advanced, true) => "Advanced",
+            (Self::Advanced, false) => "Erweitert",
         }
-        1 => destination_card(app, ui),
-        2 => {
+    }
+
+    /// The sections shown now: optional parts only when switched on.
+    fn visible(app: &AeternaApp) -> Vec<Section> {
+        let mut list = vec![
+            Self::General,
+            Self::Features,
+            Self::Storage,
+            Self::Encryption,
+            Self::Background,
+        ];
+        if app.config.notifications_on() {
+            list.push(Self::Notifications);
+        }
+        if app.config.web_on() {
+            list.push(Self::Web);
+        }
+        if app.config.drive_health_on() {
+            list.push(Self::DriveHealth);
+        }
+        list.extend([Self::Updates, Self::Logging, Self::Advanced]);
+        list
+    }
+}
+
+/// The section a view shows: Notifications and Web are views of their own
+/// (for back and forward), shown inside the settings.
+pub fn current(app: &AeternaApp) -> Section {
+    match app.view {
+        View::Notifications => Section::Notifications,
+        View::Web => Section::Web,
+        _ => app.settings.section,
+    }
+}
+
+/// Settings: a list of sections on the left, the chosen one on the right.
+pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
+    let lang = app.lang;
+    let mut section = current(app);
+    let sections = Section::visible(app);
+    if !sections.contains(&section) {
+        section = Section::General;
+        app.settings.section = section;
+    }
+    const SIDEBAR: f32 = 210.0;
+    let narrow = ui.available_width() < 760.0;
+    let mut chosen = None;
+    let list = |ui: &mut Ui, chosen: &mut Option<Section>| {
+        for s in &sections {
+            if widgets::side_tab(ui, s.name(lang), *s == section).clicked() && *s != section {
+                *chosen = Some(*s);
+            }
+        }
+    };
+    if narrow {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            for s in &sections {
+                if widgets::choice(ui, &mut section.clone(), *s, s.name(lang)).clicked()
+                    && *s != section
+                {
+                    chosen = Some(*s);
+                }
+            }
+        });
+        ui.add_space(14.0);
+        section_content(app, ui, section);
+    } else {
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(SIDEBAR, 0.0),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_width(SIDEBAR);
+                    list(ui, &mut chosen);
+                },
+            );
+            ui.add_space(24.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 0.0),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    // Short pages read better at a moderate width; the
+                    // notification and web pages use the whole width.
+                    let wide = matches!(section, Section::Notifications | Section::Web);
+                    let width = if wide {
+                        ui.available_width()
+                    } else {
+                        ui.available_width().min(920.0)
+                    };
+                    ui.set_width(width);
+                    section_content(app, ui, section);
+                },
+            );
+        });
+    }
+    if let Some(next) = chosen {
+        let ctx = ui.ctx().clone();
+        match next {
+            Section::Notifications => app.navigate(&ctx, View::Notifications),
+            Section::Web => app.navigate(&ctx, View::Web),
+            other => {
+                app.settings.section = other;
+                if app.view != View::Settings {
+                    app.navigate(&ctx, View::Settings);
+                }
+            }
+        }
+    }
+}
+
+fn section_content(app: &mut AeternaApp, ui: &mut Ui, section: Section) {
+    let gap = 14.0;
+    match section {
+        Section::General => general_card(app, ui),
+        Section::Features => features_card(app, ui),
+        Section::Storage => {
+            destination_card(app, ui);
+            ui.add_space(gap);
+            exclusions_card(app, ui);
+        }
+        Section::Encryption => {
             encryption_card(app, ui);
             if app.vault.header.is_some() {
-                ui.add_space(14.0);
+                ui.add_space(gap);
                 encryption_info_card(app, ui);
             }
         }
-        3 => background_card(app, ui),
-        4 => updates_card(app, ui),
-        5 => logging_card(app, ui),
-        6 => {
-            widgets::card(ui, |ui| {
-                widgets::section_title(ui, t.advanced);
-                let before = app.config.advanced.clone();
-                widgets::switch(
+        Section::Background => background_card(app, ui),
+        Section::Notifications => crate::gui::views::notifications::show(app, ui),
+        Section::Web => crate::gui::views::web::show(app, ui),
+        Section::DriveHealth => drive_health_card(app, ui),
+        Section::Updates => updates_card(app, ui),
+        Section::Logging => logging_card(app, ui),
+        Section::Advanced => {
+            advanced_card(app, ui);
+            ui.add_space(gap);
+            config_card(app, ui);
+        }
+    }
+    ui.add_space(12.0);
+}
+
+fn general_card(app: &mut AeternaApp, ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    let t = app.lang.t();
+    widgets::card(ui, |ui| {
+        widgets::section_title(ui, t.settings_general);
+        let label = 150.0;
+        {
+            widgets::field_row(ui, label, t.language, t.tip_language, |ui| {
+                let before = app.config.language;
+                widgets::choice(
                     ui,
-                    &mut app.config.advanced.skip_online_only_files,
-                    t.adv_skip_online,
-                )
-                .on_hover_text(t.tip_skip_online);
-                widgets::switch(
+                    &mut app.config.language,
+                    LanguageSetting::Auto,
+                    t.language_auto,
+                );
+                widgets::choice(ui, &mut app.config.language, LanguageSetting::En, "English");
+                widgets::choice(ui, &mut app.config.language, LanguageSetting::De, "Deutsch");
+                if before != app.config.language {
+                    app.lang = Lang::resolve(app.config.language);
+                    app.mark_dirty();
+                }
+            });
+            ui.add_space(8.0);
+            widgets::field_row(ui, label, t.appearance, t.tip_appearance, |ui| {
+                let before = app.config.appearance;
+                widgets::choice(
                     ui,
-                    &mut app.config.advanced.hardlink_unchanged,
-                    t.adv_hardlinks,
-                )
-                .on_hover_text(t.tip_hardlinks);
-                widgets::switch(ui, &mut app.config.advanced.flush_to_disk, t.adv_flush)
-                    .on_hover_text(t.tip_flush);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(t.adv_health_check)
-                        .on_hover_text(t.tip_health_check);
-                    widgets::number_or(
-                        ui,
-                        &mut app.config.advanced.health_check_days,
-                        0..=365,
-                        t.zero_never,
-                    )
-                    .on_hover_text(t.tip_health_check);
-                    ui.label(t.adv_health_check_days);
-                });
-                widgets::switch(
+                    &mut app.config.appearance,
+                    Appearance::System,
+                    t.appearance_system,
+                );
+                widgets::choice(
                     ui,
-                    &mut app.config.advanced.confirm_before_start,
-                    t.adv_confirm,
-                )
-                .on_hover_text(t.tip_confirm);
-                widgets::switch(
+                    &mut app.config.appearance,
+                    Appearance::Light,
+                    t.appearance_light,
+                );
+                widgets::choice(
                     ui,
-                    &mut app.config.advanced.verify_on_restore,
-                    t.verify_checksums,
-                )
-                .on_hover_text(t.tip_verify);
-                widgets::switch(
+                    &mut app.config.appearance,
+                    Appearance::Dark,
+                    t.appearance_dark,
+                );
+                widgets::choice(
                     ui,
-                    &mut app.config.advanced.compatibility_graphics,
-                    t.adv_compatibility_graphics,
+                    &mut app.config.appearance,
+                    Appearance::Black,
+                    t.appearance_black,
                 )
-                .on_hover_text(t.adv_compatibility_hint);
-                if before != app.config.advanced {
+                .on_hover_text(t.tip_black);
+                if before != app.config.appearance {
+                    theme::apply(&ctx, app.config.appearance);
+                    app.mark_dirty();
+                }
+            });
+            ui.add_space(8.0);
+            widgets::field_row(ui, label, t.interface_size, t.tip_interface_size, |ui| {
+                let before = app.config.interface_scale;
+                egui::ComboBox::from_id_salt("interface-scale")
+                    .selected_text(format!("{} %", app.config.interface_scale))
+                    .width(100.0)
+                    .show_ui(ui, |ui| {
+                        for scale in [90u16, 100, 110, 125, 150] {
+                            ui.selectable_value(
+                                &mut app.config.interface_scale,
+                                scale,
+                                format!("{scale} %"),
+                            );
+                        }
+                    });
+                if before != app.config.interface_scale {
+                    ctx.set_zoom_factor(app.config.zoom_factor());
                     app.mark_dirty();
                 }
             });
         }
-        _ => {
-            widgets::card(ui, |ui| {
-                widgets::section_title_info(ui, t.config_title, t.config_hint);
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(app.paths.config_file.display().to_string()).monospace(),
-                );
-                if app.paths.portable {
-                    widgets::secondary_text(ui, t.portable_mode);
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if widgets::button(ui, ButtonKind::Secondary, t.open_in_editor, true).clicked()
-                    {
-                        platform::open_in_editor(&app.paths.config_file);
-                    }
-                    if widgets::button(ui, ButtonKind::Secondary, t.reload, !app.is_busy())
-                        .clicked()
-                    {
-                        app.reload_config(&ctx);
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if widgets::button(ui, ButtonKind::Quiet, t.open_log_folder, true).clicked()
-                        {
-                            if let Err(err) = std::fs::create_dir_all(&app.paths.log_dir) {
-                                app.notify(NoticeKind::Warning, err.to_string());
-                            }
-                            platform::open_in_file_manager(&app.paths.log_dir);
-                        }
-                    });
-                });
-            });
+    });
+}
+
+fn advanced_card(app: &mut AeternaApp, ui: &mut Ui) {
+    let t = app.lang.t();
+    widgets::card(ui, |ui| {
+        widgets::section_title(ui, t.advanced);
+        let before = app.config.advanced.clone();
+        widgets::switch(
+            ui,
+            &mut app.config.advanced.skip_online_only_files,
+            t.adv_skip_online,
+        )
+        .on_hover_text(t.tip_skip_online);
+        widgets::switch(
+            ui,
+            &mut app.config.advanced.hardlink_unchanged,
+            t.adv_hardlinks,
+        )
+        .on_hover_text(t.tip_hardlinks);
+        widgets::switch(ui, &mut app.config.advanced.flush_to_disk, t.adv_flush)
+            .on_hover_text(t.tip_flush);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(t.adv_health_check)
+                .on_hover_text(t.tip_health_check);
+            widgets::number_or(
+                ui,
+                &mut app.config.advanced.health_check_days,
+                0..=365,
+                t.zero_never,
+            )
+            .on_hover_text(t.tip_health_check);
+            ui.label(t.adv_health_check_days);
+        });
+        widgets::switch(
+            ui,
+            &mut app.config.advanced.confirm_before_start,
+            t.adv_confirm,
+        )
+        .on_hover_text(t.tip_confirm);
+        widgets::switch(
+            ui,
+            &mut app.config.advanced.verify_on_restore,
+            t.verify_checksums,
+        )
+        .on_hover_text(t.tip_verify);
+        widgets::switch(
+            ui,
+            &mut app.config.advanced.compatibility_graphics,
+            t.adv_compatibility_graphics,
+        )
+        .on_hover_text(t.adv_compatibility_hint);
+        if before != app.config.advanced {
+            app.mark_dirty();
         }
     });
+}
 
-    ui.add_space(14.0);
+fn config_card(app: &mut AeternaApp, ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    let t = app.lang.t();
+    widgets::card(ui, |ui| {
+        widgets::section_title_info(ui, t.config_title, t.config_hint);
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(app.paths.config_file.display().to_string()).monospace());
+        if app.paths.portable {
+            widgets::secondary_text(ui, t.portable_mode);
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if widgets::button(ui, ButtonKind::Secondary, t.open_in_editor, true).clicked() {
+                platform::open_in_editor(&app.paths.config_file);
+            }
+            if widgets::button(ui, ButtonKind::Secondary, t.reload, !app.is_busy()).clicked() {
+                app.reload_config(&ctx);
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::button(ui, ButtonKind::Quiet, t.open_log_folder, true).clicked() {
+                    if let Err(err) = std::fs::create_dir_all(&app.paths.log_dir) {
+                        app.notify(NoticeKind::Warning, err.to_string());
+                    }
+                    platform::open_in_file_manager(&app.paths.log_dir);
+                }
+            });
+        });
+    });
+}
+
+fn exclusions_card(app: &mut AeternaApp, ui: &mut Ui) {
+    let t = app.lang.t();
     widgets::card(ui, |ui| {
         widgets::section_title_info(ui, t.exclusions_title, t.exclusions_hint);
         ui.add_space(6.0);
         ui.add(
-            egui::TextEdit::multiline(&mut app.settings.exclude_text)
+            widgets::text_area(&mut app.settings.exclude_text)
                 .font(egui::TextStyle::Monospace)
                 .desired_rows(7)
                 .desired_width(f32::INFINITY),
@@ -344,7 +501,6 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             }
         });
     });
-    ui.add_space(12.0);
 }
 
 fn tr(lang: Lang, en: &'static str, de: &'static str) -> &'static str {
@@ -608,6 +764,108 @@ fn drive_health_line(app: &AeternaApp, ui: &mut Ui) {
             Some(Err(why)) => {
                 widgets::secondary_text(ui, why.text(en));
             }
+        }
+    });
+}
+
+/// Drive health in detail: what the drive reports, where it comes from and
+/// a button to read it again.
+fn drive_health_card(app: &mut AeternaApp, ui: &mut Ui) {
+    use crate::platform::drive_health::{self, Status};
+    let lang = app.lang;
+    let en = lang == Lang::En;
+    let p = *theme::palette(ui);
+    let path = app.config.destination.clone();
+    widgets::card(ui, |ui| {
+        widgets::section_title_info(
+            ui,
+            tr(lang, "Drive health", "Laufwerkszustand"),
+            tr(
+                lang,
+                "The S.M.A.R.T. values the drive with the backups reports about itself: whether it predicts a failure, bad sectors, wear and temperature. Read every ten minutes and after each backup. Linux: UDisks (smartctl as fallback); Windows: the Storage module. A message is sent when the state gets worse.",
+                "Die S.M.A.R.T.-Werte, die das Laufwerk mit den Sicherungen über sich meldet: ob es einen Ausfall vorhersagt, defekte Sektoren, Verschleiß und Temperatur. Gelesen alle zehn Minuten und nach jeder Sicherung. Linux: UDisks (smartctl als Ersatz); Windows: das Storage-Modul. Wird der Zustand schlechter, kommt eine Benachrichtigung.",
+            ),
+        );
+        if path.as_os_str().is_empty() {
+            widgets::secondary_text(ui, tr(lang, "No destination yet.", "Noch kein Ziel."));
+            return;
+        }
+        let repaint = ui.ctx().clone();
+        let reading = drive_health::cached(&path, move || repaint.request_repaint());
+        let row = |ui: &mut Ui, label: &str, value: String| {
+            widgets::field_row(ui, 170.0, label, "", |ui| {
+                ui.label(value);
+            });
+        };
+        row(
+            ui,
+            tr(lang, "Destination", "Ziel"),
+            path.display().to_string(),
+        );
+        match &reading {
+            None => row(
+                ui,
+                tr(lang, "State", "Zustand"),
+                tr(lang, "Reading…", "Wird gelesen…").into(),
+            ),
+            Some(Ok(h)) => {
+                let color = match h.status {
+                    Status::Good => p.success,
+                    Status::Warning => p.warning,
+                    Status::Failing => p.error,
+                };
+                widgets::field_row(ui, 170.0, tr(lang, "State", "Zustand"), "", |ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 4.5, color);
+                    ui.label(egui::RichText::new(h.status_name(en)).color(color).strong());
+                });
+                row(ui, tr(lang, "Drive", "Laufwerk"), h.model.clone());
+                if let Some(t) = h.temperature_c {
+                    row(ui, tr(lang, "Temperature", "Temperatur"), format!("{t} °C"));
+                }
+                if let Some(hours) = h.power_on_hours {
+                    row(
+                        ui,
+                        tr(lang, "Powered on", "Betriebszeit"),
+                        format!("{hours} h"),
+                    );
+                }
+                if !h.findings.is_empty() {
+                    widgets::field_row(ui, 170.0, tr(lang, "Findings", "Befunde"), "", |ui| {
+                        ui.vertical(|ui| {
+                            for f in &h.findings {
+                                ui.label(egui::RichText::new(f).color(color));
+                            }
+                        });
+                    });
+                }
+                row(ui, tr(lang, "Source", "Quelle"), h.source.clone());
+            }
+            Some(Err(why)) => row(ui, tr(lang, "State", "Zustand"), why.text(en)),
+        }
+        if let Some(at) = drive_health::read_at(&path) {
+            let minutes = at.elapsed().as_secs() / 60;
+            row(
+                ui,
+                tr(lang, "Read", "Gelesen"),
+                if en {
+                    format!("{minutes} min ago")
+                } else {
+                    format!("vor {minutes} Min.")
+                },
+            );
+        }
+        ui.add_space(8.0);
+        if widgets::button(
+            ui,
+            ButtonKind::Secondary,
+            tr(lang, "Check now", "Jetzt prüfen"),
+            reading.is_some(),
+        )
+        .clicked()
+        {
+            drive_health::refresh(&path);
         }
     });
 }

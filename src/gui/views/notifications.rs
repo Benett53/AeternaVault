@@ -67,7 +67,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                                 ui.horizontal(|ui| {
                                     widgets::switch(ui, &mut channel.enabled, "");
                                     ui.add(
-                                        egui::TextEdit::singleline(&mut channel.name)
+                                        widgets::text_field(&mut channel.name)
                                             .hint_text(channel.kind.name())
                                             .desired_width(180.0),
                                     );
@@ -305,7 +305,7 @@ fn message_texts(app: &mut AeternaApp, ui: &mut Ui) {
                     ui.add_space(8.0);
                     widgets::secondary_text(ui, if de { "Betreff" } else { "Subject" });
                     let r = ui.add(
-                        egui::TextEdit::singleline(title)
+                        widgets::text_field(title)
                             .id(title_id)
                             .hint_text(default_title)
                             .desired_width(f32::INFINITY),
@@ -316,7 +316,7 @@ fn message_texts(app: &mut AeternaApp, ui: &mut Ui) {
                     ui.add_space(6.0);
                     widgets::secondary_text(ui, if de { "Nachricht" } else { "Message" });
                     let r = ui.add(
-                        egui::TextEdit::multiline(body)
+                        widgets::text_area(body)
                             .id(body_id)
                             .hint_text(default_body)
                             .desired_rows(5)
@@ -392,7 +392,7 @@ fn channel_fields(ui: &mut Ui, channel: &mut crate::notify::Channel, lang: Lang)
     let row = |ui: &mut Ui, label: &str, value: &mut String, hint: &str, secret: bool| {
         widgets::secondary_text(ui, label);
         ui.add(
-            egui::TextEdit::singleline(value)
+            widgets::text_field(value)
                 .hint_text(hint)
                 .password(secret)
                 .desired_width(f32::INFINITY),

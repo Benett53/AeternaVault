@@ -438,7 +438,7 @@ fn rename_row(app: &mut AeternaApp, ui: &mut Ui, ctx: &egui::Context) {
     let mut save = false;
     ui.horizontal(|ui| {
         widgets::secondary_text(ui, t.rename_title);
-        let field = ui.add(egui::TextEdit::singleline(&mut text).desired_width(360.0));
+        let field = ui.add(widgets::text_field(&mut text).desired_width(360.0));
         if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             save = true;
         }
