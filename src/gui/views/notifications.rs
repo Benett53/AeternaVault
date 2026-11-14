@@ -28,6 +28,20 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                 widgets::switch(ui, &mut n.on_success, t.notify_on_success);
                 widgets::switch(ui, &mut n.on_problem, t.notify_on_problem);
                 widgets::switch(ui, &mut n.on_skipped, t.notify_on_skipped);
+                widgets::switch(
+                    ui,
+                    &mut n.on_update,
+                    if lang == Lang::En {
+                        "When a new version is available"
+                    } else {
+                        "Wenn eine neue Version verfügbar ist"
+                    },
+                )
+                .on_hover_text(if lang == Lang::En {
+                    "Once per version, found by the daily update check of the window (Settings → Updates)."
+                } else {
+                    "Einmal pro Version, gefunden von der täglichen Update-Prüfung des Fensters (Einstellungen → Updates)."
+                });
                 ui.add_space(6.0);
                 widgets::field_row(ui, 230.0, t.notify_low_space, "", |ui| {
                     ui.horizontal(|ui| {
@@ -151,7 +165,7 @@ enum Kind {
 }
 
 /// The values a message can contain, as (placeholder, English, German).
-const PLACEHOLDERS: [(&str, &str, &str); 13] = [
+const PLACEHOLDERS: [(&str, &str, &str); 14] = [
     ("{job}", "Job", "Auftrag"),
     ("{status}", "Status", "Status"),
     ("{backup}", "Backup", "Sicherung"),
@@ -165,6 +179,7 @@ const PLACEHOLDERS: [(&str, &str, &str); 13] = [
     ("{free}", "Free space", "Freier Platz"),
     ("{free_percent}", "Free %", "Frei %"),
     ("{message}", "Details", "Details"),
+    ("{drive}", "Drive health", "Laufwerkszustand"),
 ];
 
 /// Sample values for the preview.
@@ -207,6 +222,12 @@ fn sample_facts(kind: Kind, lang: Lang) -> crate::notify::Facts {
             }
         } else {
             ""
+        }
+        .into(),
+        drive: if de {
+            "Gut · 38 °C · 9120 h"
+        } else {
+            "Good · 38 °C · 9120 h"
         }
         .into(),
     }

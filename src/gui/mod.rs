@@ -454,6 +454,8 @@ pub struct AeternaApp {
     pub web: views::web::WebUi,
     /// The help window (keyboard, links) is open.
     pub help_open: bool,
+    /// The new version a notification was started for in this session.
+    update_alerted: Option<String>,
     config_dirty: bool,
 }
 
@@ -478,6 +480,7 @@ impl AeternaApp {
             updater,
             web: views::web::WebUi::default(),
             help_open: false,
+            update_alerted: None,
             settings: SettingsUi {
                 section: views::settings::Section::default(),
                 exclude_text: loaded.config.exclude.join("\n"),
@@ -916,6 +919,27 @@ impl AeternaApp {
     }
 }
 
+impl AeternaApp {
+    /// A new version found by the daily check is reported to the
+    /// notification channels once (remembered across starts in state.json).
+    fn update_alert_tick(&mut self) {
+        let Some(release) = self.updater.available() else {
+            return;
+        };
+        if self.update_alerted.as_deref() == Some(release.version.as_str()) {
+            return;
+        }
+        self.update_alerted = Some(release.version.clone());
+        if !self.config.notifications_on() || !self.config.notifications.on_update {
+            return;
+        }
+        let (file, config) = (self.paths.config_file.clone(), self.config.clone());
+        std::thread::spawn(move || {
+            crate::notify::update_available(&file, &config, &release.version);
+        });
+    }
+}
+
 pub fn view_label(t: &crate::i18n::Tr, view: View) -> &'static str {
     match view {
         View::Backup => t.nav_backup,
@@ -982,6 +1006,7 @@ impl eframe::App for AeternaApp {
         self.expire_read_access(ctx);
         self.save_if_dirty();
         self.web_tick();
+        self.update_alert_tick();
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {

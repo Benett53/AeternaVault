@@ -137,6 +137,9 @@ pub struct State {
     /// warning is sent when it changes, not after every backup.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub drive_alerted: BTreeMap<String, crate::platform::drive_health::Status>,
+    /// The newest version a notification was sent for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_notified: Option<String>,
 }
 
 impl State {

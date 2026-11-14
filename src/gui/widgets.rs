@@ -1140,13 +1140,13 @@ fn stat_tile_sized(ui: &mut Ui, value: &str, caption: &str, color: Color32, widt
         });
 }
 
-/// Tiles in rows that fill the width: as many per row as fit at about 170
+/// Tiles in rows that fill the width: as many per row as fit at about 130
 /// points each (frames do not wrap by themselves).
 pub fn stat_tiles(ui: &mut Ui, tiles: &[(String, &str, Color32)]) {
     const GAP: f32 = 12.0;
     const MARGIN: f32 = 2.0 * 18.0 + 2.0;
     let width = ui.available_width();
-    let per_row = (((width + GAP) / (170.0 + MARGIN + GAP)) as usize).clamp(1, tiles.len().max(1));
+    let per_row = (((width + GAP) / (130.0 + MARGIN + GAP)) as usize).clamp(1, tiles.len().max(1));
     let inner = ((width - GAP * (per_row - 1) as f32) / per_row as f32 - MARGIN).floor();
     for (r, row) in tiles.chunks(per_row).enumerate() {
         if r > 0 {

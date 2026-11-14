@@ -1208,6 +1208,38 @@ impl WebApp {
                 ),
             ));
         }
+        if config.drive_health_on() && !config.destination.as_os_str().is_empty() {
+            use crate::platform::drive_health::{self, Status};
+            match drive_health::cached_wait(&config.destination, Duration::from_secs(3)) {
+                Some(Ok(h)) => tiles.push_str(&tile(
+                    match h.status {
+                        Status::Good => "good",
+                        Status::Warning => "warn",
+                        Status::Failing => "bad",
+                    },
+                    h.status_name(ctx.en).into(),
+                    format!(
+                        "{} · {}",
+                        ctx.t("drive health", "Laufwerkszustand"),
+                        h.summary(ctx.en)
+                            .split(" · ")
+                            .skip(1)
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    ),
+                )),
+                Some(Err(why)) => tiles.push_str(&tile(
+                    "",
+                    "–".into(),
+                    format!(
+                        "{}: {}",
+                        ctx.t("drive health", "Laufwerkszustand"),
+                        why.text(ctx.en)
+                    ),
+                )),
+                None => {}
+            }
+        }
         body.push_str(&format!(r#"<div class="tiles">{tiles}</div>"#));
 
         // Chart and ring.
@@ -1364,7 +1396,7 @@ impl WebApp {
                 .unwrap_or_default();
             let health = if config.drive_health_on() {
                 use crate::platform::drive_health::{self, Status};
-                let text = match drive_health::cached(d, || {}) {
+                let text = match drive_health::cached_wait(d, Duration::from_secs(3)) {
                     None => ctx.t("reading…", "wird gelesen…").to_string(),
                     Some(Ok(h)) => {
                         let class = match h.status {
@@ -2254,7 +2286,7 @@ impl WebApp {
             Err(e) => format!(r#"<p class="error">{}</p>"#, esc(&e.to_string())),
         };
         body.push_str(&format!(
-            r#"<form method="get" action="/audit" class="inline"><input name="q" value="{}" placeholder="{}"><button class="secondary">{}</button></form>"#,
+            r#"<form method="get" action="/audit" class="row search"><input name="q" value="{}" placeholder="{}"><button class="secondary">{}</button></form>"#,
             esc(&filter),
             ctx.t("user, action, address …", "Benutzer, Aktion, Adresse …"),
             ctx.t("Filter", "Filtern")

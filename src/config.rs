@@ -1103,6 +1103,32 @@ mod tests {
     }
 
     #[test]
+    fn older_web_settings_move_to_the_new_defaults_once() {
+        use crate::web::access::AdminAccess;
+        let old = "[web]\nbind = \"127.0.0.1\"\nauto_block_after = 20\nadmin_access = \"anywhere\"\nrequire_two_factor = true\n";
+        let mut config: Config = toml::from_str(old).unwrap();
+        assert_eq!(config.web.version, 0);
+        config.normalize();
+        assert_eq!(config.web.bind, "0.0.0.0");
+        assert_eq!(config.web.auto_block_after, 5);
+        assert_eq!(config.web.admin_access, AdminAccess::ThisComputer);
+        assert_eq!(config.web.mfa, crate::web::access::MfaPolicy::Everyone);
+        assert_eq!(config.web.version, WEB_SETTINGS_VERSION);
+
+        // Chosen afterwards (e.g. `web set --bind`), it stays.
+        config.web.bind = "127.0.0.1".into();
+        config.web.admin_access = AdminAccess::Anywhere;
+        let mut again: Config = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        again.normalize();
+        assert_eq!(again.web.bind, "127.0.0.1");
+        assert_eq!(again.web.admin_access, AdminAccess::Anywhere);
+
+        let fresh = WebSettings::default();
+        assert_eq!(fresh.bind, "0.0.0.0");
+        assert!(fresh.uses_tls(), "HTTPS whenever the network can connect");
+    }
+
+    #[test]
     fn schedules_roundtrip_and_old_single_schedule_is_read() {
         let mut config = Config {
             sources: vec![Source::new("Documents", r"C:\Users\a\Documents", true)],

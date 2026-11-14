@@ -884,7 +884,17 @@ fn encryption_card(app: &mut AeternaApp, ui: &mut Ui) {
         } else if app.config.encryption.selected() {
             widgets::strong_text(ui, t.enc_status_selected);
         } else {
-            widgets::secondary_text(ui, t.enc_status_off_settings);
+            ui.horizontal(|ui| {
+                widgets::strong_text(
+                    ui,
+                    if app.lang == Lang::En {
+                        "Not encrypted"
+                    } else {
+                        "Nicht verschlüsselt"
+                    },
+                );
+                widgets::hint_icon(ui, t.enc_status_off_settings);
+            });
         }
 
         ui.add_space(10.0);

@@ -203,3 +203,7 @@ body.bare { display: flex; min-height: 100vh; align-items: center; justify-conte
 dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 8px 20px; margin: 0 0 12px; }
 dl.facts dt { color: var(--muted); }
 dl.facts dd { margin: 0; overflow-wrap: anywhere; }
+
+/* Search field with its button. */
+form.search { align-items: stretch; margin: 0 0 14px; }
+form.search input { flex: 1 1 260px; max-width: 420px; }

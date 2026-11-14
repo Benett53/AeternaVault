@@ -8,7 +8,7 @@ Off unless switched on. Restoring, deleting backups, changing folders or setting
 
 The web interface is one of the optional parts of the program: Settings → Features → Web interface (on a new installation all optional parts are off). Then:
 
-In the window: **Web** tab → switch *Web interface* on, then add the first user (an administrator) under *Users*.
+In the window: **Settings → Web interface** → *Enable web interface*, then add the first user (an administrator) under *Users*.
 
 On the command line:
 
@@ -30,16 +30,16 @@ aeternavault-cli web serve
 
 | Setting | Default | |
 |---|---|---|
-| `bind` | `127.0.0.1` | This computer only. `0.0.0.0`: every network of the computer. |
+| `bind` | `0.0.0.0` | Every network of the computer. `127.0.0.1`: this computer only (command line only). |
 | `port` | `8686` | |
-| `tls` | `auto` | `auto`: plain HTTP for this computer only, HTTPS otherwise. `self-signed`: always HTTPS. `files`: HTTPS with `cert_file` and `key_file` (PEM). `off`: plain HTTP, only allowed for this computer. |
+| `tls` | `auto` | `auto`: a self-signed certificate (plain HTTP only when `bind` is `127.0.0.1`). `files`: HTTPS with `cert_file` and `key_file` (PEM). |
 | `allowed_networks` | empty (any) | e.g. `["192.168.1.0/24", "10.0.0.5"]`. The computer itself may always connect. |
 
 ```sh
-aeternavault-cli web set --bind 0.0.0.0 --allow 192.168.1.0/24
+aeternavault-cli web set --allow 192.168.1.0/24
 ```
 
-From the network, connections are always encrypted. Without own certificate files, AeternaVault makes and signs a certificate itself (in `web-tls` next to the configuration) for the computer name, `localhost` and the computer's address. The connection is encrypted, but browsers do not know the issuer and warn once. Compare the SHA-256 fingerprint the browser shows with the one in the Web tab or in `aeternavault-cli web status`; if they match, the warning is about this computer. After a change of the computer name or address: `aeternavault-cli web renew-certificate`.
+Other computers in the same network reach the interface directly; from the internet it needs the port opened in the router or firewall. Connections from the network are always encrypted. Without own certificate files, AeternaVault makes and signs a certificate itself (in `web-tls` next to the configuration) for the computer name, `localhost` and the computer's address. The connection is encrypted, but browsers do not know the issuer and warn once. To avoid the warning, export the certificate (Settings → Web interface → Connection → *Export certificate*) and add it to the trusted certificates of the computers that connect, or compare the SHA-256 fingerprint the browser shows with the one shown there or in `aeternavault-cli web status`. The page also shows whom the certificate is for, who issued it and until when it is valid. After a change of the computer name or address: `aeternavault-cli web renew-certificate`.
 
 For a certificate without a warning, use own files (`tls = "files"`): from the company CA, or from Let's Encrypt when the computer has a public name, for example with certbot (Linux) or win-acme (Windows). AeternaVault reads the files again when they change (checked once a minute), so a renewal needs no restart. A renewal that cannot be read yet keeps the previous certificate in use. AeternaVault has no ACME client of its own: most servers it runs on are not reachable from the internet, which Let's Encrypt needs for its checks.
 
@@ -49,12 +49,16 @@ Windows asks once whether the program may accept connections from the network (f
 
 | Setting | Default | |
 |---|---|---|
-| `auto_block_after` | `20` | An address with this many wrong sign-ins within 24 hours is blocked. `0`: never. This computer is never blocked. |
+| `auto_block_after` | `5` | An address with this many wrong sign-ins within 24 hours is blocked. `0`: never. This computer is never blocked. |
 | `geo.mode` | `off` | `allow`: only the listed countries may connect. `block`: all but the listed ones. |
 | `geo.countries` | empty | ISO codes, e.g. `["DE", "AT", "CH"]`. |
 | `geo.database` | empty | A country database (`.mmdb`): [DB-IP IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite) or MaxMind GeoLite2 Country, both free. Addresses of private networks and of this computer are not checked; an address the database does not know counts as not listed. |
-| `admin_access` | `anywhere` | Where administrators may manage users and block addresses: `anywhere`, `this-computer`, or `networks` (this computer and `admin_networks`). Elsewhere they sign in with the other permissions of their role. |
+| `admin_access` | `this-computer` | Where administrators may manage users and block addresses: `anywhere`, `this-computer`, or `networks` (this computer and `admin_networks`). Elsewhere they sign in with the other permissions of their role. |
 | `admin_networks` | empty | e.g. `["192.168.1.0/24"]`. |
+
+Settings from before 0.15 are moved once: the interface listens on the network, addresses are blocked after 5 wrong sign-ins, and administration is limited to this computer (unless other networks were chosen).
+
+In the window the countries are chosen from a list. The page shows the type and date of the database, can look up an address with the current rule, and counts refused connections per country since the start.
 
 Blocked addresses and networks are kept in `web-blocked.json` next to the configuration. A change applies at once, also to a running web interface, without signing anybody out. Block an address in the Web tab (*Access*), with *Block* next to a failed sign-in (web: *Activity → Sign-ins*, window: *Activity → Sign-ins (web)*), on the web page *Access*, or on the command line:
 

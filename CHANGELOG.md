@@ -2,6 +2,29 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Settings in sections with a list beside the page; notifications and the web interface are sections there instead of top tabs.
+- Web interface page in parts: connection, sign-in, access, LDAP / AD, users, roles, audit log.
+- The web certificate is shown like in server software: issued to and by, names, validity, SHA-256, and buttons to export it (to trust it on other computers) or make a new one.
+- Countries for geoblocking are chosen from a list; the page shows the database type and date, looks up an address with the current rule, and counts refusals per country.
+- Settings → Drive health: what the drive reports, its source and a button to check now; drive health in the web overview and in every backup report (`{drive}`).
+- Notifications when a new version is available (`on_update`, once per version).
+
+### Changed
+
+- The web interface listens on the network over HTTPS by default; the choice between this computer and the network is gone (`web set --bind 127.0.0.1` still limits it). Addresses are blocked after 5 wrong sign-ins instead of 20, and administration is allowed from this computer only by default. Settings from 0.14 are moved once.
+- Explanations are behind info icons instead of between settings; text fields have room around the text; sections slide open smoothly instead of jumping.
+- LDAP: “Enable LDAP authentication”.
+
+### Fixed
+
+- Opening the Web page counted as an unapplied change and moved the page.
+- The web overview showed “reading…” for the drive health until the next reload.
+- Web audit log: space between the search field and the Filter button.
+
 ## [0.14.0] - 2026-11-14
 
 Contains the changes of 0.13.0, which was withdrawn.

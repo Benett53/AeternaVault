@@ -491,6 +491,21 @@ pub fn cached(path: &Path, repaint: impl FnOnce() + Send + 'static) -> Option<Re
     entry.reading.clone()
 }
 
+/// Like [`cached`], but waits up to `wait` for a first reading (for pages
+/// that are not drawn again by themselves, such as the web interface).
+pub fn cached_wait(path: &Path, wait: Duration) -> Option<Reading> {
+    let start = Instant::now();
+    loop {
+        if let Some(reading) = cached(path, || {}) {
+            return Some(reading);
+        }
+        if start.elapsed() >= wait {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Makes the next [`cached`] call read again (a "Check now" button).
 pub fn refresh(path: &Path) {
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());

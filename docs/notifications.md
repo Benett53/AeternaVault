@@ -42,9 +42,13 @@ With `--passphrase-stdin`, the SMTP password is read from standard input instead
 
 The overdue alert is checked in the background every 15 minutes (Linux: with every run of the systemd timer), so it also comes when backups do not run at all (computer off, drive not connected, job stuck). A weekly job counts as overdue after 8 days at the earliest. The alert is repeated once a day until a backup of the job succeeds.
 
+## New versions
+
+`on_update` (default on): a message once per version when the daily update check of the window finds a new release.
+
 ## Drive health
 
-With Settings → Features → Drive health on, AeternaVault reads the S.M.A.R.T. status of the drive the destination is on after every backup, and shows it in Settings and in the web overview. When the drive starts to warn (bad sectors, worn out, errors) or reports that it is failing, a message goes to the channels; it is sent again only when the state gets worse. The values come from UDisks on Linux (no root needed; `smartctl` as a fallback) and from the Storage module on Windows. Network shares are not checked: their drives are in the server.
+With Settings → Features → Drive health on, the page Settings → Drive health shows what the drive reports, and every backup report gets a line `Drive: Good · 38 °C · 9120 h` (placeholder `{drive}` in own texts). AeternaVault reads the S.M.A.R.T. status of the drive the destination is on after every backup, and shows it in Settings and in the web overview. When the drive starts to warn (bad sectors, worn out, errors) or reports that it is failing, a message goes to the channels; it is sent again only when the state gets worse. The values come from UDisks on Linux (no root needed; `smartctl` as a fallback) and from the Storage module on Windows. Network shares are not checked: their drives are in the server.
 
 ```sh
 aeternavault-cli drive-health          # the destination

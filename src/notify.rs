@@ -184,6 +184,8 @@ pub struct Notifications {
     /// Alert when an enabled job has had no successful backup for more than
     /// this many days (0 = off). Checked in the background.
     pub overdue_days: u32,
+    /// A message when a new version of AeternaVault is out (once per version).
+    pub on_update: bool,
     /// Templates; empty means the built-in text in the interface language.
     pub success_title: String,
     pub success_message: String,
@@ -204,6 +206,7 @@ impl Default for Notifications {
             low_space_percent: 10,
             low_space_gb: 0,
             overdue_days: 3,
+            on_update: true,
             success_title: String::new(),
             success_message: String::new(),
             problem_title: String::new(),
@@ -253,6 +256,9 @@ pub struct Facts {
     pub free: Option<u64>,
     pub free_percent: Option<f64>,
     pub message: String,
+    /// Health of the destination drive (`Good · 46 °C · 708 h`), when
+    /// drive health is switched on and known.
+    pub drive: String,
 }
 
 impl Facts {
@@ -287,6 +293,7 @@ impl Facts {
             .replace("{free}", &free)
             .replace("{free_percent}", &percent)
             .replace("{message}", &self.message)
+            .replace("{drive}", &self.drive)
     }
 }
 
@@ -328,6 +335,13 @@ pub fn facts_for_run(
             _ => None,
         },
         message: run_message(config, run, lang),
+        drive: if config.drive_health_on() {
+            crate::platform::drive_health::read(destination)
+                .map(|h| h.summary(lang == Lang::En))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        },
     }
 }
 
@@ -383,9 +397,19 @@ pub fn messages_for_run(
                 pick(&settings.problem_message, t.notify_problem_message),
             )
         };
+        let mut text = facts.render(body, lang);
+        // The drive's health goes with every report while it is watched.
+        if !facts.drive.is_empty() && !body.contains("{drive}") {
+            let label = if lang == Lang::En {
+                "Drive"
+            } else {
+                "Laufwerk"
+            };
+            text.push_str(&format!("\n{label}: {}", facts.drive));
+        }
         out.push(Message {
             title: facts.render(title, lang),
-            body: facts.render(body, lang),
+            body: text,
             severity: if problem {
                 Severity::Warning
             } else {
@@ -503,6 +527,59 @@ pub fn drive_health_message(
         severity: Severity::Warning,
         attachment: None,
     })
+}
+
+/// The message that a new version is out.
+pub fn update_message(version: &str, lang: Lang) -> Message {
+    let computer = platform::computer_name();
+    let current = crate::update::CURRENT_VERSION;
+    let (title, body) = if lang == Lang::En {
+        (
+            format!("AeternaVault {version} is available"),
+            format!(
+                "{computer}: AeternaVault {version} is available; {current} is installed.\nInstall it in Settings → Updates or with `aeternavault-cli update`. Settings and backups are kept.\nhttps://github.com/Benett53/AeternaVault/releases/tag/v{version}"
+            ),
+        )
+    } else {
+        (
+            format!("AeternaVault {version} ist verfügbar"),
+            format!(
+                "{computer}: AeternaVault {version} ist verfügbar; installiert ist {current}.\nInstallieren unter Einstellungen → Updates oder mit `aeternavault-cli update`. Einstellungen und Sicherungen bleiben erhalten.\nhttps://github.com/Benett53/AeternaVault/releases/tag/v{version}"
+            ),
+        )
+    };
+    Message {
+        title,
+        body,
+        severity: Severity::Info,
+        attachment: None,
+    }
+}
+
+/// Sends the message about a new version once per version (remembered in
+/// `state.json`). Blocking; call it from a background thread.
+pub fn update_available(config_file: &std::path::Path, config: &Config, version: &str) {
+    let settings = &config.notifications;
+    if !config.notifications_on() || !settings.active() || !settings.on_update {
+        return;
+    }
+    if crate::state::State::load(config_file)
+        .update_notified
+        .as_deref()
+        == Some(version)
+    {
+        return;
+    }
+    let message = update_message(version, Lang::resolve(config.language));
+    for channel in settings.channels.iter().filter(|c| c.enabled) {
+        match send(channel, &message) {
+            Ok(()) => tracing::info!("update notification sent via {}", channel.label()),
+            Err(err) => tracing::warn!("notification via {} failed: {err}", channel.label()),
+        }
+    }
+    crate::state::State::update(config_file, |s| {
+        s.update_notified = Some(version.to_string());
+    });
 }
 
 /// After a backup: reads the health of the destination drive and sends a
@@ -1239,6 +1316,26 @@ mod tests {
         // Threshold in GB.
         settings.low_space_gb = 50;
         assert!(low_space(&settings, &facts()));
+    }
+
+    #[test]
+    fn reports_name_the_drive_health_and_new_versions() {
+        let settings = Notifications::default();
+        let mut f = facts();
+        f.drive = "Good · 38 °C · 9120 h".into();
+        let sent = messages_for_run(&settings, &f, AutomaticOutcome::Complete, Lang::En);
+        assert!(
+            sent[0].body.ends_with("\nDrive: Good · 38 °C · 9120 h"),
+            "{}",
+            sent[0].body
+        );
+        let quiet = messages_for_run(&settings, &facts(), AutomaticOutcome::Complete, Lang::En);
+        assert!(!quiet[0].body.contains("Drive:"));
+
+        let update = update_message("9.9.9", Lang::De);
+        assert_eq!(update.title, "AeternaVault 9.9.9 ist verfügbar");
+        assert!(update.body.contains("aeternavault-cli update"));
+        assert!(Notifications::default().on_update);
     }
 
     #[test]
