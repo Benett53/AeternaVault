@@ -1228,14 +1228,15 @@ impl WebApp {
                             .join(" · ")
                     ),
                 )),
-                Some(Err(why)) => tiles.push_str(&tile(
+                // The reason is on the destination card below.
+                Some(Err(_)) => tiles.push_str(&tile(
                     "",
                     "–".into(),
-                    format!(
-                        "{}: {}",
-                        ctx.t("drive health", "Laufwerkszustand"),
-                        why.text(ctx.en)
-                    ),
+                    ctx.t(
+                        "drive health not reported",
+                        "Laufwerkszustand nicht gemeldet",
+                    )
+                    .into(),
                 )),
                 None => {}
             }
