@@ -5,9 +5,10 @@
 //! It is off unless switched on (Settings → Web, or `aeternavault-cli web`).
 //! It runs inside the window process (next to the automatic backups, which it
 //! starts through [`crate::automatic::service`]) or on its own with
-//! `aeternavault-cli web serve`. Only this computer can connect by default;
-//! from the network only over HTTPS. Users, roles and sign-in are in
-//! [`users`]; every sign-in and change is written to the [`crate::audit`] log.
+//! `aeternavault-cli web serve`. Plain HTTP on this computer and in the
+//! network; HTTPS from a reverse proxy in front or with own certificate
+//! files. Users, roles and sign-in are in [`users`]; every sign-in and
+//! change is written to the [`crate::audit`] log.
 //!
 //! Not offered here on purpose: restoring, deleting backups, changing folders
 //! or settings, and entering passphrases.
@@ -237,17 +238,11 @@ impl Network {
 
 /// Checks the settings before starting; the message says what to change.
 pub fn check_settings(settings: &WebSettings) -> Result<Vec<Network>, String> {
-    if settings.tls == TlsMode::Off && !settings.local_only() {
-        return Err(
-            "plain HTTP is only allowed when only this computer can connect; use HTTPS for the network"
-                .into(),
-        );
-    }
     if settings.tls == TlsMode::Files
         && (settings.cert_file.as_os_str().is_empty() || settings.key_file.as_os_str().is_empty())
     {
         return Err(
-            "choose the certificate and key files, or use a certificate made by AeternaVault"
+            "choose the certificate and key files, or switch HTTPS off and use a reverse proxy"
                 .into(),
         );
     }
@@ -271,6 +266,13 @@ pub fn check_settings(settings: &WebSettings) -> Result<Vec<Network>, String> {
         }
     }
     settings.geo.codes()?;
+    for proxy in settings
+        .trusted_proxies
+        .iter()
+        .filter(|n| !n.trim().is_empty())
+    {
+        proxy.parse::<Network>()?;
+    }
     settings
         .allowed_networks
         .iter()
@@ -309,7 +311,7 @@ impl WebServer {
         let ip = bind_address(settings)?;
         let listener = TcpListener::bind((ip, settings.port))
             .map_err(|e| format!("port {} on {ip} could not be opened: {e}", settings.port))?;
-        let tls = tls::server_config(&paths.config_file, settings)?;
+        let tls = tls::server_config(settings)?;
         let app = Arc::new(app::WebApp::new(
             paths.clone(),
             settings.clone(),
@@ -396,17 +398,18 @@ mod tests {
     }
 
     #[test]
-    fn plain_http_only_for_this_computer() {
-        let mut settings = WebSettings {
-            tls: TlsMode::Off,
-            bind: "127.0.0.1".into(),
-            ..WebSettings::default()
-        };
-        assert!(check_settings(&settings).is_ok());
-        settings.bind = "0.0.0.0".into();
-        assert!(check_settings(&settings).is_err());
-        settings.tls = TlsMode::Auto;
-        assert!(check_settings(&settings).is_ok());
-        assert!(settings.uses_tls());
+    fn plain_http_in_the_network_https_only_with_own_files() {
+        let mut settings = WebSettings::default();
+        assert_eq!(settings.bind, "0.0.0.0");
+        assert!(
+            check_settings(&settings).is_ok(),
+            "plain HTTP in the network"
+        );
+        assert!(!settings.uses_tls());
+        settings.tls = TlsMode::Files;
+        assert!(check_settings(&settings).is_err(), "files must be chosen");
+        settings.trusted_proxies = vec!["proxy.example".into()];
+        settings.tls = TlsMode::Off;
+        assert!(check_settings(&settings).is_err(), "proxies are addresses");
     }
 }

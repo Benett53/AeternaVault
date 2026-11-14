@@ -522,8 +522,6 @@ pub enum WebCommand {
     /// without the window or as a service. Automatic backups keep running
     /// through the window or the systemd timer as before.
     Serve,
-    /// Make a new certificate (after the computer's name or address changed).
-    RenewCertificate,
     /// Users of the web interface.
     #[command(subcommand)]
     User(WebUserCommand),
@@ -575,6 +573,10 @@ pub struct WebSetArgs {
     /// Networks that may connect, separated by commas (e.g. `192.168.1.0/24,10.0.0.5`); `any` for all.
     #[arg(long, value_name = "NETWORKS")]
     allow: Option<String>,
+    /// Reverse proxies in front, separated by commas; `none` to clear. Their
+    /// `X-Forwarded-For/-Proto/-Host` headers are trusted.
+    #[arg(long, value_name = "ADDRESSES")]
+    trusted_proxies: Option<String>,
     /// Sign out after this many minutes without activity.
     #[arg(long)]
     session_minutes: Option<u32>,
@@ -3159,10 +3161,7 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
             let view = WebStatus {
                 enabled: web.enabled,
                 url: web.url(),
-                certificate_sha256: web
-                    .uses_tls()
-                    .then(|| crate::web::tls::fingerprint(&config_file, &web))
-                    .flatten(),
+                certificate_sha256: crate::web::tls::fingerprint(&web),
                 users: store
                     .users
                     .iter()
@@ -3180,11 +3179,12 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
             ctx.print(&view, || {
                 let w = &view.settings;
                 let mut text = format!(
-                    "Web interface: {}\nAddress:       {}\nReachable:     {}\nHTTPS:         {:?}\n",
+                    "Web interface: {}\nThis computer: {}\nNetwork:       {}\nHTTPS:         {}\nProxies:       {}\n",
                     if view.enabled { "on" } else { "off" },
-                    view.url,
-                    if w.local_only() { "this computer only" } else { "from the network" },
-                    w.tls,
+                    w.local_url(),
+                    w.network_url().unwrap_or_else(|| "not reachable (bind 127.0.0.1)".into()),
+                    if w.uses_tls() { "own certificate files" } else { "off (use a reverse proxy for HTTPS)" },
+                    if w.trusted_proxies.is_empty() { "none".to_string() } else { w.trusted_proxies.join(", ") },
                 );
                 if let Some(fp) = &view.certificate_sha256 {
                     text += &format!("Certificate:   SHA-256 {fp}\n");
@@ -3309,6 +3309,13 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
                     .filter(|n| !n.is_empty())
                     .collect()
             };
+            if let Some(proxies) = &args.trusted_proxies {
+                web.trusted_proxies = if proxies.trim().eq_ignore_ascii_case("none") {
+                    Vec::new()
+                } else {
+                    list(proxies)
+                };
+            }
             if let Some(networks) = &args.admin_networks {
                 web.admin_networks = list(networks);
             }
@@ -3344,14 +3351,13 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
             let control = std::sync::Arc::new(crate::web::LocalRunner::new(ctx.paths.clone()));
             let mut settings = ctx.config.web.clone();
             settings.enabled = true;
-            let server = crate::web::WebServer::start(&ctx.paths, &settings, control)
+            let _server = crate::web::WebServer::start(&ctx.paths, &settings, control)
                 .map_err(|e| anyhow!(e))?;
-            println!("Web interface: {}", server.url);
-            if let Some(fp) = settings
-                .uses_tls()
-                .then(|| crate::web::tls::fingerprint(&config_file, &settings))
-                .flatten()
-            {
+            println!("Web interface: {}", settings.local_url());
+            if let Some(url) = settings.network_url() {
+                println!("In the network: {url}");
+            }
+            if let Some(fp) = crate::web::tls::fingerprint(&settings) {
                 println!("Certificate SHA-256: {fp}");
             }
             if UserStore::load(&config_file).users.is_empty() {
@@ -3360,20 +3366,6 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
             println!("Stop with Ctrl+C.");
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
-            }
-        }
-        WebCommand::RenewCertificate => {
-            crate::web::tls::renew(&config_file)?;
-            crate::web::tls::server_config(&config_file, &ctx.config.web)
-                .map_err(|e| anyhow!(e))?;
-            audit::record(&config_file, Record::local("web-certificate-renewed"));
-            match crate::web::tls::fingerprint(&config_file, &ctx.config.web) {
-                Some(fp) => {
-                    println!("New certificate, SHA-256 {fp}. Restart the web interface to use it.")
-                }
-                None => println!(
-                    "Removed. A new certificate is made when the web interface starts with HTTPS."
-                ),
             }
         }
         WebCommand::Audit { last, verify } => {

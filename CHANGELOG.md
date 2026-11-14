@@ -2,6 +2,17 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Web interface behind a reverse proxy: `trusted_proxies` (Settings → Web interface → Connection, `web set --trusted-proxies`). From these addresses `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` are used, so sign-ins, blocking and the audit log see the real device and session cookies are secure behind HTTPS.
+- The Connection page shows the address on this computer (`http://localhost:PORT`) and in the network (`http://IP:PORT`).
+
+### Changed
+
+- Like home-server software, the web interface speaks plain HTTP on this computer and in the network. HTTPS comes from a reverse proxy or from own certificate files (internal PKI, Let's Encrypt). AeternaVault makes no self-signed certificates any more; settings that used them switch to HTTP once. `web renew-certificate` is gone.
+
 ## [0.15.0] - 2026-11-14
 
 ### Added

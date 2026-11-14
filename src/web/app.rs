@@ -66,6 +66,8 @@ pub struct WebApp {
     networks: Vec<Network>,
     /// Networks administrators may work from (`admin_access = "networks"`).
     admin_networks: Vec<Network>,
+    /// Reverse proxies whose forwarded headers are trusted.
+    proxies: Vec<Network>,
     geo: Option<super::access::Geo>,
     blocked: Mutex<super::access::BlockCache>,
     /// Connections refused by country since the start.
@@ -121,6 +123,21 @@ impl Ctx<'_> {
     }
 }
 
+/// An address in `X-Forwarded-For`: `203.0.113.7`, `[2001:db8::1]:443`
+/// or `203.0.113.7:51234`.
+fn parse_forwarded_ip(text: &str) -> Option<IpAddr> {
+    if let Ok(ip) = text.parse() {
+        return Some(ip);
+    }
+    if let Ok(addr) = text.parse::<std::net::SocketAddr>() {
+        return Some(addr.ip());
+    }
+    text.trim_start_matches('[')
+        .split(']')
+        .next()
+        .and_then(|t| t.parse().ok())
+}
+
 fn csrf_field(session: &Session) -> String {
     format!(
         r#"<input type="hidden" name="csrf" value="{}">"#,
@@ -141,12 +158,19 @@ impl WebApp {
             .filter(|n| !n.trim().is_empty())
             .map(|n| n.parse())
             .collect::<Result<_, _>>()?;
+        let proxies = settings
+            .trusted_proxies
+            .iter()
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| n.parse())
+            .collect::<Result<_, _>>()?;
         let geo = super::access::Geo::open(&settings.geo)?;
         Ok(Self {
             paths,
             settings,
             networks,
             admin_networks,
+            proxies,
             geo,
             blocked: Mutex::new(super::access::BlockCache::default()),
             geo_refused: Mutex::new(std::collections::BTreeMap::new()),
@@ -286,7 +310,40 @@ impl WebApp {
         }
     }
 
+    /// Behind a trusted reverse proxy: the device it forwards for, whether
+    /// the browser used HTTPS, and the host name it asked for. Headers from
+    /// anyone else are ignored, so nobody can claim another address.
+    fn forwarded(&self, mut req: Request) -> Request {
+        let trusted = |ip: IpAddr| self.proxies.iter().any(|n| n.contains(ip));
+        if !trusted(req.peer) {
+            return req;
+        }
+        if let Some(chain) = req.header("x-forwarded-for") {
+            // The rightmost address no trusted proxy added is the client.
+            let client = chain
+                .rsplit(',')
+                .filter_map(|part| parse_forwarded_ip(part.trim()))
+                .find(|ip| !trusted(*ip));
+            if let Some(ip) = client {
+                req.peer = ip;
+            }
+        }
+        if req
+            .header("x-forwarded-proto")
+            .is_some_and(|p| p.trim().eq_ignore_ascii_case("https"))
+        {
+            req.tls = true;
+        }
+        if let Some(host) = req.header("x-forwarded-host").map(|h| h.trim().to_string())
+            && !host.is_empty()
+        {
+            req.headers.insert("host".into(), host);
+        }
+        req
+    }
+
     pub fn handle(&self, req: Request) -> Response {
+        let req = self.forwarded(req);
         if lock(&self.blocked).blocks(&self.paths.config_file, req.peer) {
             tracing::debug!("web interface: refused {} (blocked)", req.peer);
             return Response::text(403, "Forbidden");

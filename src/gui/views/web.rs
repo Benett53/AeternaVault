@@ -555,6 +555,16 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
     });
 }
 
+/// An address with a copy button.
+fn address_row(ui: &mut Ui, lang: Lang, label: &str, url: &str) {
+    widgets::field_row(ui, LABEL, label, "", |ui| {
+        ui.hyperlink_to(RichText::new(url).monospace(), url);
+        if widgets::button(ui, ButtonKind::Quiet, tr(lang, "Copy", "Kopieren"), true).clicked() {
+            ui.ctx().copy_text(url.to_string());
+        }
+    });
+}
+
 fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
     let lang = app.lang;
     widgets::card(ui, |ui| {
@@ -563,63 +573,70 @@ fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
             tr(lang, "Connection", "Verbindung"),
             tr(
                 lang,
-                "The web interface listens on every network of this computer, always over HTTPS. Other computers in the same network reach it directly; from outside it needs the port opened in the firewall or router.",
-                "Die Web-Oberfläche lauscht in allen Netzen dieses Computers, immer über HTTPS. Andere Computer im selben Netz erreichen sie direkt; von außen muss der Port in Firewall oder Router freigegeben sein.",
+                "Reachable on this computer as localhost and from other devices in the network by the computer's address and the port. For access from the internet or for HTTPS, put a reverse proxy in front (Caddy, nginx, Traefik, Nginx Proxy Manager) and open only the proxy to the outside.",
+                "Erreichbar auf diesem Computer als localhost und von anderen Geräten im Netz über die Adresse des Computers und den Port. Für Zugriff aus dem Internet oder HTTPS einen Reverse Proxy davorsetzen (Caddy, nginx, Traefik, Nginx Proxy Manager) und nur den Proxy nach außen freigeben.",
             ),
         );
         widgets::field_row(ui, LABEL, "Port", "", |ui| {
             widgets::number(ui, &mut web.port, 1..=65535);
         });
-        let url = web.url();
-        widgets::field_row(ui, LABEL, tr(lang, "Address", "Adresse"), "", |ui| {
-            ui.add(egui::Label::new(RichText::new(&url).monospace()).selectable(true));
-            if widgets::button(ui, ButtonKind::Quiet, tr(lang, "Copy", "Kopieren"), true).clicked()
-            {
-                ui.ctx().copy_text(url.clone());
-            }
-        });
-        if web.local_only() {
-            widgets::field_row(
+        address_row(
+            ui,
+            lang,
+            tr(lang, "This computer", "Dieser Computer"),
+            &web.local_url(),
+        );
+        match web.network_url() {
+            Some(url) => address_row(ui, lang, tr(lang, "Network", "Netzwerk"), &url),
+            None => widgets::field_row(
                 ui,
                 LABEL,
-                tr(lang, "Listening on", "Lauscht auf"),
+                tr(lang, "Network", "Netzwerk"),
                 tr(
                     lang,
-                    "Set on the command line with `web set --bind`. 0.0.0.0 listens on every network.",
-                    "Gesetzt auf der Kommandozeile mit `web set --bind`. 0.0.0.0 lauscht in allen Netzen.",
+                    "Limited with `aeternavault-cli web set --bind 127.0.0.1`; `--bind 0.0.0.0` opens it again.",
+                    "Begrenzt mit `aeternavault-cli web set --bind 127.0.0.1`; `--bind 0.0.0.0` öffnet es wieder.",
                 ),
                 |ui| {
-                    ui.label(tr(lang, "this computer only", "nur diesem Computer"));
+                    ui.label(tr(lang, "Not reachable", "Nicht erreichbar"));
                 },
-            );
+            ),
         }
+        widgets::field_row(
+            ui,
+            LABEL,
+            tr(lang, "Reverse proxy", "Reverse Proxy"),
+            tr(
+                lang,
+                "Addresses of reverse proxies in front. Their X-Forwarded-For, X-Forwarded-Proto and X-Forwarded-Host headers are trusted, so sign-ins, blocking and the audit log see the real device and cookies are marked secure behind HTTPS. Headers from any other address are ignored.",
+                "Adressen von Reverse Proxys davor. Deren Header X-Forwarded-For, X-Forwarded-Proto und X-Forwarded-Host werden übernommen, damit Anmeldungen, Sperren und Audit-Log das echte Gerät sehen und Cookies hinter HTTPS als sicher markiert werden. Von anderen Adressen werden diese Header ignoriert.",
+            ),
+            |ui| network_list(ui, lang, "proxies", &mut web.trusted_proxies),
+        );
     });
 }
 
-/// The certificate as server software shows it: what is in use, its
-/// details, and making, exporting or replacing it.
+/// HTTPS directly in AeternaVault, with certificate files of an own PKI or
+/// Let's Encrypt; otherwise plain HTTP (HTTPS from a reverse proxy).
 fn certificate_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
     let lang = app.lang;
     let p = *palette(ui);
-    let config_file = app.paths.config_file.clone();
     widgets::card(ui, |ui| {
         widgets::section_title_info(
             ui,
-            tr(lang, "Certificate", "Zertifikat"),
+            "HTTPS",
             tr(
                 lang,
-                "Self-signed: AeternaVault makes and signs the certificate itself. The connection is encrypted, but browsers do not know the issuer and warn until the certificate is trusted: export it and add it to the trusted certificates of the computers that connect, or compare the fingerprint once. Own certificate: PEM files from the company CA or from Let's Encrypt (certbot, win-acme); renewed files are used without a restart.",
-                "Selbstsigniert: AeternaVault erstellt und signiert das Zertifikat selbst. Die Verbindung ist verschlüsselt, aber Browser kennen den Aussteller nicht und warnen, bis dem Zertifikat vertraut wird: exportieren und auf den zugreifenden Computern als vertrauenswürdig hinzufügen, oder den Fingerabdruck einmal vergleichen. Eigenes Zertifikat: PEM-Dateien der Firmen-CA oder von Let's Encrypt (certbot, win-acme); erneuerte Dateien werden ohne Neustart verwendet.",
+                "Off: plain HTTP, as usual for home-server software; HTTPS comes from a reverse proxy. Own certificate: AeternaVault speaks HTTPS itself with PEM files from an internal PKI (company CA) or Let's Encrypt (certbot, win-acme). Renewed files are used without a restart.",
+                "Aus: einfaches HTTP, wie bei Homeserver-Software üblich; HTTPS kommt vom Reverse Proxy. Eigenes Zertifikat: AeternaVault spricht selbst HTTPS mit PEM-Dateien aus einer internen PKI (Firmen-CA) oder von Let's Encrypt (certbot, win-acme). Erneuerte Dateien werden ohne Neustart verwendet.",
             ),
         );
+        if matches!(web.tls, TlsMode::Auto | TlsMode::SelfSigned) {
+            web.tls = TlsMode::Off;
+        }
         let mut own = web.tls == TlsMode::Files;
-        widgets::field_row(ui, LABEL, tr(lang, "Type", "Art"), "", |ui| {
-            widgets::choice(
-                ui,
-                &mut own,
-                false,
-                tr(lang, "Self-signed", "Selbstsigniert"),
-            );
+        widgets::field_row(ui, LABEL, "HTTPS", "", |ui| {
+            widgets::choice(ui, &mut own, false, tr(lang, "Off", "Aus"));
             widgets::choice(
                 ui,
                 &mut own,
@@ -627,12 +644,7 @@ fn certificate_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                 tr(lang, "Own certificate", "Eigenes Zertifikat"),
             );
         });
-        if own && web.tls != TlsMode::Files {
-            web.tls = TlsMode::Files;
-        } else if !own && web.tls == TlsMode::Files {
-            // Auto: a self-signed certificate whenever others can connect.
-            web.tls = TlsMode::Auto;
-        }
+        web.tls = if own { TlsMode::Files } else { TlsMode::Off };
         widgets::reveal(ui, "web-cert-files", own, |ui| {
             let choose = tr(lang, "Choose…", "Auswählen…");
             widgets::field_row(
@@ -658,116 +670,76 @@ fn certificate_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
                     path_field(ui, &mut web.key_file, choose, ("PEM", &["pem", "key"]));
                 },
             );
-        });
-
-        ui.add_space(8.0);
-        match crate::web::tls::info(&config_file, web) {
-            None => fact(
-                ui,
-                tr(lang, "In use", "In Verwendung"),
-                tr(
-                    lang,
-                    "None yet: made when the web interface starts",
-                    "Noch keines: wird beim Start der Web-Oberfläche erstellt",
-                ),
-            ),
-            Some(Err(err)) => {
-                widgets::field_row(ui, LABEL, tr(lang, "In use", "In Verwendung"), "", |ui| {
-                    ui.add(egui::Label::new(RichText::new(err).color(p.error)).wrap());
-                });
-            }
-            Some(Ok(cert)) => {
-                fact(
-                    ui,
-                    tr(lang, "Issued to", "Ausgestellt für"),
-                    cert.subject.clone(),
-                );
-                fact(
-                    ui,
-                    tr(lang, "Issued by", "Ausgestellt von"),
-                    cert.issuer.clone(),
-                );
-                if !cert.names.is_empty() {
-                    fact(
+            match crate::web::tls::info(web) {
+                None => {}
+                Some(Err(err)) => {
+                    widgets::field_row(
                         ui,
-                        tr(lang, "Valid for", "Gültig für"),
-                        cert.names.join(", "),
+                        LABEL,
+                        tr(lang, "Certificate", "Zertifikat"),
+                        "",
+                        |ui| {
+                            ui.add(egui::Label::new(RichText::new(err).color(p.error)).wrap());
+                        },
                     );
                 }
-                let days = cert.days_left();
-                let until = cert
-                    .not_after
-                    .with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d")
-                    .to_string();
-                widgets::field_row(ui, LABEL, tr(lang, "Valid until", "Gültig bis"), "", |ui| {
-                    let color = if days < 0 {
-                        p.error
-                    } else if days < 21 {
-                        p.warning
-                    } else {
-                        p.text
-                    };
-                    let left = if lang == Lang::En {
-                        format!("{until} · {days} days left")
-                    } else {
-                        format!("{until} · noch {days} Tage")
-                    };
-                    ui.label(RichText::new(left).color(color));
-                });
-                widgets::field_row(ui, LABEL, "SHA-256", "", |ui| {
-                    ui.add(
-                        egui::Label::new(RichText::new(&cert.fingerprint).monospace().size(12.5))
+                Some(Ok(cert)) => {
+                    fact(
+                        ui,
+                        tr(lang, "Issued to", "Ausgestellt für"),
+                        cert.subject.clone(),
+                    );
+                    fact(
+                        ui,
+                        tr(lang, "Issued by", "Ausgestellt von"),
+                        cert.issuer.clone(),
+                    );
+                    if !cert.names.is_empty() {
+                        fact(
+                            ui,
+                            tr(lang, "Valid for", "Gültig für"),
+                            cert.names.join(", "),
+                        );
+                    }
+                    let days = cert.days_left();
+                    let until = cert
+                        .not_after
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    widgets::field_row(
+                        ui,
+                        LABEL,
+                        tr(lang, "Valid until", "Gültig bis"),
+                        "",
+                        |ui| {
+                            let color = if days < 0 {
+                                p.error
+                            } else if days < 21 {
+                                p.warning
+                            } else {
+                                p.text
+                            };
+                            let left = if lang == Lang::En {
+                                format!("{until} · {days} days left")
+                            } else {
+                                format!("{until} · noch {days} Tage")
+                            };
+                            ui.label(RichText::new(left).color(color));
+                        },
+                    );
+                    widgets::field_row(ui, LABEL, "SHA-256", "", |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&cert.fingerprint).monospace().size(12.5),
+                            )
                             .wrap()
                             .selectable(true),
-                    );
-                });
-                ui.add_space(8.0);
-                ui.horizontal_wrapped(|ui| {
-                    if widgets::button(ui, ButtonKind::Secondary, tr(lang, "Copy fingerprint", "Fingerabdruck kopieren"), true)
-                        .clicked()
-                    {
-                        ui.ctx().copy_text(cert.fingerprint.clone());
-                    }
-                    if widgets::button(ui, ButtonKind::Secondary, tr(lang, "Export certificate…", "Zertifikat exportieren…"), true)
-                        .on_hover_text(tr(
-                            lang,
-                            "Saves the certificate (without the key) to install it as trusted on other computers.",
-                            "Speichert das Zertifikat (ohne Schlüssel), um es auf anderen Computern als vertrauenswürdig einzutragen.",
-                        ))
-                        .clicked()
-                    {
-                        let (cert_file, _) = crate::web::tls::files(&config_file, web);
-                        if let Some(target) = rfd::FileDialog::new()
-                            .set_file_name("aeternavault.crt")
-                            .add_filter("Certificate", &["crt", "pem"])
-                            .save_file()
-                        {
-                            match std::fs::copy(&cert_file, &target) {
-                                Ok(_) => app.notify(
-                                    NoticeKind::Info,
-                                    format!("{} {}", tr(lang, "Saved:", "Gespeichert:"), target.display()),
-                                ),
-                                Err(err) => app.notify(NoticeKind::Error, err.to_string()),
-                            }
-                        }
-                    }
-                    if !own
-                        && widgets::button(ui, ButtonKind::Quiet, tr(lang, "Make a new one", "Neu erstellen"), true)
-                            .on_hover_text(tr(
-                                lang,
-                                "After the computer's name or address changed. Browsers warn again once.",
-                                "Nachdem sich Name oder Adresse des Computers geändert haben. Browser warnen dann einmal neu.",
-                            ))
-                            .clicked()
-                    {
-                        let _ = crate::web::tls::renew(&config_file);
-                        audit::record(&config_file, Record::local("web-certificate-renewed"));
-                        app.web.server = None;
-                    }
-                });
+                        );
+                    });
+                }
             }
-        }
+        });
     });
 }
 

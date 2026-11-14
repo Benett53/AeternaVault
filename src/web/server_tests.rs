@@ -360,16 +360,20 @@ fn one_time_codes_are_asked_after_the_password() {
 }
 
 #[test]
-fn https_with_a_certificate_made_here() {
+fn https_with_own_certificate_files() {
+    // As an internal PKI would issue it.
+    let certs = tempfile::tempdir().unwrap();
+    let (cert_file, key_file) = (certs.path().join("web.crt"), certs.path().join("web.key"));
+    super::tls::tests::test_certificate(&cert_file, &key_file);
     let settings = WebSettings {
-        tls: TlsMode::SelfSigned,
+        tls: TlsMode::Files,
+        cert_file: cert_file.clone(),
+        key_file,
         ..WebSettings::default()
     };
-    let (_tmp, paths, server, port) = setup(settings);
+    let (_tmp, _paths, server, port) = setup(settings);
     assert!(server.url.starts_with("https://"));
 
-    // Trust exactly the certificate the server made.
-    let (cert_file, _) = super::tls::files(&paths.config_file, &server.settings);
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls::pki_types::CertificateDer::pem_file_iter(&cert_file).unwrap() {
         roots.add(cert.unwrap()).unwrap();
@@ -395,7 +399,7 @@ fn https_with_a_certificate_made_here() {
     // Plain HTTP on the HTTPS port gets no page.
     let plain = send(port, "GET", "/login", None, "");
     assert_ne!(plain.status, 200);
-    assert!(super::tls::fingerprint(&paths.config_file, &server.settings).is_some());
+    assert!(super::tls::fingerprint(&server.settings).is_some());
 }
 
 /// A minimal SMTP receiver for one test: keeps the text of every mail.
@@ -624,6 +628,51 @@ mod from_elsewhere {
             .next()
             .unwrap()
             .to_string()
+    }
+
+    fn forwarded(from: &str, client: &str, body: &str) -> Request {
+        let mut r = request("POST", "/login", from, None, body);
+        r.headers
+            .insert("x-forwarded-for".into(), format!("198.51.100.1, {client}"));
+        r.headers.insert("x-forwarded-proto".into(), "https".into());
+        r
+    }
+
+    #[test]
+    fn behind_a_trusted_proxy_the_real_device_counts() {
+        let (_tmp, paths, app) = app(WebSettings {
+            auto_block_after: 2,
+            lockout_attempts: 0,
+            trusted_proxies: vec!["10.0.0.2".into()],
+            ..WebSettings::default()
+        });
+        let wrong = "user=admin&password=wrong";
+        for _ in 0..2 {
+            app.handle(forwarded("10.0.0.2", "203.0.113.9", wrong));
+        }
+        let list = Blocklist::load(&paths.config_file);
+        assert_eq!(list.entries.len(), 1);
+        assert_eq!(list.entries[0].address, "203.0.113.9", "not the proxy");
+
+        // Behind HTTPS at the proxy, the session cookie is a secure one.
+        let ok = app.handle(forwarded(
+            "10.0.0.2",
+            "203.0.113.20",
+            "user=admin&password=admin+password+1",
+        ));
+        let cookie = header(&ok, "set-cookie").unwrap();
+        assert!(
+            cookie.starts_with("__Host-av=") && cookie.contains("Secure"),
+            "{cookie}"
+        );
+
+        // Anyone else cannot claim another address.
+        for _ in 0..2 {
+            app.handle(forwarded("203.0.113.50", "192.0.2.77", wrong));
+        }
+        let list = Blocklist::load(&paths.config_file);
+        assert!(list.entries.iter().any(|e| e.address == "203.0.113.50"));
+        assert!(!list.entries.iter().any(|e| e.address == "192.0.2.77"));
     }
 
     #[test]

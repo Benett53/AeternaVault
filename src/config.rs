@@ -576,6 +576,10 @@ pub struct WebSettings {
     /// Only these networks may connect, e.g. `192.168.1.0/24`. Empty: any.
     /// The computer itself may always connect.
     pub allowed_networks: Vec<String>,
+    /// Reverse proxies in front (addresses or networks). Requests from them
+    /// name the real client and the scheme in `X-Forwarded-For`,
+    /// `X-Forwarded-Proto` and `X-Forwarded-Host`.
+    pub trusted_proxies: Vec<String>,
     /// Signed out after this many minutes without a request.
     pub session_minutes: u32,
     /// Read from older files: everybody needs a second factor. Moved to
@@ -617,7 +621,7 @@ fn web_settings_v0() -> u32 {
 }
 
 /// The current version of the web settings.
-pub const WEB_SETTINGS_VERSION: u32 = 1;
+pub const WEB_SETTINGS_VERSION: u32 = 2;
 
 impl Default for WebSettings {
     fn default() -> Self {
@@ -626,10 +630,11 @@ impl Default for WebSettings {
             enabled: false,
             bind: "0.0.0.0".into(),
             port: 8686,
-            tls: TlsMode::Auto,
+            tls: TlsMode::Off,
             cert_file: PathBuf::new(),
             key_file: PathBuf::new(),
             allowed_networks: Vec::new(),
+            trusted_proxies: Vec::new(),
             session_minutes: 30,
             require_two_factor: false,
             mfa: crate::web::access::MfaPolicy::Optional,
@@ -657,27 +662,43 @@ impl WebSettings {
             || self.bind.eq_ignore_ascii_case("localhost")
     }
 
-    /// Whether connections are encrypted (HTTPS).
+    /// Whether AeternaVault itself speaks HTTPS (with own certificate
+    /// files). Otherwise plain HTTP, with HTTPS from a reverse proxy.
     pub fn uses_tls(&self) -> bool {
-        match self.tls {
-            TlsMode::Auto => !self.local_only(),
-            TlsMode::SelfSigned | TlsMode::Files => true,
-            TlsMode::Off => false,
-        }
+        self.tls == TlsMode::Files
     }
 
-    pub fn url(&self) -> String {
-        let host = if self.local_only() || self.bind == "0.0.0.0" || self.bind == "::" {
-            if self.local_only() {
-                "127.0.0.1".to_string()
-            } else {
-                crate::platform::computer_name().to_lowercase()
-            }
+    fn scheme(&self) -> &'static str {
+        if self.uses_tls() { "https" } else { "http" }
+    }
+
+    /// The address on this computer itself.
+    pub fn local_url(&self) -> String {
+        format!("{}://localhost:{}/", self.scheme(), self.port)
+    }
+
+    /// The address other devices in the network use: the computer's
+    /// network address (`None` while only this computer can connect).
+    pub fn network_url(&self) -> Option<String> {
+        if self.local_only() {
+            return None;
+        }
+        let host = if self.bind == "0.0.0.0" || self.bind == "::" {
+            crate::web::tls::primary_address()
+                .map(|ip| match ip {
+                    std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+                    v4 => v4.to_string(),
+                })
+                .unwrap_or_else(|| crate::platform::computer_name().to_lowercase())
         } else {
             self.bind.clone()
         };
-        let scheme = if self.uses_tls() { "https" } else { "http" };
-        format!("{scheme}://{host}:{}/", self.port)
+        Some(format!("{}://{host}:{}/", self.scheme(), self.port))
+    }
+
+    /// The address to show: the network one when other devices can connect.
+    pub fn url(&self) -> String {
+        self.network_url().unwrap_or_else(|| self.local_url())
     }
 }
 
@@ -685,15 +706,17 @@ impl WebSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum TlsMode {
-    /// Plain HTTP for this computer only, a self-signed certificate otherwise.
+    /// Plain HTTP; HTTPS comes from a reverse proxy in front, if wanted.
     #[default]
-    Auto,
-    /// Always HTTPS with a certificate made by AeternaVault.
-    SelfSigned,
-    /// HTTPS with `cert_file` and `key_file`.
-    Files,
-    /// Plain HTTP; only allowed when only this computer can connect.
     Off,
+    /// HTTPS with `cert_file` and `key_file` (own PKI, Let's Encrypt).
+    Files,
+    /// Read from older files (self-signed certificates); becomes `off`.
+    #[value(skip)]
+    Auto,
+    /// Read from older files; becomes `off`.
+    #[value(skip)]
+    SelfSigned,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -836,14 +859,18 @@ impl Config {
             if web.local_only() {
                 web.bind = "0.0.0.0".into();
             }
-            if web.tls == TlsMode::Off {
-                web.tls = TlsMode::Auto;
-            }
             if web.auto_block_after == 20 {
                 web.auto_block_after = 5;
             }
             if web.admin_access == crate::web::access::AdminAccess::Anywhere {
                 web.admin_access = crate::web::access::AdminAccess::ThisComputer;
+            }
+        }
+        if self.web.version < 2 {
+            // 0.16: plain HTTP like home-server software; HTTPS from a
+            // reverse proxy or own certificate files. No self-signed ones.
+            if matches!(self.web.tls, TlsMode::Auto | TlsMode::SelfSigned) {
+                self.web.tls = TlsMode::Off;
             }
         }
         self.web.version = WEB_SETTINGS_VERSION;
@@ -1125,7 +1152,20 @@ mod tests {
 
         let fresh = WebSettings::default();
         assert_eq!(fresh.bind, "0.0.0.0");
-        assert!(fresh.uses_tls(), "HTTPS whenever the network can connect");
+        assert!(
+            !fresh.uses_tls(),
+            "plain HTTP; HTTPS from a proxy or own files"
+        );
+        assert_eq!(fresh.local_url(), "http://localhost:8686/");
+        assert!(fresh.network_url().unwrap().starts_with("http://"));
+
+        // Self-signed certificates of 0.14 and 0.15 are not used any more.
+        let mut v1: Config = toml::from_str("[web]\nversion = 1\ntls = \"self-signed\"\n").unwrap();
+        v1.normalize();
+        assert_eq!(v1.web.tls, TlsMode::Off);
+        let mut own: Config = toml::from_str("[web]\nversion = 1\ntls = \"files\"\n").unwrap();
+        own.normalize();
+        assert_eq!(own.web.tls, TlsMode::Files);
     }
 
     #[test]

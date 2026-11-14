@@ -103,6 +103,6 @@ Environment variables for tests and demos: `AETERNAVAULT_HOME` (all own files in
 | Encryption | RustCrypto: `argon2`, `chacha20poly1305`, `aes-gcm`, `hmac`, `sha2` |
 | Passphrase rating | `zxcvbn` |
 | Settings | `serde`, `toml`, `serde_json` |
-| Web interface | `rustls` (ring), `httparse`, `rcgen` (self-signed certificate), `sha1` (one-time codes) |
+| Web interface | `rustls` (ring, own certificate files), `httparse`, `x509-parser` (certificate details), `maxminddb` (countries), `sha1` (one-time codes) |
 | Logging | `tracing` |
 | Windows | `windows-sys`, `winreg` |

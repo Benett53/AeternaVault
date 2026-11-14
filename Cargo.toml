@@ -85,12 +85,11 @@ minisign-verify = "0.3.0"
 # Notifications by e-mail (SMTP with TLS).
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "rustls", "ring", "webpki-roots"] }
 
-# Web interface (off unless switched on): HTTPS with the rustls already used
-# for updates and e-mail, a small HTTP/1.1 parser, a self-signed certificate,
+# Web interface (off unless switched on): HTTPS with own certificate files through
+# the rustls already used for updates and e-mail, a small HTTP/1.1 parser,
 # and SHA-1 for one-time codes of authenticator apps (RFC 6238 requires it).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 httparse = "1.10"
-rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
 sha1 = "0.11"
 # Sign-in with LDAP / Active Directory for the web interface. rustls with the
 # certificates trusted by the system (company CAs from group policy included).
@@ -130,6 +129,8 @@ winresource = "0.1.31"
 # Interface tests; `wgpu` renders the README screenshots (see gui/tests.rs).
 egui_kittest = { version = "0.36.2", features = ["eframe", "wgpu"] }
 tempfile = "3.27.0"
+# Certificates for the HTTPS tests.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
 
 # Key derivation is deliberately expensive; keep it fast in debug builds and tests.
 [profile.dev.package.argon2]

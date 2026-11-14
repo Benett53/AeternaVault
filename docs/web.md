@@ -28,22 +28,41 @@ aeternavault-cli web serve
 
 ## Reaching it
 
-| Setting | Default | |
-|---|---|---|
-| `bind` | `0.0.0.0` | Every network of the computer. `127.0.0.1`: this computer only (command line only). |
-| `port` | `8686` | |
-| `tls` | `auto` | `auto`: a self-signed certificate (plain HTTP only when `bind` is `127.0.0.1`). `files`: HTTPS with `cert_file` and `key_file` (PEM). |
-| `allowed_networks` | empty (any) | e.g. `["192.168.1.0/24", "10.0.0.5"]`. The computer itself may always connect. |
+Switched on, the web interface is reachable like other home-server software:
 
-```sh
-aeternavault-cli web set --allow 192.168.1.0/24
-```
-
-Other computers in the same network reach the interface directly; from the internet it needs the port opened in the router or firewall. Connections from the network are always encrypted. Without own certificate files, AeternaVault makes and signs a certificate itself (in `web-tls` next to the configuration) for the computer name, `localhost` and the computer's address. The connection is encrypted, but browsers do not know the issuer and warn once. To avoid the warning, export the certificate (Settings → Web interface → Connection → *Export certificate*) and add it to the trusted certificates of the computers that connect, or compare the SHA-256 fingerprint the browser shows with the one shown there or in `aeternavault-cli web status`. The page also shows whom the certificate is for, who issued it and until when it is valid. After a change of the computer name or address: `aeternavault-cli web renew-certificate`.
-
-For a certificate without a warning, use own files (`tls = "files"`): from the company CA, or from Let's Encrypt when the computer has a public name, for example with certbot (Linux) or win-acme (Windows). AeternaVault reads the files again when they change (checked once a minute), so a renewal needs no restart. A renewal that cannot be read yet keeps the previous certificate in use. AeternaVault has no ACME client of its own: most servers it runs on are not reachable from the internet, which Let's Encrypt needs for its checks.
+- on the computer itself: `http://localhost:8686/`
+- from other devices in the network: `http://<address of the computer>:8686/` (shown in the Web interface settings and in `aeternavault-cli web status`)
 
 Windows asks once whether the program may accept connections from the network (firewall).
+
+| Setting | Default | |
+|---|---|---|
+| `bind` | `0.0.0.0` | Every network of the computer. `127.0.0.1`: this computer only. |
+| `port` | `8686` | |
+| `tls` | `off` | `off`: plain HTTP. `files`: HTTPS with `cert_file` and `key_file` (PEM). |
+| `allowed_networks` | empty (any) | e.g. `["192.168.1.0/24", "10.0.0.5"]`. The computer itself may always connect. |
+| `trusted_proxies` | empty | Reverse proxies in front, e.g. `["127.0.0.1", "10.0.0.2"]`. |
+
+```sh
+aeternavault-cli web set --port 8686 --allow 192.168.1.0/24
+```
+
+### HTTPS and access from the internet
+
+Plain HTTP is meant for the local network. For HTTPS, and always for access from the internet, use one of these:
+
+- **A reverse proxy** in front (Caddy, nginx, Traefik, Nginx Proxy Manager), which handles the certificate and forwards to `http://<computer>:8686`. Only the proxy is opened to the outside. Enter the proxy's address under *Reverse proxy* (`trusted_proxies`); AeternaVault then takes the client address from `X-Forwarded-For`, the scheme from `X-Forwarded-Proto` and the host name from `X-Forwarded-Host`, so sign-ins, blocking and the audit log name the real device and session cookies are marked secure. These headers are ignored from every other address. With the proxy on the same computer, `aeternavault-cli web set --bind 127.0.0.1 --trusted-proxies 127.0.0.1` keeps the interface itself off the network.
+- **Own certificate files** (`tls = "files"`), from an internal PKI (company CA) or from Let's Encrypt (certbot on Linux, win-acme on Windows). AeternaVault speaks HTTPS itself and reads the files again when they change (checked once a minute), so a renewal needs no restart. A renewal that cannot be read yet keeps the previous certificate in use. The settings show whom the certificate is for, who issued it, until when it is valid and its SHA-256 fingerprint.
+
+AeternaVault makes no certificates of its own.
+
+Example for Caddy:
+
+```text
+backup.example.com {
+    reverse_proxy 192.168.1.20:8686
+}
+```
 
 ## Access
 
@@ -56,7 +75,7 @@ Windows asks once whether the program may accept connections from the network (f
 | `admin_access` | `this-computer` | Where administrators may manage users and block addresses: `anywhere`, `this-computer`, or `networks` (this computer and `admin_networks`). Elsewhere they sign in with the other permissions of their role. |
 | `admin_networks` | empty | e.g. `["192.168.1.0/24"]`. |
 
-Settings from before 0.15 are moved once: the interface listens on the network, addresses are blocked after 5 wrong sign-ins, and administration is limited to this computer (unless other networks were chosen).
+Settings from 0.14 are moved once: the interface listens on the network, addresses are blocked after 5 wrong sign-ins, and administration is limited to this computer (unless other networks were chosen).
 
 In the window the countries are chosen from a list. The page shows the type and date of the database, can look up an address with the current rule, and counts refused connections per country since the start.
 
@@ -164,7 +183,7 @@ aeternavault-cli web audit --json
 
 ## Protection in detail
 
-- HTTPS with rustls (TLS 1.2 and 1.3) whenever other computers can connect.
+- HTTPS with rustls (TLS 1.2 and 1.3) with own certificate files, or from a reverse proxy.
 - Session cookies are `HttpOnly`, `SameSite=Strict`, and over HTTPS `Secure` with the `__Host-` prefix. Every form carries a token of the session; forms from other sites are refused.
 - While only this computer may connect, requests must name `localhost` or `127.0.0.1` as host, so a web page elsewhere cannot reach the interface through a made-up name.
 - Pages contain no scripts; a strict content security policy forbids scripts, frames and outside resources.

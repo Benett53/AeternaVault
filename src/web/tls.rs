@@ -1,8 +1,7 @@
-//! Certificates for HTTPS: an own certificate from files, or one made by
-//! AeternaVault on first use (self-signed, kept in `web-tls` next to the
-//! configuration). Browsers warn about a self-signed certificate once; its
-//! SHA-256 fingerprint, shown in the program, lets you check that the
-//! warning is about this computer.
+//! HTTPS with own certificate files (an internal PKI, Let's Encrypt). By
+//! default the web interface speaks plain HTTP like home-server software;
+//! HTTPS for the network or the internet comes from a reverse proxy in
+//! front or from these files. AeternaVault makes no certificates itself.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,43 +12,22 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::sign::CertifiedKey;
 use sha2::{Digest, Sha256};
 
-use crate::config::{TlsMode, WebSettings};
+use crate::config::WebSettings;
 
-pub const TLS_DIR: &str = "web-tls";
-
-pub fn dir(config_file: &Path) -> PathBuf {
-    config_file
-        .parent()
-        .map(|d| d.join(TLS_DIR))
-        .unwrap_or_else(|| PathBuf::from(TLS_DIR))
+/// The certificate and key files (`None` without HTTPS of its own).
+pub fn files(settings: &WebSettings) -> Option<(PathBuf, PathBuf)> {
+    settings
+        .uses_tls()
+        .then(|| (settings.cert_file.clone(), settings.key_file.clone()))
 }
 
-/// The certificate and key files in use for these settings.
-pub fn files(config_file: &Path, settings: &WebSettings) -> (PathBuf, PathBuf) {
-    match settings.tls {
-        TlsMode::Files => (settings.cert_file.clone(), settings.key_file.clone()),
-        _ => {
-            let dir = dir(config_file);
-            (dir.join("cert.pem"), dir.join("key.pem"))
-        }
-    }
-}
-
-/// The TLS setup for the server, or `None` for plain HTTP. Makes a
-/// self-signed certificate if one is needed and none exists yet. Own
-/// certificate files are read again when they change (a renewal by certbot,
-/// win-acme or a company CA needs no restart).
-pub fn server_config(
-    config_file: &Path,
-    settings: &WebSettings,
-) -> Result<Option<Arc<rustls::ServerConfig>>, String> {
-    if !settings.uses_tls() {
+/// The TLS setup for the server, or `None` for plain HTTP. The files are
+/// read again when they change (a renewal by certbot, win-acme or a company
+/// CA needs no restart).
+pub fn server_config(settings: &WebSettings) -> Result<Option<Arc<rustls::ServerConfig>>, String> {
+    let Some((cert_file, key_file)) = files(settings) else {
         return Ok(None);
-    }
-    let (cert_file, key_file) = files(config_file, settings);
-    if settings.tls != TlsMode::Files && !(cert_file.is_file() && key_file.is_file()) {
-        create_self_signed(&cert_file, &key_file)?;
-    }
+    };
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let resolver = Reloading::new(cert_file, key_file, provider.clone())?;
     let config = rustls::ServerConfig::builder_with_provider(provider)
@@ -186,10 +164,11 @@ fn common_name(name: &x509_parser::x509::X509Name<'_>) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
-/// Details of the certificate in use (`None`: none made yet).
-pub fn info(config_file: &Path, settings: &WebSettings) -> Option<Result<CertInfo, String>> {
-    let (cert_file, _) = files(config_file, settings);
-    if !cert_file.is_file() {
+/// Details of the certificate in use (`None`: no HTTPS of its own, or no
+/// file chosen yet).
+pub fn info(settings: &WebSettings) -> Option<Result<CertInfo, String>> {
+    let (cert_file, _) = files(settings)?;
+    if cert_file.as_os_str().is_empty() {
         return None;
     }
     Some(read_info(&cert_file))
@@ -247,67 +226,8 @@ fn read_info(cert_file: &Path) -> Result<CertInfo, String> {
 }
 
 /// SHA-256 of the certificate as browsers show it (`AB:CD:…`).
-pub fn fingerprint(config_file: &Path, settings: &WebSettings) -> Option<String> {
-    let (cert_file, _) = files(config_file, settings);
-    let cert = CertificateDer::pem_file_iter(&cert_file)
-        .ok()?
-        .next()?
-        .ok()?;
-    let digest = Sha256::digest(cert.as_ref());
-    Some(
-        digest
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect::<Vec<_>>()
-            .join(":"),
-    )
-}
-
-/// Removes the certificate made by AeternaVault; a new one is made at the
-/// next start (for a new computer name or address).
-pub fn renew(config_file: &Path) -> std::io::Result<()> {
-    let dir = dir(config_file);
-    for name in ["cert.pem", "key.pem"] {
-        match std::fs::remove_file(dir.join(name)) {
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn create_self_signed(cert_file: &Path, key_file: &Path) -> Result<(), String> {
-    let computer = crate::platform::computer_name().to_lowercase();
-    let mut names = vec![
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-        "::1".to_string(),
-    ];
-    if !computer.is_empty() {
-        names.push(computer.clone());
-    }
-    if let Some(ip) = primary_address() {
-        names.push(ip.to_string());
-    }
-    let mut params = rcgen::CertificateParams::new(names).map_err(|e| e.to_string())?;
-    params.distinguished_name.push(
-        rcgen::DnType::CommonName,
-        format!("AeternaVault {computer}"),
-    );
-    // Valid for ten years from the start of this year.
-    let year = chrono::Datelike::year(&chrono::Utc::now());
-    params.not_before = rcgen::date_time_ymd(year, 1, 1);
-    params.not_after = rcgen::date_time_ymd(year + 10, 1, 1);
-    let key = rcgen::KeyPair::generate().map_err(|e| e.to_string())?;
-    let cert = params.self_signed(&key).map_err(|e| e.to_string())?;
-    if let Some(parent) = cert_file.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    crate::platform::write_private_file(key_file, key.serialize_pem().as_bytes())
-        .map_err(|e| format!("{}: {e}", key_file.display()))?;
-    std::fs::write(cert_file, cert.pem()).map_err(|e| format!("{}: {e}", cert_file.display()))?;
-    tracing::info!("web interface: certificate made for {computer}");
-    Ok(())
+pub fn fingerprint(settings: &WebSettings) -> Option<String> {
+    info(settings)?.ok().map(|i| i.fingerprint)
 }
 
 /// The address other computers most likely use to reach this one: the one
@@ -320,14 +240,27 @@ pub fn primary_address() -> Option<std::net::IpAddr> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A certificate for `localhost`, as an own PKI would issue it.
+    pub fn test_certificate(cert_file: &Path, key_file: &Path) {
+        let mut params =
+            rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "AeternaVault test");
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        std::fs::write(key_file, key.serialize_pem()).unwrap();
+        std::fs::write(cert_file, cert.pem()).unwrap();
+    }
 
     #[test]
     fn renewed_certificate_files_are_used_without_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let (cert, key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
-        create_self_signed(&cert, &key).unwrap();
+        test_certificate(&cert, &key);
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let reloading = Reloading::new(cert.clone(), key.clone(), provider).unwrap();
         let first = reloading.current(Duration::ZERO).cert[0].clone();
@@ -344,13 +277,13 @@ mod tests {
 
         std::fs::remove_file(&cert).unwrap();
         std::fs::remove_file(&key).unwrap();
-        create_self_signed(&cert, &key).unwrap();
+        test_certificate(&cert, &key);
         let second = reloading.current(Duration::ZERO).cert[0].clone();
         assert_ne!(second, first, "the new certificate is served");
 
         let info = read_info(&cert).unwrap();
         assert!(info.self_signed);
-        assert!(info.subject.starts_with("AeternaVault"));
+        assert_eq!(info.subject, "AeternaVault test");
         assert!(info.names.iter().any(|n| n == "localhost"));
         assert!(info.names.iter().any(|n| n == "127.0.0.1"));
         assert!(info.days_left() > 300);
