@@ -2,6 +2,19 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+
+Findings of the audit of 15 November 2026 (v0.16.0):
+
+- Users: a sign-in that finished after an administrator locked the account could undo the lock. Changes to `web-users.json` are now saved as one transaction across processes (file lock, only the changed fields are applied), the sign-in checks the account again after the password, and an unreadable user file is never overwritten.
+- Sessions: a new password, second factor or e-mail address for codes, and locking an account now end the user's existing sessions, also when changed on the command line or in the window, without a restart.
+- Limited users could cancel a job of someone else, and saw the whole history and check results of other jobs and destinations. The running job, history entries, backups and checks now carry the job id and are filtered by it; *Activity* needs `view-activity`.
+- An update no longer moves an interface from HTTPS to plain HTTP or opens a local-only interface to the network: one that used the self-signed certificate is switched off with a notice. Plain HTTP is only accepted from this computer, private networks and trusted reverse proxies.
+- Slow requests could hold every connection: the 15-second limit now applies to the whole request, one address may hold at most 8 connections, and refused addresses are closed before anything is read.
+- `async-executor` and `clipboard-win` updated from yanked versions.
+
 ## [0.16.0] - 2026-11-14
 
 ### Added

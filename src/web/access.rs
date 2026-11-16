@@ -173,12 +173,18 @@ impl FailureLog {
     }
 }
 
-/// Whether an address is on this computer or in a private network, where a
-/// country means nothing.
+/// Whether an address is on this computer or in a private network (where a
+/// country means nothing, and plain HTTP may be used).
 pub fn is_local(ip: IpAddr) -> bool {
     match canonical(ip) {
         IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            let [a, b, ..] = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                // 100.64.0.0/10: carrier-grade NAT and VPNs such as Tailscale.
+                || (a == 100 && (64..128).contains(&b))
         }
         IpAddr::V6(v6) => {
             let first = v6.segments()[0];

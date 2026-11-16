@@ -338,11 +338,13 @@ impl WebServer {
         )?);
         let handling = app.clone();
         let handler: http::Handler = Arc::new(move |request| handling.handle(request));
+        let admitting = app.clone();
+        let admit: http::Admit = Arc::new(move |ip| admitting.admits(ip));
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
         let thread = std::thread::Builder::new()
             .name("aeterna-web-listen".into())
-            .spawn(move || http::serve(listener, tls, handler, stop_flag))
+            .spawn(move || http::serve(listener, tls, handler, admit, stop_flag))
             .map_err(|e| e.to_string())?;
         let url = settings.url();
         tracing::info!("web interface started: {url}");

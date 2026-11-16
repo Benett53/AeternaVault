@@ -433,16 +433,33 @@ fn status_card(app: &mut AeternaApp, ui: &mut Ui) {
         .changed()
         {
             app.config.web.enabled = on;
+            app.config.web.off_after_update = false;
             if let Some(d) = app.web.draft.as_mut() {
                 d.enabled = on;
+                d.off_after_update = false;
             }
             if let Some(b) = app.web.draft_base.as_mut() {
                 b.enabled = on;
+                b.off_after_update = false;
             }
             app.web.error = None;
             app.mark_dirty();
         }
         ui.add_space(6.0);
+        if app.config.web.off_after_update {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(tr(
+                        lang,
+                        "Switched off by the update: HTTPS with a self-signed certificate is no longer offered. Switch it on again for plain HTTP in the local network, or choose own certificate files under Connection first.",
+                        "Vom Update ausgeschaltet: HTTPS mit selbstsigniertem Zertifikat gibt es nicht mehr. Wieder einschalten für einfaches HTTP im lokalen Netz, oder vorher unter Verbindung eigene Zertifikatsdateien wählen.",
+                    ))
+                    .color(p.warning),
+                )
+                .wrap(),
+            );
+            ui.add_space(6.0);
+        }
         let users = UserStore::load(&app.paths.config_file);
         match (&app.web.server, &app.web.error) {
             (Some(server), _) => {
@@ -573,8 +590,8 @@ fn connection_card(app: &mut AeternaApp, ui: &mut Ui, web: &mut WebSettings) {
             tr(lang, "Connection", "Verbindung"),
             tr(
                 lang,
-                "Reachable on this computer as localhost and from other devices in the network by the computer's address and the port. For access from the internet or for HTTPS, put a reverse proxy in front (Caddy, nginx, Traefik, Nginx Proxy Manager) and open only the proxy to the outside.",
-                "Erreichbar auf diesem Computer als localhost und von anderen Geräten im Netz über die Adresse des Computers und den Port. Für Zugriff aus dem Internet oder HTTPS einen Reverse Proxy davorsetzen (Caddy, nginx, Traefik, Nginx Proxy Manager) und nur den Proxy nach außen freigeben.",
+                "Reachable on this computer as localhost and from other devices in the network by the computer's address and the port. Plain HTTP is accepted only from this computer, private networks (10.x, 172.16–31.x, 192.168.x, 100.64.x, fc00::/7) and the reverse proxies below. For access from the internet or for HTTPS, put a reverse proxy in front (Caddy, nginx, Traefik, Nginx Proxy Manager), or use own certificate files.",
+                "Erreichbar auf diesem Computer als localhost und von anderen Geräten im Netz über die Adresse des Computers und den Port. Einfaches HTTP wird nur von diesem Computer, aus privaten Netzen (10.x, 172.16–31.x, 192.168.x, 100.64.x, fc00::/7) und von den Reverse Proxys unten angenommen. Für Zugriff aus dem Internet oder HTTPS einen Reverse Proxy davorsetzen (Caddy, nginx, Traefik, Nginx Proxy Manager) oder eigene Zertifikatsdateien verwenden.",
             ),
         );
         widgets::field_row(ui, LABEL, "Port", "", |ui| {

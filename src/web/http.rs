@@ -8,12 +8,16 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 64 * 1024;
 const MAX_CONNECTIONS: usize = 32;
-const TIMEOUT: Duration = Duration::from_secs(15);
+/// Connections at the same time from one address.
+const MAX_PER_SOURCE: usize = 8;
+/// For the whole request (head and body together), however slowly it
+/// trickles in; and for writing the answer.
+const TIMEOUT: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 15 });
 
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -163,11 +167,43 @@ pub fn parse_query(text: &str) -> HashMap<String, String> {
 
 pub type Handler = Arc<dyn Fn(Request) -> Response + Send + Sync>;
 
+/// Decides right after a connection is accepted, before anything is read,
+/// whether an address may talk to the server at all.
+pub type Admit = Arc<dyn Fn(IpAddr) -> bool + Send + Sync>;
+
+/// A connection that gives up when the request is not complete by the
+/// deadline: every read may wait only for the time still left.
+struct Deadline {
+    tcp: TcpStream,
+    until: Instant,
+}
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.tcp.set_read_timeout(Some(left))?;
+        self.tcp.read(buf)
+    }
+}
+
+impl Write for Deadline {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.tcp.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.tcp.flush()
+    }
+}
+
 /// Accepts connections until `stop` is set. Blocks; run it on its own thread.
 pub fn serve(
     listener: TcpListener,
     tls: Option<Arc<rustls::ServerConfig>>,
     handler: Handler,
+    admit: Admit,
     stop: Arc<AtomicBool>,
 ) {
     if let Err(err) = listener.set_nonblocking(true) {
@@ -175,6 +211,7 @@ pub fn serve(
         return;
     }
     let open = Arc::new(AtomicUsize::new(0));
+    let per_source: Arc<std::sync::Mutex<HashMap<IpAddr, usize>>> = Arc::default();
     while !stop.load(Ordering::Relaxed) {
         let (stream, peer) = match listener.accept() {
             Ok(accepted) => accepted,
@@ -188,20 +225,50 @@ pub fn serve(
                 continue;
             }
         };
+        let source = canonical(peer.ip());
+        // Blocked, not allowed or (with plain HTTP) from outside the local
+        // network: closed before a single byte is read.
+        if !admit(source) {
+            drop(stream);
+            continue;
+        }
         if open.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
             drop(stream);
             continue;
         }
+        {
+            let mut sources = per_source.lock().unwrap_or_else(|e| e.into_inner());
+            let count = sources.entry(source).or_insert(0);
+            if *count >= MAX_PER_SOURCE {
+                drop(stream);
+                continue;
+            }
+            *count += 1;
+        }
         open.fetch_add(1, Ordering::Relaxed);
-        let (handler, tls, counter) = (handler.clone(), tls.clone(), open.clone());
+        let release = {
+            let (counter, sources) = (open.clone(), per_source.clone());
+            move || {
+                counter.fetch_sub(1, Ordering::Relaxed);
+                let mut sources = sources.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(count) = sources.get_mut(&source) {
+                    *count -= 1;
+                    if *count == 0 {
+                        sources.remove(&source);
+                    }
+                }
+            }
+        };
+        let (handler, tls) = (handler.clone(), tls.clone());
+        let release_on_error = release.clone();
         let spawned = std::thread::Builder::new()
             .name("aeterna-web".into())
             .spawn(move || {
                 connection(stream, peer, tls, &handler);
-                counter.fetch_sub(1, Ordering::Relaxed);
+                release();
             });
         if spawned.is_err() {
-            open.fetch_sub(1, Ordering::Relaxed);
+            release_on_error();
         }
     }
 }
@@ -217,6 +284,10 @@ fn connection(
     let _ = stream.set_write_timeout(Some(TIMEOUT));
     let _ = stream.set_nodelay(true);
     let peer = canonical(peer.ip());
+    let stream = Deadline {
+        tcp: stream,
+        until: Instant::now() + TIMEOUT,
+    };
     match tls {
         Some(config) => {
             let Ok(server) = rustls::ServerConnection::new(config) else {

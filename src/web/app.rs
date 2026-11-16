@@ -358,7 +358,48 @@ impl WebApp {
         req
     }
 
+    /// Whether `ip` may talk to the server at all, decided before the
+    /// request is read: not blocked, an allowed network and country, and
+    /// with plain HTTP only from this computer, the local network or a
+    /// trusted reverse proxy (whose clients are checked per request).
+    pub fn admits(&self, ip: IpAddr) -> bool {
+        let ip = super::http::canonical(ip);
+        if self.proxies.iter().any(|n| n.contains(ip)) {
+            return true;
+        }
+        if lock(&self.blocked).blocks(&self.paths.config_file, ip) {
+            return false;
+        }
+        if !self.direct_http_ok(ip) {
+            tracing::debug!(
+                "web interface: refused {ip} (plain HTTP from outside the local network)"
+            );
+            return false;
+        }
+        if let Some(geo) = &self.geo
+            && !geo.allows(ip)
+        {
+            let country = geo.country(ip).unwrap_or_else(|| "??".into());
+            tracing::info!("web interface: refused {ip} (country {country})");
+            *lock(&self.geo_refused).entry(country).or_default() += 1;
+            return false;
+        }
+        self.allowed(ip)
+    }
+
+    /// Plain HTTP carries passwords readable on the way: it is accepted
+    /// only from this computer, private networks and trusted proxies.
+    /// From the internet: a reverse proxy with HTTPS, or own certificate.
+    fn direct_http_ok(&self, peer: IpAddr) -> bool {
+        self.settings.uses_tls()
+            || super::access::is_local(peer)
+            || self.proxies.iter().any(|n| n.contains(peer))
+    }
+
     pub fn handle(&self, req: Request) -> Response {
+        if !self.direct_http_ok(super::http::canonical(req.peer)) {
+            return Response::text(403, "Forbidden");
+        }
         let req = self.forwarded(req);
         if lock(&self.blocked).blocks(&self.paths.config_file, req.peer) {
             tracing::debug!("web interface: refused {} (blocked)", req.peer);

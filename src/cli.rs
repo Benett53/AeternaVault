@@ -3180,7 +3180,13 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
                 let w = &view.settings;
                 let mut text = format!(
                     "Web interface: {}\nThis computer: {}\nNetwork:       {}\nHTTPS:         {}\nProxies:       {}\n",
-                    if view.enabled { "on" } else { "off" },
+                    if view.enabled {
+                        "on"
+                    } else if w.off_after_update {
+                        "off (switched off by the update: self-signed HTTPS is gone; `web on` for HTTP in the local network)"
+                    } else {
+                        "off"
+                    },
                     w.local_url(),
                     w.network_url().unwrap_or_else(|| "not reachable (bind 127.0.0.1)".into()),
                     if w.uses_tls() { "own certificate files" } else { "off (use a reverse proxy for HTTPS)" },
@@ -3237,6 +3243,7 @@ fn web_command(ctx: &mut Ctx, command: WebCommand) -> anyhow::Result<Outcome> {
                 crate::web::check_settings(&ctx.config.web).map_err(|e| anyhow!(e))?;
             }
             ctx.config.web.enabled = on;
+            ctx.config.web.off_after_update = false;
             if on {
                 ctx.config.features.web = Some(true);
             }

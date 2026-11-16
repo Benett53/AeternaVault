@@ -360,6 +360,69 @@ fn one_time_codes_are_asked_after_the_password() {
 }
 
 #[test]
+fn slow_requests_end_at_the_deadline_and_one_address_cannot_take_every_slot() {
+    use std::time::{Duration, Instant};
+    let (_tmp, _paths, _server, port) = setup(WebSettings::default());
+
+    // A request that trickles in one byte at a time is cut off at the
+    // deadline for the whole request (2 s in tests), not kept alive by
+    // each byte.
+    let mut slow = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    slow.write_all(b"GET /login HTTP/1.1\r\nHost: localhost\r\n")
+        .unwrap();
+    let start = Instant::now();
+    let mut closed = false;
+    while start.elapsed() < Duration::from_secs(6) {
+        std::thread::sleep(Duration::from_millis(300));
+        if slow.write_all(b"X").is_err() {
+            closed = true;
+            break;
+        }
+        slow.set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        let mut buf = [0u8; 64];
+        match slow.read(&mut buf) {
+            Ok(_) => {
+                closed = true;
+                break;
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => {
+                closed = true;
+                break;
+            }
+        }
+    }
+    assert!(closed, "still open after {:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        start.elapsed()
+    );
+
+    // Eight idle connections from one address: a ninth is not served, but
+    // the slots are free again after the deadline.
+    let idle: Vec<TcpStream> = (0..8)
+        .map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap())
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let mut ninth = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    ninth
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let _ = ninth
+        .write_all(raw_request("GET", "/login", &format!("localhost:{port}"), None, "").as_bytes());
+    let mut out = Vec::new();
+    let _ = ninth.read_to_end(&mut out);
+    assert!(out.is_empty(), "the ninth connection is closed unanswered");
+    std::thread::sleep(Duration::from_millis(2500));
+    drop(idle);
+    assert_eq!(send(port, "GET", "/login", None, "").status, 200);
+}
+
+#[test]
 fn https_with_own_certificate_files() {
     // As an internal PKI would issue it.
     let certs = tempfile::tempdir().unwrap();
@@ -581,8 +644,15 @@ mod from_elsewhere {
         let mut store = UserStore::default();
         store.add("admin", "admin", "admin password 1").unwrap();
         store.save(&paths.config_file).unwrap();
+        // Requests come from public addresses here: as behind HTTPS (the
+        // certificate itself is not used by the request handler).
         let settings = WebSettings {
             bind: "0.0.0.0".into(),
+            tls: if settings.tls == TlsMode::Off && !settings.trusted_proxies.is_empty() {
+                TlsMode::Off
+            } else {
+                TlsMode::Files
+            },
             ..settings
         };
         let app = WebApp::new(
@@ -889,10 +959,10 @@ mod from_elsewhere {
 
         // Anyone else cannot claim another address.
         for _ in 0..2 {
-            app.handle(forwarded("203.0.113.50", "192.0.2.77", wrong));
+            app.handle(forwarded("192.168.5.5", "192.0.2.77", wrong));
         }
         let list = Blocklist::load(&paths.config_file);
-        assert!(list.entries.iter().any(|e| e.address == "203.0.113.50"));
+        assert!(list.entries.iter().any(|e| e.address == "192.168.5.5"));
         assert!(!list.entries.iter().any(|e| e.address == "192.0.2.77"));
     }
 
@@ -965,6 +1035,39 @@ mod from_elsewhere {
         store.save(&paths.config_file).unwrap();
         let after = app.handle(request("GET", "/", here, Some(&fresh), ""));
         assert_eq!(header(&after, "location"), Some("/login"));
+    }
+
+    #[test]
+    fn plain_http_only_from_the_local_network() {
+        let (_tmp, _paths, app) = app_with(
+            WebSettings {
+                tls: TlsMode::Off,
+                trusted_proxies: vec!["10.0.0.2".into()],
+                ..WebSettings::default()
+            },
+            None,
+        );
+        let page = |from: &str| app.handle(request("GET", "/login", from, None, "")).status;
+        assert_eq!(page("192.168.1.5"), 200);
+        assert_eq!(page("10.1.2.3"), 200);
+        assert_eq!(page("100.101.1.1"), 200, "VPNs such as Tailscale");
+        assert_eq!(page("fd00::5"), 200);
+        assert_eq!(page("127.0.0.1"), 200);
+        assert_eq!(
+            page("203.0.113.7"),
+            403,
+            "the internet only through a proxy"
+        );
+        assert!(
+            !app.admits("203.0.113.7".parse().unwrap()),
+            "refused before reading"
+        );
+        assert!(app.admits("192.168.1.5".parse().unwrap()));
+        // Through the trusted proxy, an internet client is fine.
+        let mut r = request("GET", "/login", "10.0.0.2", None, "");
+        r.headers
+            .insert("x-forwarded-for".into(), "203.0.113.7".into());
+        assert_eq!(app.handle(r).status, 200);
     }
 
     #[test]

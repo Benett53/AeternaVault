@@ -49,7 +49,7 @@ aeternavault-cli web set --port 8686 --allow 192.168.1.0/24
 
 ### HTTPS and access from the internet
 
-Plain HTTP is meant for the local network. For HTTPS, and always for access from the internet, use one of these:
+Plain HTTP is meant for the local network and is only accepted from this computer, private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 for VPNs such as Tailscale, fc00::/7, link-local) and the trusted reverse proxies. Connections from other addresses are closed before anything is read. For HTTPS, and always for access from the internet, use one of these:
 
 - **A reverse proxy** in front (Caddy, nginx, Traefik, Nginx Proxy Manager), which handles the certificate and forwards to `http://<computer>:8686`. Only the proxy is opened to the outside. Enter the proxy's address under *Reverse proxy* (`trusted_proxies`); AeternaVault then takes the client address from `X-Forwarded-For`, the scheme from `X-Forwarded-Proto` and the host name from `X-Forwarded-Host`, so sign-ins, blocking and the audit log name the real device and session cookies are marked secure. These headers are ignored from every other address. With the proxy on the same computer, `aeternavault-cli web set --bind 127.0.0.1 --trusted-proxies 127.0.0.1` keeps the interface itself off the network.
 - **Own certificate files** (`tls = "files"`), from an internal PKI (company CA) or from Let's Encrypt (certbot on Linux, win-acme on Windows). AeternaVault speaks HTTPS itself and reads the files again when they change (checked once a minute), so a renewal needs no restart. A renewal that cannot be read yet keeps the previous certificate in use. The settings show whom the certificate is for, who issued it, until when it is valid and its SHA-256 fingerprint.
@@ -75,7 +75,7 @@ backup.example.com {
 | `admin_access` | `this-computer` | Where administrators may manage users and block addresses: `anywhere`, `this-computer`, or `networks` (this computer and `admin_networks`). Elsewhere they sign in with the other permissions of their role. |
 | `admin_networks` | empty | e.g. `["192.168.1.0/24"]`. |
 
-Settings from 0.14 are moved once: the interface listens on the network, addresses are blocked after 5 wrong sign-ins, and administration is limited to this computer (unless other networks were chosen).
+Settings from 0.14 are moved once: addresses are blocked after 5 wrong sign-ins, and administration is limited to this computer (unless other networks were chosen). An update never makes an interface that listened only on this computer reachable from the network. An interface that used HTTPS with the self-signed certificate of 0.14 or 0.15 is switched off by the update instead of being moved to plain HTTP; the Web interface settings and `web status` say so, and switching it on again (or choosing own certificate files first) is up to you.
 
 In the window the countries are chosen from a list. The page shows the type and date of the database, can look up an address with the current rule, and counts refused connections per country since the start.
 
@@ -106,7 +106,9 @@ aeternavault-cli web role list
 aeternavault-cli web user role anna auditor
 ```
 
-A user can be limited to some jobs; they then see only those jobs and their destinations.
+A user can be limited to some jobs; they then see and run only those jobs, see only their destinations and only the backups, history entries and check results of those jobs, and can cancel only a running job of their own. Backups made before 0.17 do not name their job and are not shown to limited users. *Activity* needs the permission `view-activity` (or shows only the sign-ins with `view-sign-ins`).
+
+Changes to users are saved as one transaction across all processes: what one change did (a sign-in, a lock set by an administrator, a new password from the command line) never undoes another made at the same time. A new password, a changed second factor or e-mail address for codes, and locking an account end that user's sessions at their next request, also when the change came from the command line or the window; the session in which a user changed their own password or second factor continues.
 
 Users are kept in `web-users.json` next to the configuration (readable by its owner only on Linux), with passwords as Argon2id hashes. The first administrator can only be created on the computer itself (window or command line), never over the network. A user added by an administrator over the web, or given a new password, has to choose a new password after signing in. The last administrator cannot be removed, locked or demoted.
 
@@ -187,5 +189,5 @@ aeternavault-cli web audit --json
 - Session cookies are `HttpOnly`, `SameSite=Strict`, and over HTTPS `Secure` with the `__Host-` prefix. Every form carries a token of the session; forms from other sites are refused.
 - While only this computer may connect, requests must name `localhost` or `127.0.0.1` as host, so a web page elsewhere cannot reach the interface through a made-up name.
 - Pages contain no scripts; a strict content security policy forbids scripts, frames and outside resources.
-- One request per connection, at most 32 connections, 16 KiB of headers and 64 KiB of form data, 15 seconds per request.
+- One request per connection, at most 32 connections and 8 from one address, 16 KiB of headers and 64 KiB of form data, 15 seconds for the whole request however slowly it arrives. Blocked addresses, other countries and networks, and plain HTTP from outside the local network are refused right after the connection is accepted.
 - Unknown user names take as long to refuse as wrong passwords.

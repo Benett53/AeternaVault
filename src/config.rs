@@ -576,6 +576,10 @@ pub struct WebSettings {
     /// Only these networks may connect, e.g. `192.168.1.0/24`. Empty: any.
     /// The computer itself may always connect.
     pub allowed_networks: Vec<String>,
+    /// Switched off by an update because its HTTPS with a self-signed
+    /// certificate is no longer offered; shown until it is switched on again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub off_after_update: bool,
     /// Reverse proxies in front (addresses or networks). Requests from them
     /// name the real client and the scheme in `X-Forwarded-For`,
     /// `X-Forwarded-Proto` and `X-Forwarded-Host`.
@@ -635,6 +639,7 @@ impl Default for WebSettings {
             key_file: PathBuf::new(),
             allowed_networks: Vec::new(),
             trusted_proxies: Vec::new(),
+            off_after_update: false,
             session_minutes: 30,
             require_two_factor: false,
             mfa: crate::web::access::MfaPolicy::Optional,
@@ -855,14 +860,10 @@ impl Config {
             self.web.mfa = crate::web::access::MfaPolicy::Everyone;
         }
         if self.web.version < 1 {
-            // 0.14: the web interface listens on the network (HTTPS) like
-            // other server software; reaching it from outside still needs a
-            // port opened in the firewall or router. Administration only
-            // from this computer, addresses blocked after 5 wrong sign-ins.
+            // 0.15: administration only from this computer, addresses
+            // blocked after 5 wrong sign-ins. Where it listens stays as it
+            // was: an update never opens the interface to the network.
             let web = &mut self.web;
-            if web.local_only() {
-                web.bind = "0.0.0.0".into();
-            }
             if web.auto_block_after == 20 {
                 web.auto_block_after = 5;
             }
@@ -871,10 +872,19 @@ impl Config {
             }
         }
         if self.web.version < 2 {
-            // 0.16: plain HTTP like home-server software; HTTPS from a
-            // reverse proxy or own certificate files. No self-signed ones.
-            if matches!(self.web.tls, TlsMode::Auto | TlsMode::SelfSigned) {
-                self.web.tls = TlsMode::Off;
+            // 0.16: plain HTTP in the local network like home-server
+            // software; HTTPS from a reverse proxy or own certificate files,
+            // no self-signed ones. An interface that used one for HTTPS is
+            // switched off rather than silently moved to HTTP; switching it
+            // on again is a decision of its own.
+            let web = &mut self.web;
+            if matches!(web.tls, TlsMode::Auto | TlsMode::SelfSigned) {
+                let had_https = !web.local_only() || web.tls == TlsMode::SelfSigned;
+                web.tls = TlsMode::Off;
+                if had_https && web.enabled {
+                    web.enabled = false;
+                    web.off_after_update = true;
+                }
             }
         }
         self.web.version = WEB_SETTINGS_VERSION;
@@ -1141,7 +1151,10 @@ mod tests {
         let mut config: Config = toml::from_str(old).unwrap();
         assert_eq!(config.web.version, 0);
         config.normalize();
-        assert_eq!(config.web.bind, "0.0.0.0");
+        assert_eq!(
+            config.web.bind, "127.0.0.1",
+            "an update never opens it to the network"
+        );
         assert_eq!(config.web.auto_block_after, 5);
         assert_eq!(config.web.admin_access, AdminAccess::ThisComputer);
         assert_eq!(config.web.mfa, crate::web::access::MfaPolicy::Everyone);
@@ -1164,10 +1177,28 @@ mod tests {
         assert_eq!(fresh.local_url(), "http://localhost:8686/");
         assert!(fresh.network_url().unwrap().starts_with("http://"));
 
-        // Self-signed certificates of 0.14 and 0.15 are not used any more.
-        let mut v1: Config = toml::from_str("[web]\nversion = 1\ntls = \"self-signed\"\n").unwrap();
+        // Self-signed certificates of 0.14 and 0.15 are not used any more:
+        // an interface that used one is switched off, not moved to HTTP.
+        let mut v1: Config =
+            toml::from_str("[web]\nversion = 1\nenabled = true\ntls = \"self-signed\"\n").unwrap();
         v1.normalize();
         assert_eq!(v1.web.tls, TlsMode::Off);
+        assert!(!v1.web.enabled && v1.web.off_after_update);
+        let mut auto: Config = toml::from_str(
+            "[web]\nversion = 1\nenabled = true\nbind = \"0.0.0.0\"\ntls = \"auto\"\n",
+        )
+        .unwrap();
+        auto.normalize();
+        assert!(!auto.web.enabled, "auto meant HTTPS in the network");
+        let mut local: Config = toml::from_str(
+            "[web]\nversion = 1\nenabled = true\nbind = \"127.0.0.1\"\ntls = \"auto\"\n",
+        )
+        .unwrap();
+        local.normalize();
+        assert!(
+            local.web.enabled,
+            "plain HTTP on this computer stays as it was"
+        );
         let mut own: Config = toml::from_str("[web]\nversion = 1\ntls = \"files\"\n").unwrap();
         own.normalize();
         assert_eq!(own.web.tls, TlsMode::Files);
