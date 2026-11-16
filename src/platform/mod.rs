@@ -166,6 +166,60 @@ pub fn unprotect_for_user(data: &[u8]) -> std::io::Result<Vec<u8>> {
     }
 }
 
+/// An exclusive lock on a file, held until dropped; other processes and
+/// threads wait for it. Linux: `flock`; Windows: the file opened without
+/// sharing (others retry until it is closed).
+pub struct FileLock {
+    _file: std::fs::File,
+}
+
+impl FileLock {
+    pub fn acquire(path: &Path) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(path)?;
+            // SAFETY: flock on a descriptor this function owns; released
+            // when the file is closed.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Self { _file: file })
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .share_mode(0)
+                    .open(path)
+                {
+                    Ok(file) => return Ok(Self { _file: file }),
+                    // ERROR_SHARING_VIOLATION: someone else holds it.
+                    Err(err)
+                        if err.raw_os_error() == Some(32)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+    }
+}
+
 /// Writes a file that only the current user may read.
 ///
 /// Linux: always a new file with mode 0600 under an unpredictable name, which

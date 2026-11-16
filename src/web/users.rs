@@ -196,7 +196,19 @@ pub struct User {
     pub created: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sign_in: Option<DateTime<Utc>>,
+    /// Raised when the password, the second factor or the lock changes;
+    /// sessions made before end at their next request (also when the
+    /// change came from another process, e.g. the command line).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub session_version: u64,
 }
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+/// Fields whose change ends the user's sessions.
+const SESSION_FIELDS: [&str; 5] = ["password", "totp", "disabled", "email_codes", "email"];
 
 /// The second step of a sign-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,12 +244,116 @@ impl User {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserStore {
     pub users: Vec<User>,
     /// Roles defined here, besides viewer, operator and administrator.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<RoleDef>,
+    /// The file as it was loaded: saving applies only what changed since,
+    /// on top of what is in the file then (see [`UserStore::save`]).
+    #[serde(skip)]
+    loaded: Option<std::sync::Arc<serde_json::Value>>,
+}
+
+impl PartialEq for UserStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.users == other.users && self.roles == other.roles
+    }
+}
+
+impl Eq for UserStore {}
+
+fn lock_file(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+/// Applies to `current` what changed from `base` to `mine`: per user and
+/// per field, per role as a whole. Changes made by others in between (a
+/// lock set by an administrator while a sign-in was checked) are kept;
+/// users removed by others are not brought back.
+fn merge(base: &serde_json::Value, mine: &serde_json::Value, current: &mut serde_json::Value) {
+    use serde_json::Value;
+    fn by_name(list: &Value) -> Vec<(String, Value)> {
+        list.as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|v| {
+                        let name = v["name"].as_str().unwrap_or_default().to_lowercase();
+                        (name, v.clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    for (key, per_field) in [("users", true), ("roles", false)] {
+        let base_list = by_name(&base[key]);
+        let mine_list = by_name(&mine[key]);
+        let find = |list: &[(String, Value)], name: &str| {
+            list.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
+        };
+        let mut current_list = by_name(&current[key]);
+        // Removed here.
+        for (name, _) in &base_list {
+            if find(&mine_list, name).is_none() {
+                current_list.retain(|(n, _)| n != name);
+            }
+        }
+        for (name, mine_v) in &mine_list {
+            match find(&base_list, name) {
+                // Added here (kept if someone else added it meanwhile).
+                None => {
+                    if find(&current_list, name).is_none() {
+                        current_list.push((name.clone(), mine_v.clone()));
+                    }
+                }
+                Some(base_v) if base_v != *mine_v => {
+                    let Some(slot) = current_list.iter_mut().find(|(n, _)| n == name) else {
+                        continue; // removed by someone else
+                    };
+                    if !per_field {
+                        slot.1 = mine_v.clone();
+                        continue;
+                    }
+                    let (Some(b), Some(m)) = (base_v.as_object(), mine_v.as_object()) else {
+                        slot.1 = mine_v.clone();
+                        continue;
+                    };
+                    let target = slot.1.as_object_mut().expect("users are objects");
+                    let mut ends_sessions = false;
+                    let keys: std::collections::BTreeSet<&String> =
+                        b.keys().chain(m.keys()).collect();
+                    for k in keys {
+                        if b.get(k) != m.get(k) {
+                            match m.get(k) {
+                                Some(v) => {
+                                    target.insert(k.clone(), v.clone());
+                                }
+                                None => {
+                                    target.remove(k);
+                                }
+                            }
+                            ends_sessions |= SESSION_FIELDS.contains(&k.as_str());
+                        }
+                    }
+                    if ends_sessions {
+                        let v = target
+                            .get("session_version")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        target.insert("session_version".into(), Value::from(v + 1));
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        current[key] = Value::Array(current_list.into_iter().map(|(_, v)| v).collect());
+    }
 }
 
 pub fn file(config_file: &Path) -> PathBuf {
@@ -248,19 +364,56 @@ pub fn file(config_file: &Path) -> PathBuf {
 }
 
 impl UserStore {
-    pub fn load(config_file: &Path) -> Self {
-        std::fs::read_to_string(file(config_file))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+    /// The file as it is (`None`: there is none yet). An unreadable file
+    /// is an error, never an empty list that a save would then write.
+    fn read(path: &Path) -> std::io::Result<Option<serde_json::Value>> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).map(Some).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{} is not readable: {e}", path.display()),
+                )
+            }),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
+    pub fn try_load(config_file: &Path) -> std::io::Result<Self> {
+        let value = Self::read(&file(config_file))?
+            .unwrap_or_else(|| serde_json::to_value(Self::default()).expect("serializable"));
+        let mut store: Self = serde_json::from_value(value.clone())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.loaded = Some(std::sync::Arc::new(value));
+        Ok(store)
+    }
+
+    /// The users and roles; empty (and not saveable over the file) if the
+    /// file cannot be read.
+    pub fn load(config_file: &Path) -> Self {
+        Self::try_load(config_file).unwrap_or_else(|err| {
+            tracing::error!("web users: {err}");
+            Self::default()
+        })
+    }
+
+    /// Saves as one transaction with every other process: under a lock,
+    /// what changed since loading is applied to the file as it is now.
+    /// Changing the password, second factor or lock of a user ends their
+    /// sessions ([`User::session_version`]).
     pub fn save(&self, config_file: &Path) -> std::io::Result<()> {
-        let text = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
         let path = file(config_file);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let _lock = crate::platform::FileLock::acquire(&lock_file(&path))?;
+        let current = Self::read(&path)?;
+        let mine = serde_json::to_value(self).map_err(std::io::Error::other)?;
+        let result = match (&self.loaded, current) {
+            (Some(base), Some(mut current)) => {
+                merge(base, &mine, &mut current);
+                current
+            }
+            (_, _) => mine,
+        };
+        let text = serde_json::to_vec_pretty(&result).map_err(std::io::Error::other)?;
         crate::platform::write_private_file(&path, &text)
     }
 
@@ -388,6 +541,7 @@ impl UserStore {
             must_change_password: false,
             created: Utc::now(),
             last_sign_in: None,
+            session_version: 0,
         });
         Ok(())
     }
@@ -699,6 +853,8 @@ pub struct Session {
     pub last_seen: Instant,
     /// Signed in with password but the one-time code is still missing.
     pub pending_code: bool,
+    /// [`User::session_version`] when it was made; another one ends it.
+    pub version: u64,
 }
 
 /// A session ends after `idle` without requests, and after 12 hours at most.
@@ -710,7 +866,13 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    pub fn create(&mut self, user: &str, ip: IpAddr, pending_code: bool) -> (String, Session) {
+    pub fn create(
+        &mut self,
+        user: &str,
+        ip: IpAddr,
+        pending_code: bool,
+        version: u64,
+    ) -> (String, Session) {
         let token = hex(&random_bytes::<32>());
         let session = Session {
             user: user.to_string(),
@@ -719,6 +881,7 @@ impl Sessions {
             started: Instant::now(),
             last_seen: Instant::now(),
             pending_code,
+            version,
         };
         self.sessions.insert(token.clone(), session.clone());
         (token, session)
@@ -736,6 +899,14 @@ impl Sessions {
     pub fn finish_code(&mut self, token: &str) {
         if let Some(s) = self.sessions.get_mut(token) {
             s.pending_code = false;
+        }
+    }
+
+    /// After the user changed their own password or second factor: this
+    /// session goes on with the new version, the others end.
+    pub fn renew(&mut self, token: &str, version: u64) {
+        if let Some(s) = self.sessions.get_mut(token) {
+            s.version = version;
         }
     }
 
@@ -820,6 +991,75 @@ impl Limiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stale_save_does_not_undo_a_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let mut store = UserStore::default();
+        store.add("victim", "operator", "pw one").unwrap();
+        store.add("other", "viewer", "pw two").unwrap();
+        store.save(&config).unwrap();
+
+        // A sign-in loads, then checks the password for a while …
+        let mut signing_in = UserStore::load(&config);
+        // … meanwhile an administrator locks the account and removes another.
+        let mut admin = UserStore::load(&config);
+        admin.find_mut("victim").unwrap().disabled = true;
+        admin.users.retain(|u| u.name != "other");
+        admin.save(&config).unwrap();
+        // The sign-in saves what it changed: only the time.
+        signing_in.find_mut("victim").unwrap().last_sign_in = Some(Utc::now());
+        signing_in.save(&config).unwrap();
+
+        let now = UserStore::load(&config);
+        let victim = now.find("victim").unwrap();
+        assert!(victim.disabled, "the lock stays");
+        assert!(victim.last_sign_in.is_some());
+        assert_eq!(victim.session_version, 1, "locking ends sessions");
+        assert!(now.find("other").is_none(), "not brought back");
+    }
+
+    #[test]
+    fn parallel_saves_keep_every_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = std::sync::Arc::new(dir.path().join("config.toml"));
+        let mut store = UserStore::default();
+        store.add("victim", "operator", "pw").unwrap();
+        store.save(&config).unwrap();
+        let threads: Vec<_> = (0..12)
+            .map(|i| {
+                let config = config.clone();
+                std::thread::spawn(move || {
+                    let mut s = UserStore::load(&config);
+                    std::thread::sleep(Duration::from_millis(20 + i * 3));
+                    s.find_mut("victim").unwrap().last_sign_in = Some(Utc::now());
+                    s.save(&config).unwrap();
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(25));
+        let mut admin = UserStore::load(&config);
+        admin.find_mut("victim").unwrap().disabled = true;
+        admin.save(&config).unwrap();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert!(UserStore::load(&config).find("victim").unwrap().disabled);
+    }
+
+    #[test]
+    fn an_unreadable_user_file_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(file(&config), "{ broken").unwrap();
+        assert!(UserStore::try_load(&config).is_err());
+        let mut store = UserStore::load(&config);
+        assert!(store.users.is_empty());
+        store.add("new", "viewer", "pw").unwrap();
+        assert!(store.save(&config).is_err());
+        assert_eq!(std::fs::read_to_string(file(&config)).unwrap(), "{ broken");
+    }
 
     #[test]
     fn passwords_are_hashed_and_checked() {

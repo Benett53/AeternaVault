@@ -675,6 +675,77 @@ mod from_elsewhere {
         assert!(!list.entries.iter().any(|e| e.address == "192.0.2.77"));
     }
 
+    fn csrf_of(app: &WebApp, path: &str, from: &str, cookie: &str) -> String {
+        let page = app.handle(request("GET", path, from, Some(cookie), ""));
+        let html = String::from_utf8_lossy(&page.body).to_string();
+        html.split(r#"name="csrf" value=""#)
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn password_and_lock_changes_end_existing_sessions() {
+        let (_tmp, paths, app) = app(WebSettings::default());
+        let here = "127.0.0.1";
+        let first = sign_in(&app, here);
+        let second = sign_in(&app, here);
+        assert_eq!(
+            app.handle(request("GET", "/account", here, Some(&second), ""))
+                .status,
+            200
+        );
+
+        // Changing the own password: this session goes on, the other ends.
+        let csrf = csrf_of(&app, "/account", here, &first);
+        let r = app.handle(request(
+            "POST",
+            "/account/password",
+            here,
+            Some(&first),
+            &format!("csrf={csrf}&current=admin+password+1&new=another+password+2&again=another+password+2"),
+        ));
+        let renewed = header(&r, "set-cookie")
+            .map(|c| c.split(';').next().unwrap().to_string())
+            .unwrap_or(first.clone());
+        assert_eq!(
+            app.handle(request("GET", "/account", here, Some(&renewed), ""))
+                .status,
+            200
+        );
+        let other = app.handle(request("GET", "/account", here, Some(&second), ""));
+        assert_eq!(header(&other, "location"), Some("/login"));
+
+        // A new password set in another process (the command line) ends
+        // the sessions at their next request, without a restart.
+        let mut store = UserStore::load(&paths.config_file);
+        store.find_mut("admin").unwrap().password = users::hash_password("set by cli 3");
+        store.save(&paths.config_file).unwrap();
+        let after = app.handle(request("GET", "/account", here, Some(&renewed), ""));
+        assert_eq!(header(&after, "location"), Some("/login"));
+
+        // So does a second factor set up elsewhere.
+        let r = app.handle(request(
+            "POST",
+            "/login",
+            here,
+            None,
+            "user=admin&password=set+by+cli+3",
+        ));
+        let fresh = header(&r, "set-cookie")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let mut store = UserStore::load(&paths.config_file);
+        store.find_mut("admin").unwrap().totp = Some(users::new_totp_secret());
+        store.save(&paths.config_file).unwrap();
+        let after = app.handle(request("GET", "/", here, Some(&fresh), ""));
+        assert_eq!(header(&after, "location"), Some("/login"));
+    }
+
     #[test]
     fn an_address_with_many_wrong_sign_ins_is_blocked() {
         let (_tmp, paths, app) = app(WebSettings {

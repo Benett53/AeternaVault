@@ -193,6 +193,20 @@ impl WebApp {
             .collect()
     }
 
+    /// The session version of a user as it is in the file now.
+    fn current_version(&self, name: &str) -> u64 {
+        UserStore::load(&self.paths.config_file)
+            .find(name)
+            .map_or(0, |u| u.session_version)
+    }
+
+    /// After the user changed their own password or second factor: this
+    /// session continues, the user's other sessions end.
+    fn keep_session(&self, ctx: &Ctx<'_>) {
+        let version = self.current_version(&ctx.user.name);
+        lock(&self.sessions).renew(&ctx.token, version);
+    }
+
     /// Whether a user with these permissions needs a second factor.
     fn mfa_required(&self, perms: &[Permission]) -> bool {
         use super::access::MfaPolicy;
@@ -406,7 +420,13 @@ impl WebApp {
             return Response::redirect("/login/code");
         }
         let store = UserStore::load(&self.paths.config_file);
-        let Some(user) = store.find(&session.user).filter(|u| !u.disabled).cloned() else {
+        // A lock, a new password or second factor set since the sign-in
+        // (also by another process) ends the session.
+        let Some(user) = store
+            .find(&session.user)
+            .filter(|u| !u.disabled && u.session_version == session.version)
+            .cloned()
+        else {
             lock(&self.sessions).end(&token);
             return Response::redirect("/login");
         };
@@ -740,6 +760,16 @@ impl WebApp {
             failed("user is disabled");
             return self.login_page(req, en, Some(wrong));
         }
+        // The password check takes a moment: whatever changed meanwhile (a
+        // lock, a new password) counts, read again from the file.
+        let mut store = UserStore::load(&self.paths.config_file);
+        let Some(user) = store.find(&user.name).cloned().filter(|current| {
+            !current.disabled
+                && (current.source == UserSource::Directory || current.password == user.password)
+        }) else {
+            failed("locked or changed during the sign-in");
+            return self.login_page(req, en, Some(wrong));
+        };
         if store.role_permissions(&user.role).is_none() {
             failed("no role given yet");
             return self.login_page(
@@ -761,7 +791,8 @@ impl WebApp {
         let mfa = self.mfa_required(&store.permissions(&user));
         let factor = user.second_factor(mfa, self.settings.mfa_app, email_possible);
         let pending = factor.is_some();
-        let (token, _) = lock(&self.sessions).create(&user.name, req.peer, pending);
+        let (token, _) =
+            lock(&self.sessions).create(&user.name, req.peer, pending, user.session_version);
         if factor == Some(SecondFactor::Email)
             && let Err(err) = self.send_sign_in_code(&config, &token, &user, &from)
         {
@@ -841,6 +872,7 @@ impl WebApp {
                     must_change_password: false,
                     created: Utc::now(),
                     last_sign_in: None,
+                    session_version: 0,
                 };
                 store.users.push(user.clone());
                 audit::record(
@@ -1034,6 +1066,13 @@ impl WebApp {
         limiter.succeeded(&user_key);
         drop(limiter);
         lock(&self.email_codes).remove(&token);
+        let still_valid = store
+            .find(&session.user)
+            .is_some_and(|u| !u.disabled && u.session_version == session.version);
+        if !still_valid {
+            lock(&self.sessions).end(&token);
+            return Response::redirect("/login");
+        }
         lock(&self.sessions).finish_code(&token);
         if let Some(u) = store.find_mut(&session.user) {
             u.last_sign_in = Some(Utc::now());
@@ -3042,6 +3081,7 @@ impl WebApp {
         if let Err(err) = store.save(&self.paths.config_file) {
             return self.account(ctx, Some(&err.to_string()));
         }
+        self.keep_session(ctx);
         audit::record(
             &self.paths.config_file,
             ctx.record("email-codes-on")
@@ -3061,7 +3101,10 @@ impl WebApp {
         if let Some(user) = store.find_mut(&ctx.user.name) {
             user.email_codes = true;
         }
-        let _ = store.save(&self.paths.config_file);
+        if let Err(err) = store.save(&self.paths.config_file) {
+            return self.account(ctx, Some(&err.to_string()));
+        }
+        self.keep_session(ctx);
         audit::record(
             &self.paths.config_file,
             ctx.record("email-codes-on")
@@ -3091,7 +3134,10 @@ impl WebApp {
         if let Some(user) = store.find_mut(&ctx.user.name) {
             user.email_codes = false;
         }
-        let _ = store.save(&self.paths.config_file);
+        if let Err(err) = store.save(&self.paths.config_file) {
+            return self.account(ctx, Some(&err.to_string()));
+        }
+        self.keep_session(ctx);
         audit::record(&self.paths.config_file, ctx.record("email-codes-off"));
         Self::back(
             "/account",
@@ -3158,7 +3204,8 @@ impl WebApp {
             let keep = sessions.touch(&ctx.token, self.idle());
             sessions.end_user(&ctx.user.name);
             if keep.is_some() {
-                let (token, _) = sessions.create(&ctx.user.name, ctx.req.peer, false);
+                let version = self.current_version(&ctx.user.name);
+                let (token, _) = sessions.create(&ctx.user.name, ctx.req.peer, false, version);
                 audit::record(&self.paths.config_file, ctx.record("password-changed"));
                 let mut message = ctx.t("Password changed.", "Passwort geändert.").to_string();
                 if let Some(advice) = advice {
@@ -3204,6 +3251,7 @@ impl WebApp {
         if let Err(err) = store.save(&self.paths.config_file) {
             return self.account(ctx, Some(&err.to_string()));
         }
+        self.keep_session(ctx);
         lock(&self.pending_totp).remove(&key);
         audit::record(&self.paths.config_file, ctx.record("one-time-codes-on"));
         Self::back(
@@ -3230,7 +3278,10 @@ impl WebApp {
         if let Some(user) = store.find_mut(&ctx.user.name) {
             user.totp = None;
         }
-        let _ = store.save(&self.paths.config_file);
+        if let Err(err) = store.save(&self.paths.config_file) {
+            return self.account(ctx, Some(&err.to_string()));
+        }
+        self.keep_session(ctx);
         audit::record(&self.paths.config_file, ctx.record("one-time-codes-off"));
         Self::back(
             "/account",
