@@ -100,6 +100,10 @@ pub struct SnapshotHeader {
     /// Name of the backup job that made it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Id of that job, to decide who may see the backup in the web
+    /// interface (names can change and repeat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<String>,
     pub computer: String,
     pub user: String,
     pub mode: BackupMode,

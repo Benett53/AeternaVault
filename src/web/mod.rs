@@ -37,18 +37,32 @@ use crate::paths::AppPaths;
 pub trait Control: Send + Sync {
     /// Starts a job now (`None`: all ticked folders).
     fn run(&self, schedule: Option<String>) -> Result<(), String>;
-    /// The job running now and its progress.
-    fn running(&self) -> Option<(String, Progress)>;
-    fn cancel(&self);
+    /// The job running now: its id (`None`: all ticked folders), name and
+    /// progress.
+    fn running(&self) -> Option<RunningJob>;
+    /// Cancels the running job only if it is still `job`; `false` when
+    /// another one (or none) runs by now.
+    fn cancel(&self, job: Option<&str>) -> bool;
     /// The settings were changed over the web.
     fn config_changed(&self, config: &Config);
 }
+
+/// A job running now, as the web interface sees it.
+#[derive(Debug, Clone)]
+pub struct RunningJob {
+    pub job: Option<String>,
+    pub label: String,
+    pub progress: Progress,
+}
+
+/// The job a [`LocalRunner`] runs: id, name, progress, cancel.
+type LocalJob = (Option<String>, String, Progress, CancelToken);
 
 /// For `aeternavault-cli web serve`: runs jobs on threads of its own. The
 /// schedules themselves are run by the window or the systemd timer as usual.
 pub struct LocalRunner {
     paths: AppPaths,
-    running: Arc<Mutex<Option<(String, Progress, CancelToken)>>>,
+    running: Arc<Mutex<Option<LocalJob>>>,
 }
 
 impl LocalRunner {
@@ -81,7 +95,8 @@ impl Control for LocalRunner {
         let lang = crate::i18n::Lang::resolve(config.language);
         let label = crate::automatic::job_label(schedule.as_ref(), &config, lang);
         let cancel = CancelToken::default();
-        *slot = Some((label, Progress::default(), cancel.clone()));
+        let job = schedule.as_ref().map(|s| s.id.clone());
+        *slot = Some((job, label, Progress::default(), cancel.clone()));
         drop(slot);
         let (paths, running) = (self.paths.clone(), self.running.clone());
         std::thread::Builder::new()
@@ -97,7 +112,7 @@ impl Control for LocalRunner {
                         if let Some(slot) =
                             running.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
                         {
-                            slot.1 = progress.clone();
+                            slot.2 = progress.clone();
                         }
                     },
                     false,
@@ -108,20 +123,23 @@ impl Control for LocalRunner {
             .map_err(|e| e.to_string())
     }
 
-    fn running(&self) -> Option<(String, Progress)> {
+    fn running(&self) -> Option<RunningJob> {
         let slot = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        slot.as_ref()
-            .map(|(label, progress, _)| (label.clone(), progress.clone()))
+        slot.as_ref().map(|(job, label, progress, _)| RunningJob {
+            job: job.clone(),
+            label: label.clone(),
+            progress: progress.clone(),
+        })
     }
 
-    fn cancel(&self) {
-        if let Some((_, _, cancel)) = self
-            .running
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            cancel.cancel();
+    fn cancel(&self, job: Option<&str>) -> bool {
+        let slot = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        match slot.as_ref() {
+            Some((running, _, _, cancel)) if running.as_deref() == job => {
+                cancel.cancel();
+                true
+            }
+            _ => false,
         }
     }
 

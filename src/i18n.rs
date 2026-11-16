@@ -657,6 +657,7 @@ impl Lang {
                 bytes,
                 snapshot,
                 message,
+                ..
             } => {
                 let what = if !job.is_empty() {
                     pick(

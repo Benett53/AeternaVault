@@ -595,6 +595,7 @@ fn render_readme_screenshots() {
                 at: at(1, 5),
                 event: Event::Backup {
                     job: "Jeden Tag um 20:00 · Alles".into(),
+                    job_id: String::new(),
                     command_line: false,
                     outcome: Outcome::Complete,
                     files: 1284,
@@ -607,6 +608,7 @@ fn render_readme_screenshots() {
                 at: at(0, 4),
                 event: Event::Backup {
                     job: "Jeden Tag um 20:00 · Alles".into(),
+                    job_id: String::new(),
                     command_line: false,
                     outcome: Outcome::Skipped,
                     files: 0,

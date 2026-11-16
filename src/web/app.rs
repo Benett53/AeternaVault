@@ -55,6 +55,8 @@ pub fn esc(text: &str) -> String {
 struct Check {
     backup: String,
     destination: PathBuf,
+    /// Job that made the backup (who may see the result).
+    job: Option<String>,
     by: String,
     started: DateTime<Utc>,
     result: Option<Result<VerifyReport, String>>,
@@ -470,7 +472,11 @@ impl WebApp {
             ("POST", "/logout") => self.logout(&ctx),
             ("GET", "/") => self.dashboard(&ctx),
             ("GET", "/backups") => self.backups(&ctx),
-            ("GET", "/activity") => self.activity(&ctx),
+            ("GET", "/activity")
+                if ctx.can(Permission::ViewActivity) || ctx.can(Permission::ViewSignIns) =>
+            {
+                self.activity(&ctx)
+            }
             ("GET", "/account") => self.account(&ctx, None),
             ("POST", "/account/password") => self.change_password(&ctx),
             ("POST", "/account/2fa/start") => self.totp_start(&ctx),
@@ -498,7 +504,9 @@ impl WebApp {
             }
             ("GET", "/audit") if ctx.can(Permission::ViewAudit) => self.audit_page(&ctx),
             ("GET", "/users") if ctx.can(Permission::ManageUsers) => self.users_page(&ctx),
-            ("GET", "/audit" | "/users" | "/access") | ("POST", _) => self.forbidden(&ctx),
+            ("GET", "/audit" | "/users" | "/access" | "/activity") | ("POST", _) => {
+                self.forbidden(&ctx)
+            }
             _ => self.not_found(&ctx),
         }
     }
@@ -509,8 +517,10 @@ impl WebApp {
         let mut nav = vec![
             ("/", ctx.t("Overview", "Übersicht")),
             ("/backups", ctx.t("Backups", "Sicherungen")),
-            ("/activity", ctx.t("Activity", "Verlauf")),
         ];
+        if ctx.can(Permission::ViewActivity) || ctx.can(Permission::ViewSignIns) {
+            nav.push(("/activity", ctx.t("Activity", "Verlauf")));
+        }
         if ctx.can(Permission::BlockAddresses) {
             nav.push(("/access", ctx.t("Access", "Zugriff")));
         }
@@ -1129,7 +1139,14 @@ impl WebApp {
         let mut body = Self::message(ctx);
 
         // Running now.
-        if let Some((label, progress)) = self.control.running() {
+        // Only a job the user may see; others run unseen.
+        if let Some(crate::web::RunningJob {
+            label, progress, ..
+        }) = self
+            .control
+            .running()
+            .filter(|r| ctx.user.may_use_job(r.job.as_deref()))
+        {
             let percent = (progress.bytes_done * 100)
                 .checked_div(progress.bytes_total)
                 .unwrap_or(0);
@@ -1173,23 +1190,18 @@ impl WebApp {
             .iter()
             .filter(|s| ctx.user.may_use_job(Some(&s.id)))
             .collect();
-        let labels: Option<std::collections::HashSet<String>> =
-            (!ctx.user.jobs.is_empty()).then(|| {
-                jobs.iter()
-                    .map(|s| crate::automatic::job_label(Some(s), config, lang))
-                    .collect()
-            });
+        let _ = &jobs;
         const DAYS: usize = 30;
         let today = Local::now().date_naive();
         let mut per_day = [(0u32, 0u32, 0u32); DAYS];
         let mut last_backup: Option<(DateTime<Utc>, crate::history::Outcome)> = None;
         for entry in crate::history::load(&self.paths.config_file) {
-            let crate::history::Event::Backup { job, outcome, .. } = &entry.event else {
-                continue;
-            };
-            if labels.as_ref().is_some_and(|l| !l.contains(job)) {
+            if !Self::entry_visible(ctx, &entry.event) {
                 continue;
             }
+            let crate::history::Event::Backup { outcome, .. } = &entry.event else {
+                continue;
+            };
             use crate::history::Outcome as O;
             if matches!(
                 outcome,
@@ -1466,7 +1478,11 @@ impl WebApp {
             let d = &c.destination;
             let reachable = snapshots::destination_reachable(d);
             let space = crate::platform::disk_space(d);
-            let list = snapshots::list(d, None).unwrap_or_default();
+            let list: Vec<_> = snapshots::list(d, None)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| Self::snapshot_visible(ctx, s.header.as_ref()))
+                .collect();
             let newest = list
                 .first()
                 .map(|s| {
@@ -1538,12 +1554,14 @@ impl WebApp {
         }
 
         // Recent activity.
-        body.push_str(&format!(
+        if ctx.can(Permission::ViewActivity) {
+            body.push_str(&format!(
             r#"<section class="card"><h2>{}</h2><div class="scroll">{}</div><p><a href="/activity">{} →</a></p></section>"#,
             ctx.t("Recent activity", "Letzte Aktivität"),
             self.activity_table(ctx, 8),
             ctx.t("All activity", "Gesamter Verlauf")
-        ));
+            ));
+        }
         self.page(ctx, ctx.t("Overview", "Übersicht"), &body, true)
     }
 
@@ -1640,6 +1658,7 @@ impl WebApp {
         let rows: String = entries
             .iter()
             .rev()
+            .filter(|e| Self::entry_visible(ctx, &e.event))
             .take(limit)
             .map(|entry| {
                 let (title, detail, severity) = lang.history_entry(&entry.event);
@@ -1667,14 +1686,43 @@ impl WebApp {
         }
     }
 
+    /// Whether a user sees an entry of the history: everything without a
+    /// limit to jobs; with one, only backups of those jobs (by job id; older
+    /// entries without one stay hidden).
+    fn entry_visible(ctx: &Ctx<'_>, event: &crate::history::Event) -> bool {
+        if ctx.user.jobs.is_empty() {
+            return true;
+        }
+        match event {
+            crate::history::Event::Backup { job_id, .. } => {
+                !job_id.is_empty() && ctx.user.may_use_job(Some(job_id))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a user sees a backup: everything without a limit to jobs;
+    /// with one, only backups made by those jobs.
+    fn snapshot_visible(
+        ctx: &Ctx<'_>,
+        header: Option<&crate::engine::manifest::SnapshotHeader>,
+    ) -> bool {
+        ctx.user.jobs.is_empty()
+            || header
+                .and_then(|h| h.job.as_deref())
+                .is_some_and(|job| ctx.user.may_use_job(Some(job)))
+    }
+
     pub fn active_sessions(&self) -> Vec<(String, IpAddr, Duration, Duration)> {
         lock(&self.sessions).active()
     }
 
     fn activity(&self, ctx: &Ctx<'_>) -> Response {
-        let sign_ins = ctx.req.query.get("tab").is_some_and(|t| t == "sign-ins");
+        // Without ViewActivity only the sign-ins (the route needs one of both).
+        let sign_ins = ctx.req.query.get("tab").is_some_and(|t| t == "sign-ins")
+            || !ctx.can(Permission::ViewActivity);
         let mut body = String::new();
-        if ctx.can(Permission::ViewSignIns) {
+        if ctx.can(Permission::ViewSignIns) && ctx.can(Permission::ViewActivity) {
             let current = |on: bool| if on { r#" aria-current="page""# } else { "" };
             body.push_str(&format!(
                 r#"<nav class="tabs"><a href="/activity"{}>{}</a><a href="/activity?tab=sign-ins"{}>{}</a></nav>"#,
@@ -2032,10 +2080,24 @@ impl WebApp {
     }
 
     fn job_cancel(&self, ctx: &Ctx<'_>) -> Response {
-        let Some((label, _)) = self.control.running() else {
+        let Some(running) = self.control.running() else {
             return Response::redirect("/");
         };
-        self.control.cancel();
+        // Only a job the user may use; and only that one, should another
+        // have started in between.
+        if !ctx.user.may_use_job(running.job.as_deref()) {
+            return self.forbidden(ctx);
+        }
+        let label = running.label;
+        if !self.control.cancel(running.job.as_deref()) {
+            return Self::back(
+                "/",
+                ctx.t(
+                    "This job is not running any more.",
+                    "Dieser Auftrag läuft nicht mehr.",
+                ),
+            );
+        }
         audit::record(
             &self.paths.config_file,
             ctx.record("job-cancel").target(label),
@@ -2130,10 +2192,17 @@ impl WebApp {
             body.push_str(&format!(r#"<nav class="tabs">{tabs}</nav>"#));
         }
 
-        // Checks started over the web.
+        // Checks started over the web: those of the user's destinations and,
+        // with a limit to jobs, of backups of those jobs.
+        let visible: Vec<&PathBuf> = destinations.iter().map(|c| &c.destination).collect();
         let checks = lock(&self.checks);
-        if !checks.is_empty() {
-            let rows: String = checks
+        let shown: Vec<&Check> = checks
+            .iter()
+            .filter(|c| visible.contains(&&c.destination))
+            .filter(|c| ctx.user.jobs.is_empty() || ctx.user.may_use_job(c.job.as_deref()))
+            .collect();
+        if !shown.is_empty() {
+            let rows: String = shown
                 .iter()
                 .rev()
                 .take(10)
@@ -2206,6 +2275,10 @@ impl WebApp {
             }
         };
         let operator = ctx.can(Permission::CheckBackups);
+        let list: Vec<_> = list
+            .into_iter()
+            .filter(|s| Self::snapshot_visible(ctx, s.header.as_ref()))
+            .collect();
         let rows: String = list
             .iter()
             .map(|s| {
@@ -2276,6 +2349,7 @@ impl WebApp {
         let Some(snapshot) = snapshots::list(&config.destination, key.as_ref())
             .ok()
             .and_then(|l| l.into_iter().find(|s| s.id == id))
+            .filter(|s| Self::snapshot_visible(ctx, s.header.as_ref()))
         else {
             return Self::back(
                 "/backups",
@@ -2299,6 +2373,7 @@ impl WebApp {
             checks.push(Check {
                 backup: id.clone(),
                 destination: config.destination.clone(),
+                job: snapshot.header.as_ref().and_then(|h| h.job.clone()),
                 by: ctx.user.name.clone(),
                 started: Utc::now(),
                 result: None,

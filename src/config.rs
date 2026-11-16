@@ -746,6 +746,9 @@ pub struct Config {
     /// Name for the next backup (set from a job, not saved).
     #[serde(skip)]
     pub backup_label: Option<String>,
+    /// Id of the job the next backup belongs to (set from a job, not saved).
+    #[serde(skip)]
+    pub backup_job: Option<String>,
     pub fonts: Fonts,
     #[serde(
         rename = "schedule",
@@ -779,6 +782,7 @@ impl Default for Config {
             features: Features::default(),
             logging: LoggingSettings::default(),
             backup_label: None,
+            backup_job: None,
             fonts: Fonts::default(),
             schedules: Vec::new(),
             sources: Vec::new(),
@@ -902,6 +906,7 @@ impl Config {
         }
         let name = schedule.name.trim();
         config.backup_label = (!name.is_empty()).then(|| name.to_string());
+        config.backup_job = Some(schedule.id.clone());
         if !schedule.all_folders {
             for source in &mut config.sources {
                 source.enabled = source.enabled

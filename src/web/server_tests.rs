@@ -565,6 +565,13 @@ mod from_elsewhere {
     use super::*;
 
     fn app(settings: WebSettings) -> (tempfile::TempDir, AppPaths, WebApp) {
+        app_with(settings, None)
+    }
+
+    fn app_with(
+        settings: WebSettings,
+        control: Option<Arc<dyn super::super::Control>>,
+    ) -> (tempfile::TempDir, AppPaths, WebApp) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = AppPaths {
             config_file: tmp.path().join("config.toml"),
@@ -582,10 +589,224 @@ mod from_elsewhere {
             paths.clone(),
             settings,
             Vec::new(),
-            Arc::new(LocalRunner::new(paths.clone())),
+            control.unwrap_or_else(|| Arc::new(LocalRunner::new(paths.clone()))),
         )
         .unwrap();
         (tmp, paths, app)
+    }
+
+    /// A job runs; cancelling is noted, nothing else happens.
+    struct Running {
+        job: Option<String>,
+        cancelled: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl super::super::Control for Running {
+        fn run(&self, _: Option<String>) -> Result<(), String> {
+            Ok(())
+        }
+        fn running(&self) -> Option<super::super::RunningJob> {
+            Some(super::super::RunningJob {
+                job: self.job.clone(),
+                label: format!("{}Job", self.job.as_deref().unwrap_or("All")),
+                progress: Default::default(),
+            })
+        }
+        fn cancel(&self, job: Option<&str>) -> bool {
+            let ok = job == self.job.as_deref();
+            if ok {
+                self.cancelled.lock().unwrap().push(job.map(str::to_string));
+            }
+            ok
+        }
+        fn config_changed(&self, _: &crate::config::Config) {}
+    }
+
+    /// Two jobs; `limited` may use only `allowed`.
+    fn two_jobs(paths: &AppPaths) {
+        let mut config = crate::config::Config::default();
+        for (id, name) in [
+            ("allowed", "AllowedJob"),
+            ("confidential", "ConfidentialJob"),
+        ] {
+            config.schedules.push(crate::config::Schedule {
+                id: id.into(),
+                name: name.into(),
+                ..Default::default()
+            });
+        }
+        config.save(&paths.config_file).unwrap();
+        let mut store = UserStore::load(&paths.config_file);
+        store
+            .add("limited", "operator", "limited password 1")
+            .unwrap();
+        store.find_mut("limited").unwrap().jobs = vec!["allowed".into()];
+        store
+            .set_role("runner", vec![super::super::users::Permission::RunJobs])
+            .unwrap();
+        store
+            .add("minimal", "runner", "minimal password 1")
+            .unwrap();
+        store.find_mut("minimal").unwrap().jobs = vec!["allowed".into()];
+        store.save(&paths.config_file).unwrap();
+    }
+
+    fn sign_in_as(app: &WebApp, from: &str, user: &str, password: &str) -> String {
+        let body = format!("user={user}&password={}", password.replace(' ', "+"));
+        let r = app.handle(request("POST", "/login", from, None, &body));
+        assert_eq!(r.status, 303, "{user}");
+        header(&r, "set-cookie")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn a_limited_user_cannot_see_or_cancel_another_job() {
+        let control = Arc::new(Running {
+            job: Some("confidential".into()),
+            cancelled: Default::default(),
+        });
+        let (_tmp, paths, app) = app_with(WebSettings::default(), Some(control.clone()));
+        two_jobs(&paths);
+        let here = "127.0.0.1";
+        let limited = sign_in_as(&app, here, "limited", "limited password 1");
+        let page = app.handle(request("GET", "/", here, Some(&limited), ""));
+        let html = String::from_utf8_lossy(&page.body).to_string();
+        assert!(
+            !html.contains("confidentialJob"),
+            "a job not shared is not shown running"
+        );
+        let csrf = csrf_of(&app, "/account", here, &limited);
+        let r = app.handle(request(
+            "POST",
+            "/jobs/cancel",
+            here,
+            Some(&limited),
+            &format!("csrf={csrf}"),
+        ));
+        assert_eq!(r.status, 403);
+        assert!(
+            control.cancelled.lock().unwrap().is_empty(),
+            "nothing was cancelled"
+        );
+
+        // The administrator may.
+        let admin = sign_in(&app, here);
+        let csrf = csrf_of(&app, "/account", here, &admin);
+        let r = app.handle(request(
+            "POST",
+            "/jobs/cancel",
+            here,
+            Some(&admin),
+            &format!("csrf={csrf}"),
+        ));
+        assert_eq!(r.status, 303);
+        assert_eq!(
+            *control.cancelled.lock().unwrap(),
+            vec![Some("confidential".to_string())]
+        );
+    }
+
+    #[test]
+    fn backups_of_a_shared_destination_follow_the_jobs() {
+        let (tmp, paths, app) = app(WebSettings::default());
+        two_jobs(&paths);
+        let source = tmp.path().join("Docs");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("letter.txt"), "Dear archive").unwrap();
+        let mut config = crate::config::load_or_create(&paths).config;
+        config.destination = tmp.path().join("Vault");
+        config.sources = vec![crate::config::Source::new("Docs", &source, true)];
+        config.save(&paths.config_file).unwrap();
+        for id in ["confidential", "allowed"] {
+            let schedule = config
+                .schedules
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .clone();
+            let (run, _) = crate::automatic::run_job(
+                &paths,
+                &config,
+                Some(&schedule),
+                None,
+                &crate::engine::CancelToken::default(),
+                &mut |_| {},
+                false,
+            );
+            assert!(run.outcome.is_success(), "{run:?}");
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+        let here = "127.0.0.1";
+        let limited = sign_in_as(&app, here, "limited", "limited password 1");
+        let html = String::from_utf8_lossy(
+            &app.handle(request("GET", "/backups", here, Some(&limited), ""))
+                .body,
+        )
+        .to_string();
+        assert!(html.contains("AllowedJob"), "{html}");
+        assert!(!html.contains("ConfidentialJob"));
+
+        let admin = sign_in(&app, here);
+        let html = String::from_utf8_lossy(
+            &app.handle(request("GET", "/backups", here, Some(&admin), ""))
+                .body,
+        )
+        .to_string();
+        assert!(html.contains("AllowedJob") && html.contains("ConfidentialJob"));
+    }
+
+    #[test]
+    fn activity_follows_the_role_and_the_jobs() {
+        let (_tmp, paths, app) = app(WebSettings::default());
+        two_jobs(&paths);
+        for (id, name) in [
+            ("confidential", "ConfidentialJob"),
+            ("allowed", "AllowedJob"),
+        ] {
+            crate::history::record(
+                &paths.config_file,
+                crate::history::Event::Backup {
+                    job: name.into(),
+                    job_id: id.into(),
+                    command_line: false,
+                    outcome: crate::history::Outcome::Complete,
+                    files: 1,
+                    bytes: 1,
+                    snapshot: String::new(),
+                    message: String::new(),
+                },
+            );
+        }
+        let here = "127.0.0.1";
+        // Without ViewActivity: no activity at all.
+        let minimal = sign_in_as(&app, here, "minimal", "minimal password 1");
+        assert_eq!(
+            app.handle(request("GET", "/activity", here, Some(&minimal), ""))
+                .status,
+            403
+        );
+        let overview = app.handle(request("GET", "/", here, Some(&minimal), ""));
+        assert!(!String::from_utf8_lossy(&overview.body).contains("ConfidentialJob"));
+
+        // With it, but limited to a job: only that job's entries.
+        let limited = sign_in_as(&app, here, "limited", "limited password 1");
+        let page = app.handle(request("GET", "/activity", here, Some(&limited), ""));
+        assert_eq!(page.status, 200);
+        let html = String::from_utf8_lossy(&page.body).to_string();
+        assert!(html.contains("AllowedJob"));
+        assert!(!html.contains("ConfidentialJob"));
+
+        let admin = sign_in(&app, here);
+        let html = String::from_utf8_lossy(
+            &app.handle(request("GET", "/activity", here, Some(&admin), ""))
+                .body,
+        )
+        .to_string();
+        assert!(html.contains("ConfidentialJob"));
     }
 
     fn request(method: &str, path: &str, from: &str, cookie: Option<&str>, body: &str) -> Request {

@@ -222,6 +222,7 @@ mod tests {
                 app_version: String::new(),
                 id: format!("s{id:03}"),
                 label: None,
+                job: None,
                 computer: "PC".into(),
                 user: String::new(),
                 mode: crate::config::BackupMode::Incremental,

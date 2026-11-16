@@ -408,6 +408,7 @@ pub fn run_backup(
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         id: id.clone(),
         label: plan.label.clone(),
+        job: plan.job.clone(),
         computer: plan.computer.clone(),
         user: platform::user_name(),
         mode: plan.mode,

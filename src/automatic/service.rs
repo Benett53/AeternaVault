@@ -36,6 +36,8 @@ pub enum Event {
 
 #[derive(Debug, Clone)]
 pub struct Running {
+    /// Id of the job (`None`: all ticked folders).
+    pub job: Option<String>,
     pub label: String,
     pub progress: Progress,
     pub cancel: CancelToken,
@@ -204,15 +206,24 @@ impl crate::web::Control for ServiceHandle {
         Ok(())
     }
 
-    fn running(&self) -> Option<(String, Progress)> {
+    fn running(&self) -> Option<crate::web::RunningJob> {
         lock(&self.shared.running)
             .as_ref()
-            .map(|r| (r.label.clone(), r.progress.clone()))
+            .map(|r| crate::web::RunningJob {
+                job: r.job.clone(),
+                label: r.label.clone(),
+                progress: r.progress.clone(),
+            })
     }
 
-    fn cancel(&self) {
-        if let Some(running) = lock(&self.shared.running).as_ref() {
-            running.cancel.cancel();
+    fn cancel(&self, job: Option<&str>) -> bool {
+        let running = lock(&self.shared.running);
+        match running.as_ref() {
+            Some(r) if r.job.as_deref() == job => {
+                r.cancel.cancel();
+                true
+            }
+            _ => false,
         }
     }
 
@@ -319,6 +330,7 @@ fn check_and_run(shared: &Shared) {
     let label = super::job_label(schedule.as_ref(), &config, lang);
     let cancel = CancelToken::default();
     *lock(&shared.running) = Some(Running {
+        job: schedule.as_ref().map(|s| s.id.clone()),
         label: label.clone(),
         progress: Progress::default(),
         cancel: cancel.clone(),

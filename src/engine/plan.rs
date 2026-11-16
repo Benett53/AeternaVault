@@ -154,6 +154,8 @@ pub struct BackupPlan {
     pub mode: BackupMode,
     /// Name stored with the backup (the job's name).
     pub label: Option<String>,
+    /// Id of the job that makes it (`None`: started by hand).
+    pub job: Option<String>,
     pub flush_to_disk: bool,
     pub destination: PathBuf,
     pub computer: String,
@@ -316,6 +318,7 @@ pub fn plan_backup(
                 config.advanced.health_check_days,
             ),
         label: config.backup_label.clone(),
+        job: config.backup_job.clone(),
         flush_to_disk: config.advanced.flush_to_disk,
         sources: Vec::new(),
         items: Vec::new(),

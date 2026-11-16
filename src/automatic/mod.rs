@@ -199,11 +199,13 @@ pub fn record_run(
     run: &AutomaticRun,
     report: Option<&BackupReport>,
     command_line: bool,
+    job_id: Option<&str>,
 ) {
     crate::history::record(
         config_file,
         crate::history::Event::Backup {
             job: run.schedule.clone(),
+            job_id: job_id.unwrap_or_default().to_string(),
             command_line,
             outcome: crate::history::Outcome::from_automatic(run.outcome),
             files: run.files,
@@ -332,7 +334,13 @@ pub fn run_job(
         }
     });
     if record {
-        record_run(&paths.config_file, &run, report.as_ref(), command_line);
+        record_run(
+            &paths.config_file,
+            &run,
+            report.as_ref(),
+            command_line,
+            schedule.map(|s| s.id.as_str()),
+        );
         // With the job's own destination: its name and its free space.
         crate::notify::after_run(&run_config, &run, report.as_ref());
         crate::notify::check_drive_health(&paths.config_file, &run_config);

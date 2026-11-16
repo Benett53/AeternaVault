@@ -85,6 +85,10 @@ pub enum Event {
         /// Name of the job for automatic backups; empty when started by hand.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         job: String,
+        /// Id of that job, to decide who may see the entry in the web
+        /// interface.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        job_id: String,
         #[serde(default)]
         command_line: bool,
         outcome: Outcome,
@@ -185,6 +189,7 @@ pub fn backup_event(
             let stats = report.total_stats();
             Event::Backup {
                 job: String::new(),
+                job_id: String::new(),
                 command_line,
                 outcome: Outcome::from_status(report.header.status),
                 files: stats.files,
@@ -199,6 +204,7 @@ pub fn backup_event(
         }
         Err(err) => Event::Backup {
             job: String::new(),
+            job_id: String::new(),
             command_line,
             outcome: if matches!(err, crate::error::EngineError::Cancelled) {
                 Outcome::Cancelled
@@ -322,6 +328,7 @@ mod tests {
             &config,
             Event::Backup {
                 job: String::new(),
+                job_id: String::new(),
                 command_line: false,
                 outcome: Outcome::Complete,
                 files: 3,
